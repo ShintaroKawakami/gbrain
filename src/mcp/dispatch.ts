@@ -306,6 +306,12 @@ export async function dispatchToolCall(
         isError: true,
       };
     }
+    if (!opts.auth && opts.transport !== 'stdio') {
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ error: 'permission_denied', message: 'Invalid or missing authentication kind for remote caller' }, null, 2) }],
+        isError: true,
+      };
+    }
     if (opts.auth) {
       const kind = opts.auth.authKind;
       if (kind !== 'oauth' && kind !== 'legacy_bearer') {

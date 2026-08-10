@@ -5621,13 +5621,19 @@ export const MIGRATIONS: Migration[] = [
   {
     version: 126,
     name: 'oauth_clients_pending_approval_state',
-    idempotent: true,
+    idempotent: false,
     sql: `
       ALTER TABLE oauth_clients ADD COLUMN IF NOT EXISTS approval_state TEXT;
-      UPDATE oauth_clients SET approval_state = 'pending', scope = NULL, source_id = NULL, federated_read = '{}'::text[];
+      UPDATE oauth_clients
+        SET approval_state = 'pending', scope = NULL, source_id = NULL, federated_read = '{}'::text[]
+        WHERE approval_state IS NULL;
       ALTER TABLE oauth_clients ALTER COLUMN approval_state SET NOT NULL;
-      DELETE FROM oauth_tokens WHERE client_id IN (SELECT client_id FROM oauth_clients);
-      DELETE FROM oauth_codes WHERE client_id IN (SELECT client_id FROM oauth_clients);
+      DELETE FROM oauth_tokens WHERE client_id IN (
+        SELECT client_id FROM oauth_clients WHERE approval_state = 'pending'
+      );
+      DELETE FROM oauth_codes WHERE client_id IN (
+        SELECT client_id FROM oauth_clients WHERE approval_state = 'pending'
+      );
       ALTER TABLE oauth_clients DROP CONSTRAINT IF EXISTS chk_oauth_clients_approval;
       ALTER TABLE oauth_clients ADD CONSTRAINT chk_oauth_clients_approval CHECK (
         (approval_state = 'pending' AND (scope IS NULL OR scope = '') AND source_id IS NULL AND (federated_read = '{}'::text[] OR cardinality(federated_read) = 0))

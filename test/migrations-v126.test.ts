@@ -23,12 +23,19 @@ describe('Migration v126: OAuth Clients Pending Approval State', () => {
     // Seed sources (default already inserted by PGLITE_SCHEMA_SQL)
     await sqlAdapter`INSERT INTO sources (id, name) VALUES ('src2', 'Source 2') ON CONFLICT (id) DO NOTHING`;
 
+    // Recreate the pre-v126 table shape. Fresh schema already contains the
+    // new column, so leaving it in place would not exercise the real upgrade.
+    await db.exec(`
+      ALTER TABLE oauth_clients DROP CONSTRAINT IF EXISTS chk_oauth_clients_approval;
+      ALTER TABLE oauth_clients DROP COLUMN approval_state;
+    `);
+
     // Seed clients in pre-v126 state
     await sqlAdapter`
-      INSERT INTO oauth_clients (client_id, client_name, redirect_uris, grant_types, scope, source_id, federated_read, approval_state)
-      VALUES 
-        ('client1', 'Client One', ${['https://app1.example/cb']}, ${['authorization_code']}, 'read write', 'default', ${['default']}, 'approved'),
-        ('client2', 'Client Two', ${['https://app2.example/cb']}, ${['client_credentials']}, 'read', 'src2', ${['src2', 'default']}, 'approved')
+      INSERT INTO oauth_clients (client_id, client_name, redirect_uris, grant_types, scope, source_id, federated_read)
+      VALUES
+        ('client1', 'Client One', ${['https://app1.example/cb']}, ${['authorization_code']}, 'read write', 'default', ${['default']}),
+        ('client2', 'Client Two', ${['https://app2.example/cb']}, ${['client_credentials']}, 'read', 'src2', ${['src2', 'default']})
     `;
 
     // Seed tokens and codes
@@ -66,6 +73,39 @@ describe('Migration v126: OAuth Clients Pending Approval State', () => {
 
     const codes = await sqlAdapter`SELECT * FROM oauth_codes`;
     expect(codes).toHaveLength(0);
+  });
+
+  test('re-running v126 does not reset approved clients or delete their credentials', async () => {
+    const m126 = MIGRATIONS.find(m => m.version === 126)!;
+    expect(m126.idempotent).toBe(false);
+
+    await sqlAdapter`
+      INSERT INTO oauth_clients (client_id, client_name, approval_state, scope, source_id, federated_read)
+      VALUES ('approved_retry', 'Approved Retry', 'approved', 'read', 'default', ${['default']})
+    `;
+    const now = Math.floor(Date.now() / 1000) + 3600;
+    await sqlAdapter`
+      INSERT INTO oauth_tokens (token_hash, token_type, client_id, scopes, expires_at)
+      VALUES ('approved_hash', 'access', 'approved_retry', ${['read']}, ${now})
+    `;
+    await sqlAdapter`
+      INSERT INTO oauth_codes (code_hash, client_id, scopes, code_challenge, code_challenge_method, redirect_uri, expires_at)
+      VALUES ('approved_code', 'approved_retry', ${['read']}, 'challenge', 'S256', 'https://approved.example/cb', ${now})
+    `;
+
+    await db.exec(m126.sql);
+
+    const clients = await sqlAdapter`
+      SELECT approval_state, scope, source_id, federated_read
+      FROM oauth_clients WHERE client_id = 'approved_retry'
+    `;
+    expect(clients[0]).toMatchObject({
+      approval_state: 'approved',
+      scope: 'read',
+      source_id: 'default',
+    });
+    expect(await sqlAdapter`SELECT token_hash FROM oauth_tokens WHERE client_id = 'approved_retry'`).toHaveLength(1);
+    expect(await sqlAdapter`SELECT code_hash FROM oauth_codes WHERE client_id = 'approved_retry'`).toHaveLength(1);
   });
 
   test('chk_oauth_clients_approval CHECK constraint prevents invalid states', async () => {

@@ -143,7 +143,7 @@ describe('OAuth DCR Pending Approval Hardening & Shared Dispatch', () => {
 
     // Exchange tokens (receives token with scope 'read write')
     const tokens = await provider.exchangeClientCredentials(reg.clientId, reg.clientSecret!);
-    
+
     // Initial verification has 'read write'
     const auth1 = await provider.verifyAccessToken(tokens.access_token);
     expect(auth1.scopes).toEqual(['read', 'write']);
@@ -178,6 +178,30 @@ describe('OAuth DCR Pending Approval Hardening & Shared Dispatch', () => {
     const parsed = JSON.parse(res.content[0].text);
     expect(parsed.error).toBe('permission_denied');
     expect(parsed.message).toContain('approval_pending');
+
+    await engine.disconnect();
+  });
+
+  test('Shared dispatch rejects unauthenticated remote but preserves explicit stdio', async () => {
+    const engine = await createEngine({ engine: 'pglite' });
+
+    const unauthenticated = await dispatchToolCall(
+      engine,
+      'get_stats',
+      {},
+      { remote: true, sourceId: 'default' },
+    );
+    expect(unauthenticated.isError).toBe(true);
+    expect(JSON.parse(unauthenticated.content[0].text).error).toBe('permission_denied');
+
+    const stdio = await dispatchToolCall(
+      engine,
+      'whoami',
+      {},
+      { remote: true, transport: 'stdio', sourceId: 'default' },
+    );
+    expect(stdio.isError).not.toBe(true);
+    expect(JSON.parse(stdio.content[0].text).transport).toBe('stdio');
 
     await engine.disconnect();
   });
