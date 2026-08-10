@@ -192,6 +192,16 @@ describe('rescopeClient', () => {
       token_endpoint_auth_method: 'client_secret_post',
     } as any);
     const clientId = dcr.client_id;
+    await dcrProvider.approvePendingClient({
+      clientId,
+      expectedRedirectUris: [],
+      expectedTokenEndpointAuthMethod: 'client_secret_post',
+      expectedGrantTypes: ['client_credentials'],
+      scopes: 'read',
+      sourceId: 'default',
+      federatedRead: ['default'],
+    });
+
     const [before] = await sql`SELECT source_id, federated_read FROM oauth_clients WHERE client_id = ${clientId}`;
     expect(before.source_id).toBe('default');
     expect(before.federated_read).toEqual(['default']);
@@ -215,13 +225,13 @@ describe('rescopeClient', () => {
     const { clientId } = await provider.registerClientManual(
       'partial-rescope', ['client_credentials'], 'read', [], 'alpha', ['alpha', 'beta'],
     );
-    const result = await provider.rescopeClient(clientId, { federatedRead: ['beta'] });
+    const result = await provider.rescopeClient(clientId, { federatedRead: ['alpha', 'beta', 'gamma'] });
     expect(result.sourceId).toBe('alpha'); // untouched
-    expect(result.federatedRead).toEqual(['beta']);
+    expect(result.federatedRead).toEqual(['alpha', 'beta', 'gamma']);
 
     const result2 = await provider.rescopeClient(clientId, { sourceId: 'gamma' });
     expect(result2.sourceId).toBe('gamma');
-    expect(result2.federatedRead).toEqual(['beta']); // untouched
+    expect(result2.federatedRead).toEqual(['alpha', 'beta', 'gamma']); // untouched
   });
 
   test('rejects invalid source ids, empty federated list, no-op calls, unknown client', async () => {
@@ -249,7 +259,7 @@ describe('rescopeClient', () => {
     )).rejects.toThrow('non-empty');
     await expect(provider.rescopeClient('gbrain_cl_nonexistent', { sourceId: 'wiki' })).rejects.toThrow('No OAuth client found');
     // FK: write source must exist in sources(id).
-    await expect(provider.rescopeClient(clientId, { sourceId: 'no-such-source' })).rejects.toThrow('does not exist');
+    await expect(provider.rescopeClient(clientId, { sourceId: 'no-such-source', federatedRead: ['no-such-source'] })).rejects.toThrow('does not exist');
 
     // Validation failures must not have mutated the row.
     const [row] = await sql`SELECT source_id FROM oauth_clients WHERE client_id = ${clientId}`;
@@ -278,7 +288,7 @@ describe('rescopeClient', () => {
     // Rescoping another axis leaves the binding untouched — and doesn't even
     // name the column, so brains predating it can still rescope --source.
     // `undefined` here means "not read this call", distinct from null = unset.
-    const other = await provider.rescopeClient(clientId, { federatedRead: ['alpha'] });
+    const other = await provider.rescopeClient(clientId, { federatedRead: ['default', 'alpha'] });
     expect(other.boundSlugPrefixes).toBeUndefined();
     const stillBound = await provider.verifyAccessToken(tokens.access_token) as unknown as CoreAuthInfo;
     expect(stillBound.boundSlugPrefixes).toEqual(['emp-carol/', 'chan-eng/']);
@@ -1290,24 +1300,10 @@ describe('F5 verifyAccessToken / client_credentials column probes', () => {
   test('non-schema SQL failures are not swallowed by client credentials soft-delete probe', async () => {
     // Synthesize a non-schema error (SQLSTATE 57P01 = admin_shutdown) and
     // make sure the catch block re-throws instead of silently treating
-    // the client as not-revoked. Without the predicate this throw used to
-    // disappear into the void.
+    // the client as not-revoked.
     const sqlFailure = Object.assign(new Error('database session failed'), { code: '57P01' });
-    const fakeSql = async (strings: TemplateStringsArray): Promise<Record<string, unknown>[]> => {
-      const query = strings.join('$');
-      if (query.includes('SELECT client_id, client_secret_hash')) {
-        return [{
-          client_id: 'gbrain_cl_fake',
-          client_secret_hash: hashToken('secret'),
-          client_name: 'fake',
-          redirect_uris: [],
-          grant_types: ['client_credentials'],
-          scope: 'read',
-          client_id_issued_at: 1,
-        }];
-      }
-      if (query.includes('SELECT deleted_at')) throw sqlFailure;
-      return [];
+    const fakeSql = async (): Promise<Record<string, unknown>[]> => {
+      throw sqlFailure;
     };
     const failingProvider = new GBrainOAuthProvider({ sql: fakeSql as any });
 
@@ -1553,6 +1549,16 @@ describe('PKCE DCR public-client gate (#909)', () => {
       grant_types: ['authorization_code'],
       scope: 'read',
       token_endpoint_auth_method: 'none',
+    });
+
+    await provider.approvePendingClient({
+      clientId: reg.client_id,
+      expectedRedirectUris: ['http://localhost:3000/callback'],
+      expectedTokenEndpointAuthMethod: 'none',
+      expectedGrantTypes: ['authorization_code'],
+      scopes: 'read',
+      sourceId: 'default',
+      federatedRead: ['default'],
     });
 
     // Re-fetch via getClient to mirror what the SDK middleware sees.

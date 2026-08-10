@@ -709,6 +709,15 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     allowClientCredentialsDcr: enableDcrInsecure === true,
   });
 
+  // Probe approval_state schema before starting server (Issue #1553 prevention)
+  try {
+    await sql`SELECT approval_state FROM oauth_clients LIMIT 1`;
+  } catch (err) {
+    console.error('[serve-http] FATAL: Schema migration required. Column oauth_clients.approval_state is missing.');
+    console.error('Run `gbrain apply-migrations --yes` before starting HTTP/OAuth server.');
+    process.exit(1);
+  }
+
   // #1353: loud stderr security WARN when DCR is enabled. DCR is an
   // unauthenticated network registration endpoint; surface the posture change
   // (and the extra blast radius of --enable-dcr-insecure) so it's visible in

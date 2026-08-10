@@ -298,6 +298,31 @@ export async function dispatchToolCall(
     };
   }
 
+  // Remote callers must arrive with a resolved source scope and valid approved auth.
+  if (opts.remote ?? true) {
+    if (!opts.sourceId) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ error: 'missing_source_scope', message: `Remote tool call '${name}' carries no resolved sourceId; refusing the shared 'default' source fallback. Pass an explicit sourceId resolved from the caller's grant.` }, null, 2) }],
+        isError: true,
+      };
+    }
+    if (opts.auth) {
+      const kind = opts.auth.authKind;
+      if (kind !== 'oauth' && kind !== 'legacy_bearer') {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: 'permission_denied', message: 'Invalid or missing authentication kind for remote caller' }, null, 2) }],
+          isError: true,
+        };
+      }
+      if (kind === 'oauth' && opts.auth.approvalState !== 'approved') {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: 'permission_denied', message: 'approval_pending: OAuth client is pending operator approval' }, null, 2) }],
+          isError: true,
+        };
+      }
+    }
+  }
+
   const safeParams = params || {};
   const validationError = validateParams(op, safeParams);
   if (validationError) {
@@ -314,21 +339,6 @@ export async function dispatchToolCall(
       : { error: 'invalid_params', message: validationError };
     return {
       content: [{ type: 'text', text: JSON.stringify(envelope, null, 2) }],
-      isError: true,
-    };
-  }
-
-  // Remote callers must arrive with a resolved source scope. Every shipped
-  // transport passes sourceId explicitly (serve-http from the OAuth client
-  // row, http-transport from the legacy token grant, stdio from
-  // GBRAIN_SOURCE); a remote call reaching the 'default' fallback means a
-  // programmatic caller skipped scope resolution, and silently landing in
-  // the shared 'default' source is the cross-source leak class behind
-  // #1924 / #1371. Trusted local callers (remote === false) keep the
-  // historical fallback via buildOperationContext.
-  if ((opts.remote ?? true) && !opts.sourceId) {
-    return {
-      content: [{ type: 'text', text: JSON.stringify({ error: 'missing_source_scope', message: `Remote tool call '${name}' carries no resolved sourceId; refusing the shared 'default' source fallback. Pass an explicit sourceId resolved from the caller's grant.` }, null, 2) }],
       isError: true,
     };
   }

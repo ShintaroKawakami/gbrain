@@ -604,6 +604,108 @@ export function parseAuthCreateArgs(rest: string[]): { name: string; takesHolder
   return { name: positional || '', takesHolders };
 }
 
+async function approveClient(args: string[]) {
+  const usage = 'Usage: gbrain auth approve-client --client-id-file <path> --expected-redirect-uri <uri> --expected-token-endpoint-auth-method <method> --expected-grant-types <types> --scopes <scopes> --source <source_id> --federated-read <sources>';
+
+  let clientIdFile: string | undefined;
+  let expectedRedirectUris: string[] = [];
+  let expectedTokenEndpointAuthMethod: string | undefined;
+  let expectedGrantTypes: string[] = [];
+  let scopes: string | undefined;
+  let sourceId: string | undefined;
+  let federatedRead: string[] | undefined;
+
+  let i = 0;
+  while (i < args.length) {
+    const flag = args[i];
+    const value = args[i + 1];
+    const requireValue = () => {
+      if (value === undefined || value.startsWith('--')) {
+        throw new Error(`${flag} requires a value`);
+      }
+      return value;
+    };
+
+    switch (flag) {
+      case '--client-id-file':
+        clientIdFile = requireValue();
+        i += 2;
+        break;
+      case '--expected-redirect-uri':
+        expectedRedirectUris.push(requireValue());
+        i += 2;
+        break;
+      case '--expected-token-endpoint-auth-method':
+        expectedTokenEndpointAuthMethod = requireValue();
+        i += 2;
+        break;
+      case '--expected-grant-types': {
+        const v = requireValue();
+        expectedGrantTypes = v.split(',').map(s => s.trim()).filter(Boolean);
+        i += 2;
+        break;
+      }
+      case '--scopes':
+        scopes = requireValue();
+        i += 2;
+        break;
+      case '--source':
+        sourceId = requireValue();
+        i += 2;
+        break;
+      case '--federated-read': {
+        const v = requireValue();
+        federatedRead = v.split(',').map(s => s.trim()).filter(Boolean);
+        i += 2;
+        break;
+      }
+      default:
+        throw new Error(`Unknown flag: ${flag}`);
+    }
+  }
+
+  if (!clientIdFile || !expectedTokenEndpointAuthMethod || expectedGrantTypes.length === 0 || !scopes || !sourceId || !federatedRead) {
+    console.error('Error: missing required approval flags.');
+    console.error(usage);
+    process.exit(1);
+  }
+
+  let clientId: string;
+  try {
+    const { statSync, readFileSync } = await import('fs');
+    const stat = statSync(clientIdFile);
+    if ((stat.mode & 0o077) !== 0) {
+      console.error('Error: --client-id-file permissions must be 0600 (owner read/write only)');
+      process.exit(1);
+    }
+    clientId = readFileSync(clientIdFile, 'utf-8').trim();
+    if (!clientId) throw new Error('File is empty');
+  } catch (e: any) {
+    console.error(`Error reading client-id file: ${e.message}`);
+    process.exit(1);
+  }
+
+  try {
+    await withConfiguredSql(async (sql) => {
+      const { GBrainOAuthProvider } = await import('../core/oauth-provider.ts');
+      const provider = new GBrainOAuthProvider({ sql });
+      await provider.approvePendingClient({
+        clientId,
+        expectedRedirectUris,
+        expectedTokenEndpointAuthMethod,
+        expectedGrantTypes,
+        scopes,
+        sourceId,
+        federatedRead,
+      });
+      console.log('OAuth client approved successfully.');
+    });
+  } catch (e: any) {
+    console.error('Error:', e.message);
+    process.exit(1);
+  }
+}
+
 export async function runAuth(args: string[]): Promise<void> {
   const [cmd, ...rest] = args;
   switch (cmd) {
@@ -621,6 +723,7 @@ export async function runAuth(args: string[]): Promise<void> {
       return;
     }
     case 'register-client': await registerClient(rest[0], rest.slice(1)); return;
+    case 'approve-client': await approveClient(rest); return;
     case 'rescope-client': await rescopeClient(rest[0], rest.slice(1)); return;
     case 'revoke-client': await revokeClient(rest[0]); return;
     case 'test': {

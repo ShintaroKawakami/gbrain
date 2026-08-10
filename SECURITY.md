@@ -38,10 +38,7 @@ enforced structurally by actionlint on every workflow change.
 
 GBrain disables Dynamic Client Registration (DCR) by default. Keep that
 default for internet-reachable deployments and pre-register trusted clients
-with operator-approved scopes and source access. Enabling DCR lets network
-callers create OAuth client records, so use it only when the deployment's
-trust model requires self-service registration and browser approval remains
-part of the authorization flow.
+with operator-approved scopes and source access. When DCR is enabled, newly registered OAuth clients enter a fail-closed pending approval state with zero scopes and no source access. Pending clients cannot be issued authorization codes or tokens until an operator approves them using `gbrain auth approve-client` with exact metadata matching and explicit policy axes (OAuth scopes, write source, and read federated sources).
 
 Do not enable `--enable-dcr-insecure` on an untrusted network. That option is
 reserved for deployments that intentionally allow self-registered

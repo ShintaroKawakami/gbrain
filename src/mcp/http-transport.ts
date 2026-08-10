@@ -243,6 +243,7 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
         scopes: [],
         sourceId,
         ...(allowedSources ? { allowedSources } : {}),
+        authKind: 'legacy_bearer',
       };
       return {
         ok: true,

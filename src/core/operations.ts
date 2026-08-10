@@ -479,6 +479,8 @@ export interface Logger {
 export interface AuthInfo {
   token: string;
   clientId: string;
+  authKind?: 'oauth' | 'legacy_bearer';
+  approvalState?: 'pending' | 'approved';
   /**
    * Human-readable agent name resolved at token-verification time.
    * For OAuth clients this is `oauth_clients.client_name`; for legacy

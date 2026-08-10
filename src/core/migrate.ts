@@ -5618,6 +5618,24 @@ export const MIGRATIONS: Migration[] = [
         ON take_proposals (source_id, page_slug, content_hash, prompt_version, md5(claim_text));
     `,
   },
+  {
+    version: 126,
+    name: 'oauth_clients_pending_approval_state',
+    idempotent: true,
+    sql: `
+      ALTER TABLE oauth_clients ADD COLUMN IF NOT EXISTS approval_state TEXT;
+      UPDATE oauth_clients SET approval_state = 'pending', scope = NULL, source_id = NULL, federated_read = '{}'::text[];
+      ALTER TABLE oauth_clients ALTER COLUMN approval_state SET NOT NULL;
+      DELETE FROM oauth_tokens WHERE client_id IN (SELECT client_id FROM oauth_clients);
+      DELETE FROM oauth_codes WHERE client_id IN (SELECT client_id FROM oauth_clients);
+      ALTER TABLE oauth_clients DROP CONSTRAINT IF EXISTS chk_oauth_clients_approval;
+      ALTER TABLE oauth_clients ADD CONSTRAINT chk_oauth_clients_approval CHECK (
+        (approval_state = 'pending' AND (scope IS NULL OR scope = '') AND source_id IS NULL AND (federated_read = '{}'::text[] OR cardinality(federated_read) = 0))
+        OR
+        (approval_state = 'approved' AND (scope IS NOT NULL AND scope <> '') AND source_id IS NOT NULL AND cardinality(federated_read) > 0 AND source_id = ANY(federated_read))
+      );
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

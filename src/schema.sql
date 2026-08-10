@@ -653,6 +653,7 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
   deleted_at              TIMESTAMPTZ,
   source_id               TEXT REFERENCES sources(id) ON DELETE RESTRICT,
   federated_read          TEXT[] NOT NULL DEFAULT '{}',
+  approval_state          TEXT NOT NULL,
   -- v0.38 Slice 2 + 3: per-client daily budget cap (v84) + agent binding (v85).
   budget_usd_per_day      NUMERIC(10, 2) NULL,
   bound_tools             TEXT[] NULL,
@@ -660,7 +661,12 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
   bound_brain_id          TEXT NULL,
   bound_slug_prefixes     TEXT[] NULL,
   bound_max_concurrent    INTEGER NOT NULL DEFAULT 1,
-  created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT chk_oauth_clients_approval CHECK (
+    (approval_state = 'pending' AND (scope IS NULL OR scope = '') AND source_id IS NULL AND (federated_read = '{}'::text[] OR cardinality(federated_read) = 0))
+    OR
+    (approval_state = 'approved' AND (scope IS NOT NULL AND scope <> '') AND source_id IS NOT NULL AND cardinality(federated_read) > 0 AND source_id = ANY(federated_read))
+  )
 );
 -- v0.34.1 (#861, D13 + #876): source_id is the write-source scope;
 -- federated_read is the read-source array. Migrations v60-v65 land both

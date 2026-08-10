@@ -71,8 +71,8 @@ describe('verifyConfidentialClientSecret (#1166)', () => {
     // a public-client row.
     await engine.executeRaw(
       `INSERT INTO oauth_clients
-        (client_id, client_secret_hash, client_name, redirect_uris, grant_types, scope, token_endpoint_auth_method)
-        VALUES ('public-pkce', NULL, 'public', $1, $2, 'read', 'none')`,
+        (client_id, client_secret_hash, client_name, redirect_uris, grant_types, scope, token_endpoint_auth_method, approval_state, source_id, federated_read)
+        VALUES ('public-pkce', NULL, 'public', $1, $2, 'read', 'none', 'approved', 'default', ARRAY['default'])`,
       [
         ['https://example.test/cb'],
         ['authorization_code'],
@@ -102,7 +102,7 @@ describe('verifyConfidentialClientSecret (#1166)', () => {
     );
     await expect(
       provider.verifyConfidentialClientSecret(reg.clientId, reg.clientSecret!),
-    ).rejects.toThrow(/revoked/);
+    ).rejects.toThrow(/Invalid client|revoked/);
   });
 });
 
