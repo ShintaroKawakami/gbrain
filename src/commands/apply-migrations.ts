@@ -16,7 +16,7 @@ import { VERSION } from '../version.ts';
 import { loadConfig } from '../core/config.ts';
 import { loadCompletedMigrations, appendCompletedMigration, type CompletedMigrationEntry } from '../core/preferences.ts';
 import { migrations, compareVersions, type Migration, type OrchestratorOpts } from './migrations/index.ts';
-import type { ManualMigrationCapability } from '../core/migrate.ts';
+import { parseStoredSchemaVersion, type ManualMigrationCapability } from '../core/migrate.ts';
 
 /** Bug 3 — max consecutive partials before we wedge a migration. */
 const MAX_CONSECUTIVE_PARTIALS = 3;
@@ -452,7 +452,10 @@ export async function runApplyMigrations(
         try {
           await eng.connect(toEngineConfig(cfg));
           const verStr = await eng.getConfig('version');
-          const schemaVer = parseInt(verStr || '1', 10);
+          const schemaVer = parseStoredSchemaVersion(verStr);
+          if (schemaVer === null) {
+            throw new Error(`Invalid schema version: ${JSON.stringify(verStr)}`);
+          }
           const { runMigrations } = await import('../core/migrate.ts');
           schemaBehind = await resolveSchemaBehind({
             schemaVer,

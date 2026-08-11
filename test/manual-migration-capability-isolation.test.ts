@@ -37,3 +37,20 @@ test('isolated issuer process: --non-interactive issues but read-only combinatio
   });
   expect(child.exitCode, Buffer.from(child.stderr).toString()).toBe(0);
 });
+
+test('isolated issuer process: global prefix is accepted, other commands and read-only flags are rejected', () => {
+  const cases: Array<{ argv: string[]; expected: boolean }> = [
+    { argv: ['--quiet', 'apply-migrations', '--yes'], expected: true },
+    { argv: ['doctor', '--yes'], expected: false },
+    { argv: ['apply-migrations', '--yes', '--list'], expected: false },
+  ];
+  for (const { argv, expected } of cases) {
+    const script = [
+      "const m = await import('./src/core/migrate.ts');",
+      `process.argv = ['bun', 'gbrain', ...${JSON.stringify(argv)}];`,
+      `if (Boolean(m.issueManualMigrationCapabilityForCurrentProcess()) !== ${expected}) process.exit(1);`,
+    ].join(' ');
+    const child = Bun.spawnSync({ cmd: ['bun', '-e', script], cwd: process.cwd(), stdout: 'pipe', stderr: 'pipe' });
+    expect(child.exitCode, Buffer.from(child.stderr).toString()).toBe(0);
+  }
+});

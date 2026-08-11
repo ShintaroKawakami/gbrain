@@ -1,4 +1,5 @@
 import type { BrainEngine } from './engine.ts';
+import { parseGlobalFlags } from './cli-options.ts';
 import { slugifyPath } from './sync.ts';
 import { getFtsLanguage } from './fts-language.ts';
 import { hnswMaxDimsForType } from './vector-index.ts';
@@ -163,7 +164,7 @@ export class ManualMigrationCapability {
  */
 export function issueManualMigrationCapabilityForCurrentProcess(
 ): ManualMigrationCapability | undefined {
-  const argv = process.argv.slice(2);
+  const argv = parseGlobalFlags(process.argv.slice(2)).rest;
   if (argv[0] !== 'apply-migrations') return undefined;
   const approved = argv.includes('--yes') || argv.includes('--non-interactive');
   const readOnly = argv.includes('--list') || argv.includes('--dry-run');
@@ -5991,6 +5992,14 @@ export type ManualMigrationGateProbe =
   | { status: 'blocked'; block: ManualMigrationBlock }
   | { status: 'unknown'; reason: string };
 
+/** Parse a stored schema version strictly; callers must fail closed on null. */
+export function parseStoredSchemaVersion(value: string | null | undefined): number | null {
+  const normalized = value?.trim() ?? '';
+  if (!/^[1-9]\d*$/.test(normalized)) return null;
+  const version = Number(normalized);
+  return Number.isSafeInteger(version) && version <= LATEST_VERSION ? version : null;
+}
+
 export async function probeManualMigrationGate(engine: BrainEngine): Promise<ManualMigrationGateProbe> {
   let currentStr: string | null;
   try {
@@ -5998,14 +6007,8 @@ export async function probeManualMigrationGate(engine: BrainEngine): Promise<Man
   } catch (err) {
     return { status: 'unknown', reason: err instanceof Error ? err.message : String(err) };
   }
-  const normalized = currentStr?.trim() ?? '';
-  if (!/^[1-9]\d*$/.test(normalized)) {
-    return { status: 'unknown', reason: `unparseable schema version: ${JSON.stringify(currentStr)}` };
-  }
-  const current = Number(normalized);
-  if (!Number.isSafeInteger(current) || current > LATEST_VERSION) {
-    return { status: 'unknown', reason: `out-of-range schema version: ${JSON.stringify(currentStr)}` };
-  }
+  const current = parseStoredSchemaVersion(currentStr);
+  if (current === null) return { status: 'unknown', reason: `invalid schema version: ${JSON.stringify(currentStr)}` };
   const m = MIGRATIONS.find(m => m.version > current && m.manual === true);
   return m ? { status: 'blocked', block: { version: m.version, name: m.name } } : { status: 'clear' };
 }
