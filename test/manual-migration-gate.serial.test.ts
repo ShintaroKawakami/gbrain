@@ -72,12 +72,12 @@ describe('manual/destructive migration gate (v126)', () => {
     await engine.disconnect();
   });
 
-  test('v126 is registered as manual + non-idempotent, and is the latest version', () => {
+  test('v126 is registered as manual + non-idempotent', () => {
     const m126 = MIGRATIONS.find(m => m.version === 126)!;
     expect(m126.name).toBe('oauth_clients_pending_approval_state');
     expect(m126.manual).toBe(true);
     expect(m126.idempotent).toBe(false);
-    expect(LATEST_VERSION).toBe(126);
+    expect(LATEST_VERSION).toBe(127);
   }, 60000);
 
   test('no module-global approval surface remains for ordinary paths to reach', async () => {
@@ -127,8 +127,8 @@ describe('manual/destructive migration gate (v126)', () => {
 
     // Passing it explicitly crosses the gate — and consumes it.
     const res = await runMigrations(engine, { manualCapability: capability });
-    expect(res.applied).toBe(1);
-    expect(res.current).toBe(126);
+    expect(res.applied).toBe(2);
+    expect(res.current).toBe(127);
     expect(res.blocked).toBeNull();
     expect(capability.isConsumed).toBe(true);
   }, 60000);
@@ -153,11 +153,11 @@ describe('manual/destructive migration gate (v126)', () => {
     // the same runMigrations entry point crosses the gate with it.
     const capability = issueForTest(['--yes'])!;
     const res = await runMigrations(engine, { manualCapability: capability });
-    expect(res.applied).toBe(1);
-    expect(res.current).toBe(126);
+    expect(res.applied).toBe(2);
+    expect(res.current).toBe(127);
     expect(res.blocked).toBeNull();
     expect(capability.isConsumed).toBe(true);
-    expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(126);
+    expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(127);
     expect(await hasPendingMigrations(engine)).toBe(false);
     expect(await pendingManualMigration(engine)).toBeNull();
 
@@ -184,7 +184,7 @@ describe('manual/destructive migration gate (v126)', () => {
     // client and its credentials are untouched.
     const retry = await runMigrations(engine);
     expect(retry.applied).toBe(0);
-    expect(retry.current).toBe(126);
+    expect(retry.current).toBe(127);
     expect(retry.blocked).toBeNull();
 
     const clients = await engine.executeRaw<{
@@ -219,8 +219,8 @@ describe('manual/destructive migration gate (v126)', () => {
     // First authorized crossing: applies v126 and CONSUMES the capability.
     const capability = issueForTest(['--yes'])!;
     const first = await runMigrations(engine, { manualCapability: capability });
-    expect(first.applied).toBe(1);
-    expect(first.current).toBe(126);
+    expect(first.applied).toBe(2);
+    expect(first.current).toBe(127);
     expect(first.blocked).toBeNull();
     expect(capability.isConsumed).toBe(true);
 
@@ -316,7 +316,7 @@ describe('version probe fail-closed (#1553)', () => {
     // After an approved crossing: startup proceeds.
     const capability = issueForTest(['--yes'])!;
     const res = await runMigrations(engine, { manualCapability: capability });
-    expect(res.current).toBe(126);
+    expect(res.current).toBe(127);
     expect(await probeManualMigrationGate(engine)).toEqual({ status: 'clear' });
   }, 60000);
 
@@ -362,7 +362,7 @@ describe('one approval, two gated migrations (#1553)', () => {
     // must apply v126 and stop before v127 — and the run must report the
     // stop (blocked set, current < latest) so the CLI exits non-zero.
     const secondGate = {
-      version: 127,
+      version: 128,
       name: 'test_second_manual_gate',
       idempotent: false,
       manual: true,
@@ -372,21 +372,21 @@ describe('one approval, two gated migrations (#1553)', () => {
     try {
       const capability = issueForTest(['--yes'])!;
       const res = await runMigrations(engine, { manualCapability: capability });
-      expect(res.applied).toBe(1); // v126 only
-      expect(res.current).toBe(126);
-      expect(res.blocked).toEqual({ version: 127, name: 'test_second_manual_gate' });
+      expect(res.applied).toBe(2); // v126 + v127; v128 remains blocked
+      expect(res.current).toBe(127);
+      expect(res.blocked).toEqual({ version: 128, name: 'test_second_manual_gate' });
       expect(capability.isConsumed).toBe(true);
-      expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(126);
+      expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(127);
 
       // No ambient approval is left behind: a capability-less retry stays
       // blocked at the second gate.
       const retry = await runMigrations(engine);
       expect(retry.applied).toBe(0);
-      expect(retry.current).toBe(126);
-      expect(retry.blocked).toEqual({ version: 127, name: 'test_second_manual_gate' });
-      expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(126);
+      expect(retry.current).toBe(127);
+      expect(retry.blocked).toEqual({ version: 128, name: 'test_second_manual_gate' });
+      expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(127);
     } finally {
-      MIGRATIONS.splice(MIGRATIONS.findIndex(m => m.version === 127), 1);
+      MIGRATIONS.splice(MIGRATIONS.findIndex(m => m.version === 128), 1);
     }
   }, 60000);
 
@@ -398,16 +398,16 @@ describe('one approval, two gated migrations (#1553)', () => {
     const { resolveSchemaBehind } = applyMigrationsTesting;
     await expect(resolveSchemaBehind({
       schemaVer: 125,
-      latest: 127,
+      latest: 128,
       autoApply: true,
-      run: async () => ({ applied: 1, current: 126 }),
+      run: async () => ({ applied: 2, current: 127 }),
     })).resolves.toBe(true);
     // Sanity: a run that actually reaches head reports not-behind.
     await expect(resolveSchemaBehind({
       schemaVer: 125,
-      latest: 127,
+      latest: 128,
       autoApply: true,
-      run: async () => ({ applied: 2, current: 127 }),
+      run: async () => ({ applied: 3, current: 128 }),
     })).resolves.toBe(false);
   });
 });

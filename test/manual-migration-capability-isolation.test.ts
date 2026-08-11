@@ -13,7 +13,7 @@ const capabilityCases = [
 for (const name of capabilityCases) {
   test(`isolated issuer process: ${name}`, () => {
     const child = Bun.spawnSync({
-      cmd: ['bun', 'test', 'test/manual-migration-gate.test.ts', '--reporter=dot', '-t', name],
+      cmd: ['bun', 'test', 'test/manual-migration-gate.serial.test.ts', '--reporter=dot', '-t', name],
       cwd: process.cwd(),
       env: { ...process.env, GBRAIN_ISOLATED_CAPABILITY_TEST: '1' },
       stdout: 'pipe',
