@@ -1786,10 +1786,11 @@ async function handleCliOnly(command: string, args: string[]) {
     // `gbrain init --migrate-only` and `gbrain jobs smoke`.
     //
     // #1553: `--yes` is the ONLY dispatch that may authorize manual/destructive
-    // schema migrations (e.g. v126 oauth_clients reset). Authorize before
-    // runApplyMigrations so its in-process runMigrations calls (schema
-    // pre-flight / --force-schema) can cross the gate; without `--yes` the
-    // runner stops before gated migrations.
+    // schema migrations (e.g. v126 oauth_clients reset). Arm the one-shot
+    // grant before runApplyMigrations so its in-process runMigrations calls
+    // (schema pre-flight / --force-schema) can cross the gate; the grant is
+    // consumed by that crossing, and without `--yes` the runner stops before
+    // gated migrations.
     if (args.includes('--yes')) {
       const { authorizeManualMigrations } = await import('./core/migrate.ts');
       authorizeManualMigrations();
@@ -2891,6 +2892,24 @@ async function connectEngine(opts?: { probeOnly?: boolean }): Promise<BrainEngin
     // Last-resort defense in case the helper itself throws unexpectedly.
     console.warn(`  Schema probe failed (unexpected): ${(err as Error).message}`);
     console.warn('  Re-run: `gbrain apply-migrations --yes`');
+  }
+
+  // #1553 fail-closed: initSchema() stops BEFORE manual/destructive
+  // migrations by design (the ordinary path never holds a one-shot grant).
+  // A still-pending gated migration means ordinary startup must NOT
+  // continue serving as if migration succeeded — refuse here, before any
+  // caller (the serve listener included) receives a live engine. The only
+  // way across is `gbrain apply-migrations --yes`.
+  {
+    const { pendingManualMigration } = await import('./core/migrate.ts');
+    const blocked = await pendingManualMigration(engine);
+    if (blocked) {
+      await engine.disconnect().catch(() => { /* best-effort: startup is aborting */ });
+      throw new Error(
+        `Schema migration v${blocked.version} (${blocked.name}) is manual/destructive and requires explicit approval. ` +
+        `Refusing to start with a partially-migrated schema. Run: gbrain apply-migrations --yes`,
+      );
+    }
   }
 
   // v0.27.1 (F3 fix): re-merge DB-plane config now that the engine is up.

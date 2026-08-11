@@ -4,13 +4,20 @@
  * v126 is destructive (resets every client to pending, deletes tokens/codes)
  * and one-shot (`idempotent: false`). It must never auto-apply from the
  * ordinary connectEngine / serve startup path (engine initSchema()); only
- * `gbrain apply-migrations --yes` — which calls authorizeManualMigrations()
- * from the CLI dispatch — may run it. These tests pin both halves:
+ * `gbrain apply-migrations --yes` — which arms a ONE-SHOT grant via
+ * authorizeManualMigrations() from the CLI dispatch — may run it. The grant
+ * is consumed the moment the runner crosses the gate, so one approval can
+ * never implicitly authorize a later manual migration in the same process.
+ * These tests pin all three halves:
  *
- *   1. The ordinary path stops BEFORE v126: SQL never runs and
- *      config.version is not advanced to it or past it.
+ *   1. The ordinary path fails closed BEFORE v126: SQL never runs,
+ *      config.version is not advanced to it or past it, and the runner
+ *      reports the stop via the typed `blocked` result.
  *   2. The authorized path applies v126 exactly once; a retry is a no-op
  *      and does not reset clients that were approved after the first run.
+ *   3. The grant is consumed on crossing: after an authorized run, a later
+ *      run in the SAME process with a manual migration pending again blocks
+ *      until a fresh grant is armed.
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
@@ -20,9 +27,12 @@ import {
   LATEST_VERSION,
   runMigrations,
   hasPendingMigrations,
+  pendingManualMigration,
   authorizeManualMigrations,
   resetManualMigrationAuthorization,
 } from '../src/core/migrate.ts';
+
+const V126_BLOCK = { version: 126, name: 'oauth_clients_pending_approval_state' } as const;
 
 describe('manual/destructive migration gate (v126)', () => {
   let engine: PGLiteEngine;
@@ -54,12 +64,16 @@ describe('manual/destructive migration gate (v126)', () => {
     const v = parseInt((await engine.getConfig('version')) ?? '0', 10);
     expect(v).toBe(125);
     expect(await hasPendingMigrations(engine)).toBe(true);
+    // The typed blocker connectEngine() uses to fail closed before serving.
+    expect(await pendingManualMigration(engine)).toEqual(V126_BLOCK);
 
     // A direct un-authorized runMigrations call (the same entry point the
-    // engine paths use) must stay blocked: nothing applied, version unmoved.
+    // engine paths use) must stay blocked: nothing applied, version unmoved,
+    // and the stop is reported as a typed result.
     const res = await runMigrations(engine);
     expect(res.applied).toBe(0);
     expect(res.current).toBe(125);
+    expect(res.blocked).toEqual(V126_BLOCK);
     expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(125);
   }, 60000);
 
@@ -79,14 +93,16 @@ describe('manual/destructive migration gate (v126)', () => {
       [now],
     );
 
-    // The apply-migrations --yes path: explicit authorization, then the same
+    // The apply-migrations --yes path: arm the one-shot grant, then the same
     // runMigrations entry point crosses the gate.
     authorizeManualMigrations();
     const res = await runMigrations(engine);
     expect(res.applied).toBe(1);
     expect(res.current).toBe(126);
+    expect(res.blocked).toBeNull();
     expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(126);
     expect(await hasPendingMigrations(engine)).toBe(false);
+    expect(await pendingManualMigration(engine)).toBeNull();
 
     // v126 effects landed: the pending client's token is gone.
     const tokens = await engine.executeRaw<{ token_hash: string }>(
@@ -112,6 +128,7 @@ describe('manual/destructive migration gate (v126)', () => {
     const retry = await runMigrations(engine);
     expect(retry.applied).toBe(0);
     expect(retry.current).toBe(126);
+    expect(retry.blocked).toBeNull();
 
     const clients = await engine.executeRaw<{
       approval_state: string; scope: string | null; source_id: string | null;
@@ -127,5 +144,48 @@ describe('manual/destructive migration gate (v126)', () => {
       `SELECT token_hash FROM oauth_tokens WHERE client_id = 'gate_client'`,
     );
     expect(surviving).toHaveLength(1);
+  }, 60000);
+
+  test('the --yes grant is one-shot: a later gated run in the same process blocks', async () => {
+    // Seed the pre-approval client shape + a token v126 must delete.
+    const now = Math.floor(Date.now() / 1000) + 3600;
+    await engine.executeRaw(
+      `INSERT INTO oauth_clients (client_id, client_name, approval_state, scope, source_id, federated_read)
+       VALUES ('gate_client', 'Gate Client', 'pending', NULL, NULL, '{}')`,
+    );
+    await engine.executeRaw(
+      `INSERT INTO oauth_tokens (token_hash, token_type, client_id, scopes, expires_at)
+       VALUES ('gate_hash', 'access', 'gate_client', '{read}', $1)`,
+      [now],
+    );
+
+    // First authorized crossing: applies v126 and CONSUMES the grant.
+    authorizeManualMigrations();
+    const first = await runMigrations(engine);
+    expect(first.applied).toBe(1);
+    expect(first.current).toBe(126);
+    expect(first.blocked).toBeNull();
+
+    // Simulate a manual migration becoming pending again in the SAME process
+    // (the shape a future gated version would take): rewind the recorded
+    // version so v126 is pending, then run WITHOUT a fresh grant. The
+    // consumed approval must not authorize this crossing — nothing applied,
+    // version unmoved, typed blocker reported.
+    await engine.setConfig('version', '125');
+    const second = await runMigrations(engine);
+    expect(second.applied).toBe(0);
+    expect(second.current).toBe(125);
+    expect(second.blocked).toEqual(V126_BLOCK);
+    expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(125);
+    expect(await pendingManualMigration(engine)).toEqual(V126_BLOCK);
+
+    // A freshly-armed grant (a new apply-migrations --yes invocation) is the
+    // only thing that crosses.
+    authorizeManualMigrations();
+    const third = await runMigrations(engine);
+    expect(third.applied).toBe(1);
+    expect(third.current).toBe(126);
+    expect(third.blocked).toBeNull();
+    expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(126);
   }, 60000);
 });
