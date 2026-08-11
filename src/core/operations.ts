@@ -752,6 +752,16 @@ export function sourceScopeOpts(ctx: OperationContext): { sourceId?: string; sou
     return ctx.remote === false ? {} : { sourceId: ctx.sourceId };
   }
   if (ctx.sourceId) return { sourceId: ctx.sourceId };
+  // A remote request without a verified scalar or federated grant used to
+  // return `{}`, which the engine interprets as every source. Local callers
+  // retain that compatibility behavior; remote callers must never get it.
+  if (ctx.remote !== false) {
+    throw new OperationError(
+      'permission_denied',
+      'Remote caller has no resolved source scope',
+      'Request a client grant for a source before reading data.',
+    );
+  }
   return {};
 }
 
@@ -829,6 +839,16 @@ export function resolveRequestedScope(
         'permission_denied',
         `source '${sourceIdParam}' is outside your granted sources`,
         'Request access to this source, or omit source_id to search within your grant.',
+      );
+    }
+    // OAuth/legacy callers with no federated list still carry a scalar grant.
+    // Do not let an explicit request replace that grant just because the
+    // optional array projection is empty or absent.
+    if (ctx.remote !== false && (!allowed || allowed.length === 0) && ctx.sourceId !== sourceIdParam) {
+      throw new OperationError(
+        'permission_denied',
+        `source '${sourceIdParam}' is outside your granted source`,
+        'Request access to this source, or omit source_id to use your grant.',
       );
     }
     return { sourceId: sourceIdParam };

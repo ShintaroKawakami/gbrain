@@ -225,6 +225,31 @@ describe('ingest_capture handler — provenance write-through (#1522)', () => {
     // Provenance strings (no scoping power) still persist.
     expect(row?.source_kind).toBe('webhook');
   });
+
+  test('server-owned targetSourceId routes an untrusted webhook to its approved source', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('approved-webhook', 'approved-webhook') ON CONFLICT (id) DO NOTHING`,
+    );
+    const handler = makeIngestCaptureHandler(engine);
+    const ev = makeEvent({
+      content: '# server scoped webhook',
+      source_id: 'caller-controlled-source',
+      untrusted_payload: true,
+    });
+    await handler(makeJob({ event: ev, slug: 'inbox/server-scoped', targetSourceId: 'approved-webhook' }));
+
+    const row = await pageRow('inbox/server-scoped');
+    expect(row?.source_id).toBe('approved-webhook');
+  });
+
+  test('server-owned targetSourceId refuses an archived source', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('archived-webhook', 'archived-webhook', true) ON CONFLICT (id) DO NOTHING`,
+    );
+    const handler = makeIngestCaptureHandler(engine);
+    await expect(handler(makeJob({ event: makeEvent({ untrusted_payload: true }), targetSourceId: 'archived-webhook' })))
+      .rejects.toThrow(/authorized target source is unavailable/);
+  });
 });
 
 describe('ingest_capture handler — integration with importFromContent', () => {

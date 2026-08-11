@@ -1898,6 +1898,18 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     const startTime = Date.now();
     const authInfo = (req as any).auth as AuthInfo;
 
+    // `tools/list` never reaches shared dispatch, so reassert the verifier's
+    // OAuth approval result at the HTTP boundary. This is deliberately kept
+    // beside the route rather than relying on a future transport refactor.
+    if (
+      (authInfo.authKind !== 'oauth' && authInfo.authKind !== 'legacy_bearer') ||
+      (authInfo.authKind === 'oauth' && authInfo.approvalState !== 'approved') ||
+      !authInfo.sourceId
+    ) {
+      res.status(403).json({ error: 'permission_denied', message: 'OAuth client is not approved or has no source grant' });
+      return;
+    }
+
     // Human-readable agent name is now threaded through AuthInfo by
     // verifyAccessToken (which JOINs oauth_clients in its existing token
     // SELECT). No per-request DB roundtrip needed. Falls back to clientId
@@ -2063,7 +2075,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       // path codex flagged in plan review. Post-v60, every OAuth client
       // has source_id set; legacy bearer tokens default to 'default' in
       // verifyAccessToken. The env-fallback is gone.
-      const tokenSourceId = authInfo.sourceId ?? 'default';
+      const tokenSourceId = authInfo.sourceId;
 
       let toolResult: Awaited<ReturnType<typeof dispatchToolCall>>;
       try {
@@ -2255,6 +2267,19 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       const authInfo = (req as Request & { auth?: AuthInfo }).auth as AuthInfo;
       const agentName = authInfo.clientName ?? authInfo.clientId;
 
+      // This route bypasses MCP dispatch, therefore it needs the same
+      // verifier-state assertion as `/mcp`. In particular, a pending DCR
+      // client must never enqueue a write merely because middleware was
+      // accidentally relaxed later.
+      if (
+        (authInfo.authKind !== 'oauth' && authInfo.authKind !== 'legacy_bearer') ||
+        (authInfo.authKind === 'oauth' && authInfo.approvalState !== 'approved') ||
+        !authInfo.sourceId
+      ) {
+        res.status(403).json({ error: 'permission_denied', message: 'OAuth client is not approved or has no source grant' });
+        return;
+      }
+
       // v0.39.3.0 BUG-2: outer try/catch ensures any unexpected throw
       // returns a JSON envelope instead of leaking express's default HTML
       // error page. Mirrors the MCP handler's F14 pattern (serve-http.ts
@@ -2336,7 +2361,10 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       const content = body.toString('utf8');
       const contentHash = computeContentHash(content);
       const sourceUri = (req.header('x-gbrain-source-uri') || `mcp-webhook:${authInfo.clientId}:${Date.now()}`).slice(0, 1024);
-      const sourceId = (req.header('x-gbrain-source-id') || `webhook-${authInfo.clientId}`).slice(0, 256);
+      // The write target is server-owned authorization state, never a header
+      // supplied by the webhook sender. Preserve the event's provenance
+      // separately while passing this target explicitly to the job handler.
+      const sourceId = authInfo.sourceId;
       const callerSlug = req.header('x-gbrain-slug');
 
       // Slug-bound clients cannot use /ingest at all. The route hands its
@@ -2396,6 +2424,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
           'ingest_capture',
           {
             event,
+            targetSourceId: sourceId,
             ...(callerSlug ? { slug: callerSlug } : {}),
           },
           {

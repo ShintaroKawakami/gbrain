@@ -55,7 +55,7 @@ export function defaultSlugForEvent(event: IngestionEvent, now: Date = new Date(
 
 export function makeIngestCaptureHandler(engine: BrainEngine) {
   return async function ingestCaptureHandler(job: MinionJobContext): Promise<IngestCaptureResult> {
-    const data = job.data as { event?: unknown; slug?: unknown };
+    const data = job.data as { event?: unknown; slug?: unknown; targetSourceId?: unknown };
     const event = data.event as IngestionEvent | undefined;
     if (!event) {
       throw new Error('ingest_capture: job.data.event is required');
@@ -128,7 +128,19 @@ export function makeIngestCaptureHandler(engine: BrainEngine) {
     //   - the id names a registered source row.
     // Otherwise the write keeps the pre-fix default-source routing.
     let sourceId: string | undefined;
-    if (!untrustedPayload) {
+    // POST /ingest attaches targetSourceId only after bearer verification.
+    // It remains valid even though the content itself is untrusted, because
+    // this field is server-owned job metadata rather than webhook input.
+    if (typeof data.targetSourceId === 'string' && data.targetSourceId.length > 0) {
+      const rows = await engine.executeRaw<{ id: string }>(
+        `SELECT id FROM sources WHERE id = $1 AND archived = false`,
+        [data.targetSourceId],
+      );
+      if (rows.length !== 1) {
+        throw new Error('ingest_capture: authorized target source is unavailable');
+      }
+      sourceId = data.targetSourceId;
+    } else if (!untrustedPayload) {
       const rows = await engine.executeRaw<{ id: string }>(
         `SELECT id FROM sources WHERE id = $1`,
         [event.source_id],
