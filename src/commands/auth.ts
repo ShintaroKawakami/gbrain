@@ -679,10 +679,10 @@ async function approveClient(args: string[]) {
 
   let clientId: string;
   try {
-    const { statSync, readFileSync } = await import('fs');
-    const stat = statSync(clientIdFile);
-    if ((stat.mode & 0o077) !== 0) {
-      console.error('Error: --client-id-file permissions must be 0600 (owner read/write only)');
+    const { lstatSync, readFileSync } = await import('fs');
+    const stat = lstatSync(clientIdFile);
+    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) {
+      console.error('Error: --client-id-file must be a regular file with permissions exactly 0600');
       process.exit(1);
     }
     clientId = readFileSync(clientIdFile, 'utf-8').trim();
