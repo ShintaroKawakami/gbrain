@@ -71,8 +71,8 @@ describe('verifyConfidentialClientSecret (#1166)', () => {
     // a public-client row.
     await engine.executeRaw(
       `INSERT INTO oauth_clients
-        (client_id, client_secret_hash, client_name, redirect_uris, grant_types, scope, token_endpoint_auth_method, approval_state, source_id, federated_read)
-        VALUES ('public-pkce', NULL, 'public', $1, $2, 'read', 'none', 'approved', 'default', ARRAY['default'])`,
+        (client_id, client_secret_hash, client_name, redirect_uris, grant_types, response_types, scope, token_endpoint_auth_method, approval_state, source_id, federated_read)
+        VALUES ('public-pkce', NULL, 'public', $1, $2, ARRAY['code'], 'read', 'none', 'approved', 'default', ARRAY['default'])`,
       [
         ['https://example.test/cb'],
         ['authorization_code'],
