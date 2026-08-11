@@ -94,6 +94,11 @@ function pgArray(arr: string[]): string {
   return `{${escaped.join(',')}}`;
 }
 
+/** Canonical RFC metadata representation used for DCR storage and approval CAS. */
+function canonicalMetadataArray(values: readonly string[]): string[] {
+  return [...values].map(value => String(value).trim()).sort();
+}
+
 /**
  * Allow-list of RFC 7591 §2 `token_endpoint_auth_method` values gbrain
  * accepts at registration. Three values, chosen because the SDK's
@@ -266,6 +271,7 @@ export interface ClientDbState {
   clientName: string;
   redirectUris: string[];
   grantTypes: string[];
+  responseTypes: string[];
   scope: string | null;
   tokenEndpointAuthMethod: string | undefined;
   clientIdIssuedAt: number | undefined;
@@ -285,7 +291,7 @@ export async function loadClientDbState(
   try {
     rows = await sql`
       SELECT client_id, client_secret_hash, client_name, redirect_uris,
-             grant_types, scope, token_endpoint_auth_method,
+             grant_types, response_types, scope, token_endpoint_auth_method,
              client_id_issued_at, client_secret_expires_at,
              approval_state, deleted_at, source_id, federated_read,
              bound_slug_prefixes
@@ -308,6 +314,7 @@ export async function loadClientDbState(
     clientName: (r.client_name as string) || '',
     redirectUris: (r.redirect_uris as string[]) || [],
     grantTypes: (r.grant_types as string[]) || ['client_credentials'],
+    responseTypes: (r.response_types as string[]) || [],
     scope: (r.scope as string | null) ?? null,
     tokenEndpointAuthMethod: r.token_endpoint_auth_method as string | undefined,
     clientIdIssuedAt: coerceTimestamp(r.client_id_issued_at),
@@ -325,6 +332,7 @@ export interface ApprovePendingClientOpts {
   expectedRedirectUris: string[];
   expectedTokenEndpointAuthMethod: string;
   expectedGrantTypes: string[];
+  expectedResponseTypes: string[];
   scopes: string;
   sourceId: string;
   federatedRead: string[];
@@ -349,6 +357,7 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
       client_name: state.clientName,
       redirect_uris: state.redirectUris,
       grant_types: state.grantTypes,
+      response_types: state.responseTypes,
       scope: state.scope ?? undefined,
       token_endpoint_auth_method: state.tokenEndpointAuthMethod,
       client_id_issued_at: state.clientIdIssuedAt,
@@ -366,9 +375,18 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
     assertAllowedScopes(parseScopeString(client.scope));
     const authMethod = validateTokenEndpointAuthMethod(client.token_endpoint_auth_method);
 
-    const grantTypes = (client.grant_types && client.grant_types.length > 0)
+    const grantTypes = canonicalMetadataArray((client.grant_types && client.grant_types.length > 0)
       ? client.grant_types
-      : ['authorization_code'];
+      : ['authorization_code']);
+    const responseTypes = canonicalMetadataArray(Array.isArray((client as { response_types?: unknown }).response_types)
+      ? ((client as { response_types: unknown[] }).response_types.map(String))
+      : (grantTypes.includes('authorization_code') ? ['code'] : []));
+    const redirectUris = canonicalMetadataArray((client.redirect_uris || []).map(String));
+    if (responseTypes.some(type => type !== 'code') ||
+        (grantTypes.includes('authorization_code') && !responseTypes.includes('code')) ||
+        (!grantTypes.includes('authorization_code') && responseTypes.length > 0)) {
+      throw new InvalidClientMetadataError('DCR response_types must exactly match the authorization_code grant');
+    }
     if (!this.allowClientCredentialsDcr && grantTypes.includes('client_credentials')) {
       throw new InvalidClientMetadataError(
         'client_credentials grant is not permitted via dynamic client registration; ' +
@@ -390,13 +408,13 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
     await this.sql`
       INSERT INTO oauth_clients (
         client_id, client_secret_hash, client_name, redirect_uris,
-        grant_types, scope, token_endpoint_auth_method,
+        grant_types, response_types, scope, token_endpoint_auth_method,
         client_id_issued_at, approval_state, source_id, federated_read
       )
       VALUES (
         ${clientId}, ${secretHash}, ${client.client_name || 'unnamed'},
-        ${pgArray((client.redirect_uris || []).map(String))},
-        ${pgArray(grantTypes)},
+        ${pgArray(redirectUris)},
+        ${pgArray(grantTypes)}, ${pgArray(responseTypes)},
         NULL, ${authMethod},
         ${now}, 'pending', NULL, ${pgArray([])}
       )
@@ -406,6 +424,7 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
       ...client,
       client_id: clientId,
       client_id_issued_at: now,
+      response_types: responseTypes,
     };
     if (clientSecret) response.client_secret = clientSecret;
     return response;
@@ -831,12 +850,21 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       expectedRedirectUris,
       expectedTokenEndpointAuthMethod,
       expectedGrantTypes,
+      expectedResponseTypes,
       scopes,
       sourceId,
       federatedRead,
     } = opts;
 
     if (!clientId) throw new Error('approvePendingClient requires clientId');
+    if (!expectedGrantTypes.length) {
+      throw new Error('Approval failed: expected grant types are required');
+    }
+    if (expectedResponseTypes.some(type => type !== 'code') ||
+        (expectedGrantTypes.includes('authorization_code') && !expectedResponseTypes.includes('code')) ||
+        (!expectedGrantTypes.includes('authorization_code') && expectedResponseTypes.length > 0)) {
+      throw new Error('Approval failed: expected response types do not match expected grants');
+    }
 
     assertAllowedScopes(parseScopeString(scopes));
     assertValidSourceId(sourceId);
@@ -882,12 +910,27 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     const expGrants = expectedGrantTypes.map(s => String(s).trim()).sort();
     const grantsMatch = storedGrants.length === expGrants.length &&
       storedGrants.every((val, idx) => val === expGrants[idx]);
+    const storedResponseTypes = [...dbState.responseTypes].map(s => String(s).trim()).sort();
+    const expResponseTypes = expectedResponseTypes.map(s => String(s).trim()).sort();
+    const responseTypesMatch = storedResponseTypes.length === expResponseTypes.length &&
+      storedResponseTypes.every((val, idx) => val === expResponseTypes[idx]);
 
-    if (!redirectsMatch || !authMethodMatch || !grantsMatch) {
+    if (!redirectsMatch || !authMethodMatch || !grantsMatch || !responseTypesMatch) {
       throw new Error('Approval failed: metadata mismatch');
     }
 
+    // Keep the source-state check and approval CAS in one statement. FOR UPDATE
+    // prevents a concurrent archive from changing a verified source until this
+    // approval commits (or rolls back); checking first and updating later is a
+    // TOCTOU that can approve an already-archived write/read source.
     const updated = await this.sql`
+      WITH locked_sources AS (
+        SELECT id
+          FROM sources
+         WHERE id = ANY(${pgArray(allSourcesToVerify)})
+           AND archived = false
+         FOR UPDATE
+      )
       UPDATE oauth_clients
          SET approval_state = 'approved',
              scope = ${scopes},
@@ -895,6 +938,17 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
              federated_read = ${pgArray(federatedRead)}
        WHERE client_id = ${clientId}
          AND approval_state = 'pending'
+         AND deleted_at IS NULL
+         AND redirect_uris = ${pgArray(expRedirects)}
+         AND grant_types = ${pgArray(expGrants)}
+         AND response_types = ${pgArray(expResponseTypes)}
+         AND COALESCE(token_endpoint_auth_method, 'client_secret_post') = ${expectedTokenEndpointAuthMethod}
+         AND (
+           (${expectedTokenEndpointAuthMethod} = 'none' AND client_secret_hash IS NULL)
+           OR (${expectedTokenEndpointAuthMethod} <> 'none' AND client_secret_hash IS NOT NULL)
+         )
+         AND ${sourceId} IN (SELECT id FROM locked_sources)
+         AND (SELECT count(*) FROM locked_sources) = ${allSourcesToVerify.length}
        RETURNING client_id
     `;
 

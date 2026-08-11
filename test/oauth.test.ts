@@ -197,6 +197,7 @@ describe('rescopeClient', () => {
       expectedRedirectUris: [],
       expectedTokenEndpointAuthMethod: 'client_secret_post',
       expectedGrantTypes: ['client_credentials'],
+      expectedResponseTypes: [],
       scopes: 'read',
       sourceId: 'default',
       federatedRead: ['default'],
@@ -1556,6 +1557,7 @@ describe('PKCE DCR public-client gate (#909)', () => {
       expectedRedirectUris: ['http://localhost:3000/callback'],
       expectedTokenEndpointAuthMethod: 'none',
       expectedGrantTypes: ['authorization_code'],
+      expectedResponseTypes: ['code'],
       scopes: 'read',
       sourceId: 'default',
       federatedRead: ['default'],
@@ -1786,6 +1788,7 @@ describe('#1353 DCR default-grant hardening', () => {
     } as any);
     const stored = await provider.clientsStore.getClient(reg.client_id);
     expect(stored?.grant_types).toEqual(['authorization_code']);
+    expect((stored as any)?.response_types).toEqual(['code']);
   });
 
   test('--enable-dcr-insecure (allowClientCredentialsDcr) permits client_credentials', async () => {
@@ -1799,5 +1802,6 @@ describe('#1353 DCR default-grant hardening', () => {
     } as any);
     const stored = await insecure.clientsStore.getClient(reg.client_id);
     expect(stored?.grant_types).toEqual(['client_credentials']);
+    expect((stored as any)?.response_types).toEqual([]);
   });
 });

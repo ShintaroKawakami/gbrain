@@ -182,3 +182,33 @@ describe('Migration v126: OAuth Clients Pending Approval State', () => {
     expect(appRow[0].approval_state).toBe('approved');
   });
 });
+
+describe('Migration v127: OAuth client response types', () => {
+  let db: PGlite;
+  const sqlAdapter = async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const query = strings.reduce((acc, str, i) => acc + str + (i < values.length ? `$${i + 1}` : ''), '');
+    return (await db.query(query, values as any[])).rows as Record<string, unknown>[];
+  };
+
+  beforeEach(async () => {
+    db = new PGlite({ extensions: { vector, pg_trgm } });
+    await db.exec(PGLITE_SCHEMA_SQL);
+    await db.exec('ALTER TABLE oauth_clients DROP COLUMN response_types;');
+  });
+  afterEach(async () => { await db.close(); });
+
+  test('backfills code only for authorization-code clients without replaying v126', async () => {
+    await sqlAdapter`
+      INSERT INTO oauth_clients (client_id, client_name, approval_state, grant_types, scope, source_id, federated_read)
+      VALUES ('auth_code', 'Auth Code', 'approved', ${['authorization_code']}, 'read', 'default', ${['default']}),
+             ('machine', 'Machine', 'approved', ${['client_credentials']}, 'read', 'default', ${['default']})
+    `;
+    const m127 = MIGRATIONS.find(m => m.version === 127)!;
+    await db.exec(m127.sql);
+    const rows = await sqlAdapter`SELECT client_id, response_types FROM oauth_clients ORDER BY client_id`;
+    expect(rows).toEqual([
+      { client_id: 'auth_code', response_types: ['code'] },
+      { client_id: 'machine', response_types: [] },
+    ]);
+  });
+});

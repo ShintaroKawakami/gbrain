@@ -5750,6 +5750,25 @@ export const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 127,
+    name: 'oauth_clients_response_types_for_dcr_approval',
+    idempotent: true,
+    // #1553: v126 is destructive and may already be applied. Keep response
+    // metadata in a separate additive migration so both upgrade paths receive
+    // the DCR approval contract without replaying v126.
+    sql: `
+      ALTER TABLE oauth_clients ADD COLUMN IF NOT EXISTS response_types TEXT[];
+      UPDATE oauth_clients
+         SET response_types = CASE
+           WHEN 'authorization_code' = ANY(COALESCE(grant_types, '{}'::text[])) THEN ARRAY['code']::text[]
+           ELSE '{}'::text[]
+         END
+       WHERE response_types IS NULL;
+      ALTER TABLE oauth_clients ALTER COLUMN response_types SET DEFAULT '{}'::text[];
+      ALTER TABLE oauth_clients ALTER COLUMN response_types SET NOT NULL;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

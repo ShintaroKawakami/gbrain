@@ -605,12 +605,13 @@ export function parseAuthCreateArgs(rest: string[]): { name: string; takesHolder
 }
 
 async function approveClient(args: string[]) {
-  const usage = 'Usage: gbrain auth approve-client --client-id-file <path> --expected-redirect-uri <uri> --expected-token-endpoint-auth-method <method> --expected-grant-types <types> --scopes <scopes> --source <source_id> --federated-read <sources>';
+  const usage = 'Usage: gbrain auth approve-client --client-id-file <path> --expected-redirect-uri <uri> --expected-token-endpoint-auth-method <method> --expected-grant-types <types> --expected-response-types <types> --scopes <scopes> --source <source_id> --federated-read <sources>';
 
   let clientIdFile: string | undefined;
   let expectedRedirectUris: string[] = [];
   let expectedTokenEndpointAuthMethod: string | undefined;
   let expectedGrantTypes: string[] = [];
+  let expectedResponseTypes: string[] = [];
   let scopes: string | undefined;
   let sourceId: string | undefined;
   let federatedRead: string[] | undefined;
@@ -645,6 +646,12 @@ async function approveClient(args: string[]) {
         i += 2;
         break;
       }
+      case '--expected-response-types': {
+        const v = requireValue();
+        expectedResponseTypes = v === 'none' ? [] : v.split(',').map(s => s.trim()).filter(Boolean);
+        i += 2;
+        break;
+      }
       case '--scopes':
         scopes = requireValue();
         i += 2;
@@ -664,7 +671,7 @@ async function approveClient(args: string[]) {
     }
   }
 
-  if (!clientIdFile || !expectedTokenEndpointAuthMethod || expectedGrantTypes.length === 0 || !scopes || !sourceId || !federatedRead) {
+  if (!clientIdFile || !expectedTokenEndpointAuthMethod || expectedGrantTypes.length === 0 || args.indexOf('--expected-response-types') < 0 || !scopes || !sourceId || !federatedRead) {
     console.error('Error: missing required approval flags.');
     console.error(usage);
     process.exit(1);
@@ -694,6 +701,7 @@ async function approveClient(args: string[]) {
         expectedRedirectUris,
         expectedTokenEndpointAuthMethod,
         expectedGrantTypes,
+        expectedResponseTypes,
         scopes,
         sourceId,
         federatedRead,

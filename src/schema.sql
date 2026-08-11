@@ -645,6 +645,7 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
   client_name             TEXT NOT NULL,
   redirect_uris           TEXT[],
   grant_types             TEXT[] DEFAULT '{"client_credentials"}',
+  response_types          TEXT[] NOT NULL DEFAULT '{}',
   scope                   TEXT,
   token_endpoint_auth_method TEXT,
   client_id_issued_at     BIGINT,
