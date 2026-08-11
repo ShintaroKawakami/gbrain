@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach } from 'bun:test';
+import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { PGlite } from '@electric-sql/pglite';
 import { vector } from '@electric-sql/pglite/vector';
 import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm';
@@ -14,21 +14,37 @@ describe('Migration v126: OAuth Clients Pending Approval State', () => {
     return result.rows as Record<string, unknown>[];
   };
 
+  const hasApprovalStateColumn = async (): Promise<boolean> => {
+    const rows = await sqlAdapter`
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'oauth_clients' AND column_name = 'approval_state'
+    `;
+    return rows.length > 0;
+  };
+
   beforeEach(async () => {
     db = new PGlite({ extensions: { vector, pg_trgm } });
     await db.exec(PGLITE_SCHEMA_SQL);
-  });
 
-  test('v126 resets all clients to pending, clears active axes, and deletes tokens/codes', async () => {
-    // Seed sources (default already inserted by PGLITE_SCHEMA_SQL)
-    await sqlAdapter`INSERT INTO sources (id, name) VALUES ('src2', 'Source 2') ON CONFLICT (id) DO NOTHING`;
-
-    // Recreate the pre-v126 table shape. Fresh schema already contains the
-    // new column, so leaving it in place would not exercise the real upgrade.
+    // Recreate the true pre-v126 table shape. The fresh embedded schema
+    // already contains the new column + constraint, so leaving them in place
+    // would not exercise the real upgrade path.
     await db.exec(`
       ALTER TABLE oauth_clients DROP CONSTRAINT IF EXISTS chk_oauth_clients_approval;
       ALTER TABLE oauth_clients DROP COLUMN approval_state;
     `);
+  });
+
+  afterEach(async () => {
+    await db.close();
+  });
+
+  test('v126 resets all clients to pending, clears active axes, and deletes tokens/codes', async () => {
+    // The pre-v126 fixture must really lack approval_state before applying.
+    expect(await hasApprovalStateColumn()).toBe(false);
+
+    // Seed sources (default already inserted by PGLITE_SCHEMA_SQL)
+    await sqlAdapter`INSERT INTO sources (id, name) VALUES ('src2', 'Source 2') ON CONFLICT (id) DO NOTHING`;
 
     // Seed clients in pre-v126 state
     await sqlAdapter`
@@ -78,6 +94,11 @@ describe('Migration v126: OAuth Clients Pending Approval State', () => {
   test('re-running v126 does not reset approved clients or delete their credentials', async () => {
     const m126 = MIGRATIONS.find(m => m.version === 126)!;
     expect(m126.idempotent).toBe(false);
+
+    // Start from the true pre-v126 shape, then apply v126 once to reach the
+    // post-migration shape an approved client lives in.
+    expect(await hasApprovalStateColumn()).toBe(false);
+    await db.exec(m126.sql);
 
     await sqlAdapter`
       INSERT INTO oauth_clients (client_id, client_name, approval_state, scope, source_id, federated_read)

@@ -1784,6 +1784,16 @@ async function handleCliOnly(command: string, args: string[]) {
     // manages its own subprocess or file-layer access directly. Avoids
     // connecting a second time when the orchestrator shells out to
     // `gbrain init --migrate-only` and `gbrain jobs smoke`.
+    //
+    // #1553: `--yes` is the ONLY dispatch that may authorize manual/destructive
+    // schema migrations (e.g. v126 oauth_clients reset). Authorize before
+    // runApplyMigrations so its in-process runMigrations calls (schema
+    // pre-flight / --force-schema) can cross the gate; without `--yes` the
+    // runner stops before gated migrations.
+    if (args.includes('--yes')) {
+      const { authorizeManualMigrations } = await import('./core/migrate.ts');
+      authorizeManualMigrations();
+    }
     const { runApplyMigrations } = await import('./commands/apply-migrations.ts');
     await runApplyMigrations(args);
     return;

@@ -54,6 +54,18 @@ interface Migration {
    */
   idempotent?: boolean;
   /**
+   * #1553: when true, the migration is manual/destructive and must NEVER be
+   * auto-applied by the ordinary connectEngine / serve startup paths (the
+   * engine initSchema() callers invoke runMigrations with no authorization).
+   * The runner stops BEFORE such a migration without applying it and without
+   * advancing config.version to it (or past it); only
+   * `gbrain apply-migrations --yes` — which calls
+   * authorizeManualMigrations() before running — may cross the gate.
+   * Declare alongside `idempotent: false` so the one-shot semantics stay
+   * explicit. Defaults to false (ordinary migrations auto-apply as before).
+   */
+  manual?: boolean;
+  /**
    * v0.30.1 (D6): post-condition probe. Runs after the migration claims
    * to have applied. Returns false if the actual schema state doesn't
    * match what the migration declared (e.g. column/table/index missing
@@ -75,6 +87,28 @@ export function isMigrationIdempotent(m: Migration): boolean {
   // Default true: existing migrations were authored as idempotent (every
   // CREATE/ALTER uses IF NOT EXISTS guards). Explicit false opts out.
   return m.idempotent !== false;
+}
+
+/**
+ * #1553: process-local authorization for manual/destructive migrations
+ * (`manual: true`). The ONLY production setter is the `apply-migrations`
+ * dispatch in src/cli.ts, and only when the operator passed `--yes`; the
+ * engine initSchema() paths (ordinary CLI connect, serve startup) never set
+ * it, so runMigrations() stops before gated migrations there.
+ */
+let manualMigrationsAuthorized = false;
+
+/**
+ * Authorize manual/destructive migrations for the rest of this process.
+ * Called exclusively from the `gbrain apply-migrations --yes` dispatch.
+ */
+export function authorizeManualMigrations(): void {
+  manualMigrationsAuthorized = true;
+}
+
+/** Test seam: reset the process-local authorization between tests. */
+export function resetManualMigrationAuthorization(): void {
+  manualMigrationsAuthorized = false;
 }
 
 /**
@@ -5622,6 +5656,10 @@ export const MIGRATIONS: Migration[] = [
     version: 126,
     name: 'oauth_clients_pending_approval_state',
     idempotent: false,
+    // #1553: destructive one-shot (resets every client to pending, deletes
+    // tokens/codes). Gated: only `gbrain apply-migrations --yes` may run it;
+    // ordinary connectEngine / serve startup stops before it.
+    manual: true,
     sql: `
       ALTER TABLE oauth_clients ADD COLUMN IF NOT EXISTS approval_state TEXT;
       UPDATE oauth_clients
@@ -6010,7 +6048,23 @@ export async function runMigrations(engine: BrainEngine): Promise<{ applied: num
   await checkForBlockingConnections(engine);
 
   let applied = 0;
+  // #1553: track the version actually reached so an early stop at a gated
+  // migration reports the honest current version instead of LATEST_VERSION.
+  let reached = current;
   for (const m of pending) {
+    // #1553: manual/destructive gate. Ordinary callers (connectEngine, serve
+    // startup → engine initSchema()) never hold authorization, so the runner
+    // stops BEFORE the gated migration: its SQL/handler never runs and
+    // config.version is not advanced to it or past it. Only
+    // `gbrain apply-migrations --yes` sets the authorization. stderr only —
+    // stdout stays clean for JSON-parsing callers.
+    if (m.manual === true && !manualMigrationsAuthorized) {
+      process.stderr.write(
+        `  [${m.version}] ${m.name} is a manual/destructive migration and requires explicit approval.\n` +
+        `  Skipping — schema version stays at ${reached}. To apply, run: gbrain apply-migrations --yes\n`,
+      );
+      break;
+    }
     process.stderr.write(`  [${m.version}] ${m.name}...\n`);
 
     // Pick SQL: engine-specific `sqlFor` wins over engine-agnostic `sql`.
@@ -6087,7 +6141,8 @@ export async function runMigrations(engine: BrainEngine): Promise<{ applied: num
     await engine.setConfig('version', String(m.version));
     process.stderr.write(`  [${m.version}] ✓ ${m.name}\n`);
     applied++;
+    reached = m.version;
   }
 
-  return { applied, current: LATEST_VERSION };
+  return { applied, current: reached };
 }
