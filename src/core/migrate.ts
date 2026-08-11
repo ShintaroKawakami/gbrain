@@ -164,6 +164,7 @@ export class ManualMigrationCapability {
 export function issueManualMigrationCapabilityForCurrentProcess(
 ): ManualMigrationCapability | undefined {
   const argv = process.argv.slice(2);
+  if (argv[0] !== 'apply-migrations') return undefined;
   const approved = argv.includes('--yes') || argv.includes('--non-interactive');
   const readOnly = argv.includes('--list') || argv.includes('--dry-run');
   if (!approved || readOnly || manualCapabilityIssuedForProcess) return undefined;
@@ -171,11 +172,6 @@ export function issueManualMigrationCapabilityForCurrentProcess(
   const capability = new ManualMigrationCapability(MANUAL_CAPABILITY_ISSUER);
   issuedManualCapabilities.add(capability);
   return capability;
-}
-
-/** Test-only seam; never use this from production command paths. */
-export function resetManualMigrationCapabilityForTest(): void {
-  manualCapabilityIssuedForProcess = false;
 }
 
 /** #1553: identifies a manual/destructive migration the runner stopped before. */

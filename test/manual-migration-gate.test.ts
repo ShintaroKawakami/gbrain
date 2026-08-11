@@ -40,7 +40,6 @@ import {
   probeManualMigrationGate,
   ManualMigrationCapability,
   issueManualMigrationCapabilityForCurrentProcess,
-  resetManualMigrationCapabilityForTest,
 } from '../src/core/migrate.ts';
 import { __testing as applyMigrationsTesting } from '../src/commands/apply-migrations.ts';
 
@@ -50,7 +49,6 @@ function issueForTest(args: string[]): ManualMigrationCapability | undefined {
   const previous = process.argv;
   try {
     process.argv = [...previous.slice(0, 2), 'apply-migrations', ...args];
-    resetManualMigrationCapabilityForTest();
     return issueManualMigrationCapabilityForCurrentProcess();
   } finally {
     process.argv = previous;
@@ -282,12 +280,10 @@ describe('capability issuance contract (#1553)', () => {
     const previous = process.argv;
     try {
       process.argv = [...previous.slice(0, 2), 'apply-migrations', '--yes'];
-      resetManualMigrationCapabilityForTest();
       expect(issueManualMigrationCapabilityForCurrentProcess()).toBeInstanceOf(ManualMigrationCapability);
       expect(issueManualMigrationCapabilityForCurrentProcess()).toBeUndefined();
     } finally {
       process.argv = previous;
-      resetManualMigrationCapabilityForTest();
     }
   });
 
