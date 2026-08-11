@@ -22,7 +22,13 @@ import type {
 import type { OAuthServerProvider, AuthorizationParams } from '@modelcontextprotocol/sdk/server/auth/provider.js';
 import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/server/auth/clients.js';
 import type { AuthInfo as SdkAuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
-import { InvalidTokenError, InvalidClientMetadataError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
+import {
+  CustomOAuthError,
+  InvalidClientMetadataError,
+  InvalidTokenError,
+  UnauthorizedClientError,
+  UnsupportedResponseTypeError,
+} from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import { hashToken, generateToken, isUndefinedColumnError } from './utils.ts';
 import { assertValidSourceId } from './source-id.ts';
 import { hasScope, assertAllowedScopes, parseScopeString, InvalidScopeError } from './scope.ts';
@@ -97,6 +103,11 @@ function pgArray(arr: string[]): string {
 /** Canonical RFC metadata representation used for DCR storage and approval CAS. */
 function canonicalMetadataArray(values: readonly string[]): string[] {
   return [...values].map(value => String(value).trim()).sort();
+}
+
+/** Keep pending-DCR rejection on the OAuth protocol path, never an HTTP 500. */
+function pendingApprovalError(): CustomOAuthError {
+  return new CustomOAuthError('approval_pending', 'Client is pending operator approval');
 }
 
 /**
@@ -473,7 +484,13 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       throw new Error('Client not found or deleted');
     }
     if (dbState.approvalState !== 'approved') {
-      throw new Error('approval_pending: Client is pending operator approval');
+      throw pendingApprovalError();
+    }
+    if (!dbState.grantTypes.includes('authorization_code')) {
+      throw new UnauthorizedClientError('Client is not authorized for authorization_code');
+    }
+    if (!dbState.responseTypes.includes('code')) {
+      throw new UnsupportedResponseTypeError('Client is not authorized for response_type=code');
     }
 
     const code = generateToken('gbrain_code_');
@@ -509,7 +526,10 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       throw new Error('Authorization code not found or expired');
     }
     if (dbState.approvalState !== 'approved') {
-      throw new Error('approval_pending: Client is pending operator approval');
+      throw pendingApprovalError();
+    }
+    if (!dbState.grantTypes.includes('authorization_code')) {
+      throw new UnauthorizedClientError('Client is not authorized for authorization_code');
     }
 
     const codeHash = hashToken(authorizationCode);
@@ -535,7 +555,10 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       throw new Error('Authorization code not found or expired');
     }
     if (dbState.approvalState !== 'approved') {
-      throw new Error('approval_pending: Client is pending operator approval');
+      throw pendingApprovalError();
+    }
+    if (!dbState.grantTypes.includes('authorization_code')) {
+      throw new UnauthorizedClientError('Client is not authorized for authorization_code');
     }
 
     const codeHash = hashToken(authorizationCode);
@@ -561,7 +584,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
 
     const codeRow = rows[0];
     const scopes = (codeRow.scopes as string[]) || [];
-    return this.issueTokens(client.client_id, scopes, resource, true);
+    return this.issueTokens(client.client_id, scopes, resource, dbState.grantTypes.includes('refresh_token'));
   }
 
   // -------------------------------------------------------------------------
@@ -579,7 +602,10 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       throw new Error('Refresh token not found');
     }
     if (dbState.approvalState !== 'approved') {
-      throw new Error('approval_pending: Client is pending operator approval');
+      throw pendingApprovalError();
+    }
+    if (!dbState.grantTypes.includes('refresh_token')) {
+      throw new UnauthorizedClientError('Client is not authorized for refresh_token');
     }
 
     const tokenHash = hashToken(refreshToken);
@@ -757,7 +783,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       throw new Error('Invalid client');
     }
     if (dbState.approvalState !== 'approved') {
-      throw new Error('approval_pending: Client is pending operator approval');
+      throw pendingApprovalError();
     }
     if (dbState.clientSecretHash === null) {
       throw new Error('Invalid client');
@@ -792,7 +818,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       throw new Error('Client not found or deleted');
     }
     if (dbState.approvalState !== 'approved') {
-      throw new Error('approval_pending: Client is pending operator approval');
+      throw pendingApprovalError();
     }
 
     const grants = dbState.grantTypes;
@@ -982,6 +1008,16 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     const secretHash = clientSecret ? hashToken(clientSecret) : null;
     const now = Math.floor(Date.now() / 1000);
 
+    // Trusted manual registration historically issued refresh tokens for the
+    // authorization-code flow even when operators supplied only that grant.
+    // Preserve that established contract here; DCR rows retain their exact
+    // caller-declared grant list and go through pending approval instead.
+    const storedGrantTypes = canonicalMetadataArray([
+      ...grantTypes,
+      ...(grantTypes.includes('authorization_code') ? ['refresh_token'] : []),
+    ]);
+    const storedResponseTypes = storedGrantTypes.includes('authorization_code') ? ['code'] : [];
+
     const effectiveSourceId = sourceId || 'default';
     const effectiveFederated = federatedRead && federatedRead.length > 0 ? federatedRead : [effectiveSourceId];
 
@@ -1013,13 +1049,13 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     if (agentBindings) {
       await this.sql`
         INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris,
-                                    grant_types, scope, token_endpoint_auth_method,
+                                    grant_types, response_types, scope, token_endpoint_auth_method,
                                     client_id_issued_at, approval_state,
                                     source_id, federated_read,
                                     bound_tools, bound_source_id, bound_brain_id,
                                     bound_slug_prefixes, bound_max_concurrent, budget_usd_per_day)
         VALUES (${clientId}, ${secretHash}, ${name},
-                ${pgArray(redirectUris)}, ${pgArray(grantTypes)}, ${finalScope}, ${authMethod}, ${now}, ${finalApprovalState},
+                ${pgArray(redirectUris)}, ${pgArray(storedGrantTypes)}, ${pgArray(storedResponseTypes)}, ${finalScope}, ${authMethod}, ${now}, ${finalApprovalState},
                 ${finalSourceId}, ${pgArray(finalFederated)},
                 ${agentBindings.boundTools ? pgArray(agentBindings.boundTools) : null},
                 ${agentBindings.boundSourceId ?? null}, ${agentBindings.boundBrainId ?? null},
@@ -1029,11 +1065,11 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     } else {
       await this.sql`
         INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris,
-                                    grant_types, scope, token_endpoint_auth_method,
+                                    grant_types, response_types, scope, token_endpoint_auth_method,
                                     client_id_issued_at, approval_state,
                                     source_id, federated_read)
         VALUES (${clientId}, ${secretHash}, ${name},
-                ${pgArray(redirectUris)}, ${pgArray(grantTypes)}, ${finalScope}, ${authMethod}, ${now}, ${finalApprovalState},
+                ${pgArray(redirectUris)}, ${pgArray(storedGrantTypes)}, ${pgArray(storedResponseTypes)}, ${finalScope}, ${authMethod}, ${now}, ${finalApprovalState},
                 ${finalSourceId}, ${pgArray(finalFederated)})
       `;
     }
@@ -1132,7 +1168,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       throw new Error('Client not found or deleted');
     }
     if (dbState.approvalState !== 'approved') {
-      throw new Error('approval_pending: Cannot issue tokens for a pending client');
+      throw pendingApprovalError();
     }
 
     const accessToken = generateToken('gbrain_at_');
