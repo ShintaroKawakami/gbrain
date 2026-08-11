@@ -58,6 +58,7 @@ describe('_meta injection on dispatch', () => {
     const r = await dispatchToolCall(engine, 'get_stats', {}, {
       remote: true,
       sourceId: 'default',
+      auth: { token: 'test', clientId: 'test', scopes: ['read'], authKind: 'legacy_bearer' },
       metaHook: getBrainHotMemoryMeta,
     });
     expect(r.isError).toBeFalsy();
@@ -114,11 +115,11 @@ describe('_meta injection on dispatch', () => {
     // Two world-only facts: one for an allow-listed user, one for everyone.
     // Cache key includes hash(allowList) — distinct keys → distinct entries.
     const noListResp = await dispatchToolCall(engine, 'get_stats', {}, {
-      remote: true, sourceId: 'default', metaHook: getBrainHotMemoryMeta,
+      remote: true, sourceId: 'default', auth: { token: 'test', clientId: 'test', scopes: ['read'], authKind: 'legacy_bearer' }, metaHook: getBrainHotMemoryMeta,
     });
     __resetHotMemoryCacheForTests();
     const withListResp = await dispatchToolCall(engine, 'get_stats', {}, {
-      remote: true, sourceId: 'default', takesHoldersAllowList: ['world', 'self'], metaHook: getBrainHotMemoryMeta,
+      remote: true, sourceId: 'default', auth: { token: 'test', clientId: 'test', scopes: ['read'], authKind: 'legacy_bearer' }, takesHoldersAllowList: ['world', 'self'], metaHook: getBrainHotMemoryMeta,
     });
     // Both should compute _meta independently — we just confirm both
     // return without error and the _meta presence is consistent.
