@@ -3,21 +3,27 @@
  *
  * v126 is destructive (resets every client to pending, deletes tokens/codes)
  * and one-shot (`idempotent: false`). It must never auto-apply from the
- * ordinary connectEngine / serve startup path (engine initSchema()); only
- * `gbrain apply-migrations --yes` — which arms a ONE-SHOT grant via
- * authorizeManualMigrations() from the CLI dispatch — may run it. The grant
- * is consumed the moment the runner crosses the gate, so one approval can
+ * ordinary connectEngine / serve startup path (engine initSchema()); only a
+ * runMigrations call holding a ONE-SHOT ManualMigrationCapability — issued
+ * by the `gbrain apply-migrations --yes` CLI dispatch and passed via
+ * RunMigrationsOptions.manualCapability — may run it. The capability is
+ * consumed the moment the runner crosses the gate, so one approval can
  * never implicitly authorize a later manual migration in the same process.
- * These tests pin all three halves:
+ * There is no module-global grant: issuing a capability does not arm the
+ * runner, and ordinary paths have nothing to pick up. These tests pin all
+ * four halves:
  *
  *   1. The ordinary path fails closed BEFORE v126: SQL never runs,
  *      config.version is not advanced to it or past it, and the runner
  *      reports the stop via the typed `blocked` result.
  *   2. The authorized path applies v126 exactly once; a retry is a no-op
  *      and does not reset clients that were approved after the first run.
- *   3. The grant is consumed on crossing: after an authorized run, a later
- *      run in the SAME process with a manual migration pending again blocks
- *      until a fresh grant is armed.
+ *   3. Holding an issued capability does NOT arm the runner — only passing
+ *      it to runMigrations crosses the gate, and the crossing consumes it.
+ *   4. The capability is one-shot: after an authorized run, a later run in
+ *      the SAME process with a manual migration pending again blocks —
+ *      both with no capability and when REUSING the consumed one — until a
+ *      fresh capability is issued.
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
@@ -28,8 +34,7 @@ import {
   runMigrations,
   hasPendingMigrations,
   pendingManualMigration,
-  authorizeManualMigrations,
-  resetManualMigrationAuthorization,
+  ManualMigrationCapability,
 } from '../src/core/migrate.ts';
 
 const V126_BLOCK = { version: 126, name: 'oauth_clients_pending_approval_state' } as const;
@@ -38,7 +43,6 @@ describe('manual/destructive migration gate (v126)', () => {
   let engine: PGLiteEngine;
 
   beforeEach(async () => {
-    resetManualMigrationAuthorization();
     engine = new PGLiteEngine();
     await engine.connect({});
     // The ordinary path: initSchema() is what connectEngine / serve startup
@@ -48,7 +52,6 @@ describe('manual/destructive migration gate (v126)', () => {
   });
 
   afterEach(async () => {
-    resetManualMigrationAuthorization();
     await engine.disconnect();
   });
 
@@ -60,6 +63,17 @@ describe('manual/destructive migration gate (v126)', () => {
     expect(LATEST_VERSION).toBe(126);
   });
 
+  test('no module-global approval surface remains for ordinary paths to reach', async () => {
+    // The design flaw this pins: the grant used to live in module-global
+    // mutable state behind exported setters, so ANY in-process caller could
+    // arm or reuse it. The capability must be the only way across, and it
+    // only exists as a value passed to runMigrations.
+    const migrate = await import('../src/core/migrate.ts');
+    expect('authorizeManualMigrations' in migrate).toBe(false);
+    expect('resetManualMigrationAuthorization' in migrate).toBe(false);
+    expect('pendingManualGrant' in migrate).toBe(false);
+  });
+
   test('ordinary initSchema stops before v126 without advancing the version', async () => {
     const v = parseInt((await engine.getConfig('version')) ?? '0', 10);
     expect(v).toBe(125);
@@ -67,7 +81,7 @@ describe('manual/destructive migration gate (v126)', () => {
     // The typed blocker connectEngine() uses to fail closed before serving.
     expect(await pendingManualMigration(engine)).toEqual(V126_BLOCK);
 
-    // A direct un-authorized runMigrations call (the same entry point the
+    // A direct capability-less runMigrations call (the same entry point the
     // engine paths use) must stay blocked: nothing applied, version unmoved,
     // and the stop is reported as a typed result.
     const res = await runMigrations(engine);
@@ -75,6 +89,26 @@ describe('manual/destructive migration gate (v126)', () => {
     expect(res.current).toBe(125);
     expect(res.blocked).toEqual(V126_BLOCK);
     expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(125);
+  }, 60000);
+
+  test('an issued capability does not arm the runner; only passing it crosses the gate', async () => {
+    // Issuing a capability (what the apply-migrations --yes dispatch does)
+    // must not change the behavior of capability-less runMigrations calls —
+    // there is no ambient grant for the runner to pick up.
+    const capability = ManualMigrationCapability.issue();
+    const blocked = await runMigrations(engine);
+    expect(blocked.applied).toBe(0);
+    expect(blocked.current).toBe(125);
+    expect(blocked.blocked).toEqual(V126_BLOCK);
+    expect(capability.isConsumed).toBe(false);
+    expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(125);
+
+    // Passing it explicitly crosses the gate — and consumes it.
+    const res = await runMigrations(engine, { manualCapability: capability });
+    expect(res.applied).toBe(1);
+    expect(res.current).toBe(126);
+    expect(res.blocked).toBeNull();
+    expect(capability.isConsumed).toBe(true);
   }, 60000);
 
   test('authorized run applies v126 exactly once; retry keeps approved clients', async () => {
@@ -93,13 +127,14 @@ describe('manual/destructive migration gate (v126)', () => {
       [now],
     );
 
-    // The apply-migrations --yes path: arm the one-shot grant, then the same
-    // runMigrations entry point crosses the gate.
-    authorizeManualMigrations();
-    const res = await runMigrations(engine);
+    // The apply-migrations --yes path: issue the one-shot capability, then
+    // the same runMigrations entry point crosses the gate with it.
+    const capability = ManualMigrationCapability.issue();
+    const res = await runMigrations(engine, { manualCapability: capability });
     expect(res.applied).toBe(1);
     expect(res.current).toBe(126);
     expect(res.blocked).toBeNull();
+    expect(capability.isConsumed).toBe(true);
     expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(126);
     expect(await hasPendingMigrations(engine)).toBe(false);
     expect(await pendingManualMigration(engine)).toBeNull();
@@ -146,7 +181,7 @@ describe('manual/destructive migration gate (v126)', () => {
     expect(surviving).toHaveLength(1);
   }, 60000);
 
-  test('the --yes grant is one-shot: a later gated run in the same process blocks', async () => {
+  test('the --yes capability is one-shot: a later gated run in the same process blocks', async () => {
     // Seed the pre-approval client shape + a token v126 must delete.
     const now = Math.floor(Date.now() / 1000) + 3600;
     await engine.executeRaw(
@@ -159,16 +194,17 @@ describe('manual/destructive migration gate (v126)', () => {
       [now],
     );
 
-    // First authorized crossing: applies v126 and CONSUMES the grant.
-    authorizeManualMigrations();
-    const first = await runMigrations(engine);
+    // First authorized crossing: applies v126 and CONSUMES the capability.
+    const capability = ManualMigrationCapability.issue();
+    const first = await runMigrations(engine, { manualCapability: capability });
     expect(first.applied).toBe(1);
     expect(first.current).toBe(126);
     expect(first.blocked).toBeNull();
+    expect(capability.isConsumed).toBe(true);
 
     // Simulate a manual migration becoming pending again in the SAME process
     // (the shape a future gated version would take): rewind the recorded
-    // version so v126 is pending, then run WITHOUT a fresh grant. The
+    // version so v126 is pending, then run WITHOUT a fresh capability. The
     // consumed approval must not authorize this crossing — nothing applied,
     // version unmoved, typed blocker reported.
     await engine.setConfig('version', '125');
@@ -179,10 +215,18 @@ describe('manual/destructive migration gate (v126)', () => {
     expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(125);
     expect(await pendingManualMigration(engine)).toEqual(V126_BLOCK);
 
-    // A freshly-armed grant (a new apply-migrations --yes invocation) is the
-    // only thing that crosses.
-    authorizeManualMigrations();
-    const third = await runMigrations(engine);
+    // Reusing the CONSUMED capability must not cross either — one capability
+    // authorizes at most one manual migration, ever.
+    const reused = await runMigrations(engine, { manualCapability: capability });
+    expect(reused.applied).toBe(0);
+    expect(reused.current).toBe(125);
+    expect(reused.blocked).toEqual(V126_BLOCK);
+    expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(125);
+
+    // A freshly-issued capability (a new apply-migrations --yes invocation)
+    // is the only thing that crosses.
+    const fresh = ManualMigrationCapability.issue();
+    const third = await runMigrations(engine, { manualCapability: fresh });
     expect(third.applied).toBe(1);
     expect(third.current).toBe(126);
     expect(third.blocked).toBeNull();

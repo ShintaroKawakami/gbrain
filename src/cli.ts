@@ -1785,18 +1785,21 @@ async function handleCliOnly(command: string, args: string[]) {
     // connecting a second time when the orchestrator shells out to
     // `gbrain init --migrate-only` and `gbrain jobs smoke`.
     //
-    // #1553: `--yes` is the ONLY dispatch that may authorize manual/destructive
-    // schema migrations (e.g. v126 oauth_clients reset). Arm the one-shot
-    // grant before runApplyMigrations so its in-process runMigrations calls
-    // (schema pre-flight / --force-schema) can cross the gate; the grant is
-    // consumed by that crossing, and without `--yes` the runner stops before
-    // gated migrations.
-    if (args.includes('--yes')) {
-      const { authorizeManualMigrations } = await import('./core/migrate.ts');
-      authorizeManualMigrations();
+    // #1553: `--yes` is the ONLY dispatch that may issue the one-shot
+    // capability authorizing manual/destructive schema migrations (e.g. v126
+    // oauth_clients reset). Issue it here and pass it into
+    // runApplyMigrations so its in-process runMigrations calls (schema
+    // pre-flight / --force-schema) can cross the gate; the capability is
+    // consumed by that crossing. Read-only surfaces (--list / --dry-run) and
+    // every other command never receive one, so their runMigrations calls
+    // stop before gated migrations.
+    let manualCapability: import('./core/migrate.ts').ManualMigrationCapability | undefined;
+    if (args.includes('--yes') && !args.includes('--list') && !args.includes('--dry-run')) {
+      const { ManualMigrationCapability } = await import('./core/migrate.ts');
+      manualCapability = ManualMigrationCapability.issue();
     }
     const { runApplyMigrations } = await import('./commands/apply-migrations.ts');
-    await runApplyMigrations(args);
+    await runApplyMigrations(args, { manualCapability });
     return;
   }
   if (command === 'repair-jsonb') {

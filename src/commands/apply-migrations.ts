@@ -16,6 +16,7 @@ import { VERSION } from '../version.ts';
 import { loadConfig } from '../core/config.ts';
 import { loadCompletedMigrations, appendCompletedMigration, type CompletedMigrationEntry } from '../core/preferences.ts';
 import { migrations, compareVersions, type Migration, type OrchestratorOpts } from './migrations/index.ts';
+import type { ManualMigrationCapability } from '../core/migrate.ts';
 
 /** Bug 3 — max consecutive partials before we wedge a migration. */
 const MAX_CONSECUTIVE_PARTIALS = 3;
@@ -282,7 +283,9 @@ async function resolveSchemaBehind(opts: {
     try {
       const result = await run();
       console.error(`Applied ${result.applied} schema migration(s); now at v${result.current}.`);
-      return false;
+      // #1553: the run may have stopped BEFORE a manual/destructive
+      // migration (no capability held) — report the schema as still behind.
+      return result.current < latest;
     } catch (err) {
       console.error(`Schema migration failed: ${err instanceof Error ? err.message : String(err)}`);
       return true;
@@ -305,11 +308,24 @@ function orchestratorOptsFrom(cli: ApplyMigrationsArgs): OrchestratorOpts {
   };
 }
 
+export interface ApplyMigrationsRunOpts {
+  /**
+   * #1553: one-shot capability for manual/destructive schema migrations,
+   * issued by the `gbrain apply-migrations --yes` dispatch and threaded to
+   * the schema-migration calls below. Undefined on every other path
+   * (including --list / --dry-run), so those fail closed at the gate.
+   */
+  manualCapability?: ManualMigrationCapability;
+}
+
 /**
  * Entry point. Does not call connectEngine — each phase inside an
  * orchestrator manages its own engine / subprocess lifecycle.
  */
-export async function runApplyMigrations(args: string[]): Promise<void> {
+export async function runApplyMigrations(
+  args: string[],
+  opts: ApplyMigrationsRunOpts = {},
+): Promise<void> {
   const cli = parseArgs(args);
   if (cli.help) { printHelp(); return; }
 
@@ -379,7 +395,7 @@ export async function runApplyMigrations(args: string[]): Promise<void> {
       const eng = await createEngine(toEngineConfig(cfg));
       await eng.connect(toEngineConfig(cfg));
       console.log('Running schema migrations from current config.version...');
-      const result = await runMigrations(eng);
+      const result = await runMigrations(eng, { manualCapability: opts.manualCapability });
       console.log(`Applied ${result.applied} schema migration(s); now at v${result.current}.`);
       await eng.disconnect();
     } catch (err) {
@@ -423,7 +439,7 @@ export async function runApplyMigrations(args: string[]): Promise<void> {
           // --list and --dry-run are read-only surfaces: never mutate schema
           // even when combined with --yes/--non-interactive.
           autoApply: (cli.yes || cli.nonInteractive) && !cli.dryRun && !cli.list,
-          run: () => runMigrations(eng),
+          run: () => runMigrations(eng, { manualCapability: opts.manualCapability }),
         });
         await eng.disconnect();
       }

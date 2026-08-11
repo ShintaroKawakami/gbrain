@@ -56,13 +56,14 @@ interface Migration {
   /**
    * #1553: when true, the migration is manual/destructive and must NEVER be
    * auto-applied by the ordinary connectEngine / serve startup paths (the
-   * engine initSchema() callers invoke runMigrations holding no grant).
+   * engine initSchema() callers invoke runMigrations without a capability).
    * The runner stops BEFORE such a migration without applying it and without
    * advancing config.version to it (or past it), reporting the stop via the
-   * typed `blocked` field of RunMigrationsResult; only
-   * `gbrain apply-migrations --yes` — which arms a one-shot grant via
-   * authorizeManualMigrations() before running — may cross the gate, and
-   * the grant is consumed by that crossing.
+   * typed `blocked` field of RunMigrationsResult; only a call holding a
+   * one-shot ManualMigrationCapability — issued by the
+   * `gbrain apply-migrations --yes` dispatch and passed via
+   * RunMigrationsOptions.manualCapability — may cross the gate, and the
+   * capability is consumed by that crossing.
    * Declare alongside `idempotent: false` so the one-shot semantics stay
    * explicit. Defaults to false (ordinary migrations auto-apply as before).
    */
@@ -92,43 +93,46 @@ export function isMigrationIdempotent(m: Migration): boolean {
 }
 
 /**
- * #1553: one-shot authorization grant for manual/destructive migrations
- * (`manual: true`). Deliberately NOT a process-global persistent flag: the
- * grant is consumed the first time runMigrations() crosses a gated
- * migration with it, so one approval can never implicitly authorize a later
- * manual migration in the same process — each gated crossing requires a
- * freshly-armed grant from a `gbrain apply-migrations --yes` invocation.
+ * #1553: one-shot capability authorizing exactly ONE manual/destructive
+ * migration crossing (`manual: true`). Deliberately NOT module-global state:
+ * there is no ambient grant for runMigrations() to pick up — the capability
+ * must be passed explicitly via RunMigrationsOptions.manualCapability and is
+ * consumed the first time runMigrations() crosses a gated migration with
+ * it, so one approval can never implicitly authorize a later manual
+ * migration in the same process. The ONLY production issuer is the
+ * `gbrain apply-migrations --yes` dispatch in src/cli.ts (never --list,
+ * --dry-run, or any other command); the engine initSchema() paths (ordinary
+ * CLI connect, serve startup) call runMigrations() with no options, so they
+ * can neither obtain nor reuse a capability.
  */
-export interface ManualMigrationGrant {
-  /** Flipped by runMigrations() the moment the grant crosses a gate. */
-  consumed: boolean;
+export class ManualMigrationCapability {
+  private consumed = false;
+
+  private constructor() {}
+
+  /**
+   * Issue a fresh one-shot capability. Called exclusively from the
+   * `gbrain apply-migrations --yes` dispatch.
+   */
+  static issue(): ManualMigrationCapability {
+    return new ManualMigrationCapability();
+  }
+
+  /** Flipped by runMigrations() the moment the capability crosses a gate. */
+  get isConsumed(): boolean {
+    return this.consumed;
+  }
+
+  /** Consume the capability at a gate crossing. No-op once consumed. */
+  consume(): void {
+    this.consumed = true;
+  }
 }
 
 /** #1553: identifies a manual/destructive migration the runner stopped before. */
 export interface ManualMigrationBlock {
   version: number;
   name: string;
-}
-
-/**
- * The pending grant. The ONLY production setter is the `apply-migrations`
- * dispatch in src/cli.ts, and only when the operator passed `--yes`; the
- * engine initSchema() paths (ordinary CLI connect, serve startup) never set
- * it, so runMigrations() stops before gated migrations there.
- */
-let pendingManualGrant: ManualMigrationGrant | null = null;
-
-/**
- * Arm a one-shot grant for the next gated migration crossing. Called
- * exclusively from the `gbrain apply-migrations --yes` dispatch.
- */
-export function authorizeManualMigrations(): void {
-  pendingManualGrant = { consumed: false };
-}
-
-/** Test seam: clear any unconsumed grant between tests. */
-export function resetManualMigrationAuthorization(): void {
-  pendingManualGrant = null;
 }
 
 /**
@@ -6050,14 +6054,29 @@ export interface RunMigrationsResult {
   current: number;
   /**
    * #1553: set when the runner stopped BEFORE a manual/destructive
-   * migration because no one-shot grant was held. `current` then reports
-   * the version actually reached — the gated migration's SQL/handler never
-   * ran. Null when every pending migration was applied (or none pending).
+   * migration because no one-shot capability was passed (or it was already
+   * consumed). `current` then reports the version actually reached — the
+   * gated migration's SQL/handler never ran. Null when every pending
+   * migration was applied (or none pending).
    */
   blocked: ManualMigrationBlock | null;
 }
 
-export async function runMigrations(engine: BrainEngine): Promise<RunMigrationsResult> {
+export interface RunMigrationsOptions {
+  /**
+   * #1553: one-shot capability authorizing a single manual/destructive
+   * migration crossing, issued by the `gbrain apply-migrations --yes`
+   * dispatch and threaded through runApplyMigrations. Undefined on every
+   * ordinary path (connectEngine / serve startup via engine initSchema()),
+   * which therefore fails closed at the gate.
+   */
+  manualCapability?: ManualMigrationCapability;
+}
+
+export async function runMigrations(
+  engine: BrainEngine,
+  opts: RunMigrationsOptions = {},
+): Promise<RunMigrationsResult> {
   const currentStr = await engine.getConfig('version');
   const current = parseInt(currentStr || '1', 10);
 
@@ -6106,16 +6125,16 @@ export async function runMigrations(engine: BrainEngine): Promise<RunMigrationsR
   let blocked: ManualMigrationBlock | null = null;
   for (const m of pending) {
     // #1553: manual/destructive gate. Ordinary callers (connectEngine, serve
-    // startup → engine initSchema()) never hold a grant, so the runner stops
-    // BEFORE the gated migration: its SQL/handler never runs and
-    // config.version is not advanced to it or past it. The grant armed by
-    // `gbrain apply-migrations --yes` is one-shot — consumed HERE, before
-    // the crossing — so it can never authorize a later gated migration in
-    // the same process. stderr only — stdout stays clean for JSON-parsing
-    // callers.
+    // startup → engine initSchema()) never pass a capability, so the runner
+    // stops BEFORE the gated migration: its SQL/handler never runs and
+    // config.version is not advanced to it or past it. The capability issued
+    // by `gbrain apply-migrations --yes` is one-shot — consumed HERE, before
+    // the crossing — so it crosses at most one gate and can never authorize
+    // a later gated migration in the same process. stderr only — stdout
+    // stays clean for JSON-parsing callers.
     if (m.manual === true) {
-      const grant = pendingManualGrant;
-      if (!grant || grant.consumed) {
+      const capability = opts.manualCapability;
+      if (!(capability instanceof ManualMigrationCapability) || capability.isConsumed) {
         blocked = { version: m.version, name: m.name };
         process.stderr.write(
           `  [${m.version}] ${m.name} is a manual/destructive migration and requires explicit approval.\n` +
@@ -6123,8 +6142,7 @@ export async function runMigrations(engine: BrainEngine): Promise<RunMigrationsR
         );
         break;
       }
-      grant.consumed = true;
-      pendingManualGrant = null;
+      capability.consume();
     }
     process.stderr.write(`  [${m.version}] ${m.name}...\n`);
 
