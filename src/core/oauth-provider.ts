@@ -782,9 +782,10 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     if (!dbState || dbState.deletedAt !== null) {
       throw new Error('Invalid client');
     }
-    if (dbState.approvalState !== 'approved') {
-      throw pendingApprovalError();
-    }
+    // This helper authenticates a confidential client for both `/token` and
+    // `/revoke`. Do not put the approval gate here: a pending DCR client
+    // must still be able to revoke a leaked token/secret. Every issuing
+    // grant has its own approved-state check before consuming credentials.
     if (dbState.clientSecretHash === null) {
       throw new Error('Invalid client');
     }

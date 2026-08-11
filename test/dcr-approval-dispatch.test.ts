@@ -58,6 +58,11 @@ describe('OAuth DCR Pending Approval Hardening & Shared Dispatch', () => {
 
     // Exchange client credentials fails
     if (client.client_secret) {
+      // Secret authentication is also used by `/revoke`; it must remain
+      // available so a pending client can invalidate a leaked credential.
+      await expect(
+        provider.verifyConfidentialClientSecret(client.client_id, client.client_secret)
+      ).resolves.toMatchObject({ client_id: client.client_id });
       await expect(
         provider.exchangeClientCredentials(client.client_id, client.client_secret, 'read')
       ).rejects.toBeInstanceOf(CustomOAuthError);
