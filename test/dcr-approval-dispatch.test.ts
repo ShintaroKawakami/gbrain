@@ -6,6 +6,7 @@ import { GBrainOAuthProvider } from '../src/core/oauth-provider.ts';
 import { dispatchToolCall } from '../src/mcp/dispatch.ts';
 import { createEngine } from '../src/core/engine-factory.ts';
 import { PGLITE_SCHEMA_SQL } from '../src/core/pglite-schema.ts';
+import { CustomOAuthError, UnauthorizedClientError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 
 describe('OAuth DCR Pending Approval Hardening & Shared Dispatch', () => {
   let db: PGlite;
@@ -51,16 +52,42 @@ describe('OAuth DCR Pending Approval Hardening & Shared Dispatch', () => {
 
     const dummyRes: any = { redirect: () => {} };
     // Authorize fails
-    expect(
+    await expect(
       provider.authorize(client, { redirectUri: 'https://pending.example/cb', codeChallenge: 'xyz' }, dummyRes)
-    ).rejects.toThrow('approval_pending');
+    ).rejects.toBeInstanceOf(CustomOAuthError);
 
     // Exchange client credentials fails
     if (client.client_secret) {
-      expect(
+      await expect(
         provider.exchangeClientCredentials(client.client_id, client.client_secret, 'read')
-      ).rejects.toThrow('approval_pending');
+      ).rejects.toBeInstanceOf(CustomOAuthError);
     }
+  });
+
+  test('approved DCR client cannot use an unapproved refresh grant', async () => {
+    const provider = new GBrainOAuthProvider({ sql: sqlAdapter });
+    const client = await provider.clientsStore.registerClient!({
+      client_name: 'Code only App',
+      redirect_uris: ['https://code-only.example/cb'],
+      grant_types: ['authorization_code'],
+    });
+    await provider.approvePendingClient({
+      clientId: client.client_id,
+      expectedRedirectUris: ['https://code-only.example/cb'],
+      expectedTokenEndpointAuthMethod: 'client_secret_post',
+      expectedGrantTypes: ['authorization_code'],
+      expectedResponseTypes: ['code'],
+      scopes: 'read',
+      sourceId: 'source-a',
+      federatedRead: ['source-a'],
+    });
+
+    const dummyRes: any = { redirect: () => {} };
+    await provider.authorize(client, { redirectUri: 'https://code-only.example/cb', codeChallenge: 'xyz' }, dummyRes);
+    const rows = await sqlAdapter`SELECT code_hash FROM oauth_codes WHERE client_id = ${client.client_id}`;
+    // A direct refresh exchange is rejected before a token can be consumed.
+    await expect(provider.exchangeRefreshToken(client, 'not-a-token')).rejects.toBeInstanceOf(UnauthorizedClientError);
+    expect(rows).toHaveLength(1);
   });
 
   test('approvePendingClient requires exact ID, exact metadata, and valid sources', async () => {
