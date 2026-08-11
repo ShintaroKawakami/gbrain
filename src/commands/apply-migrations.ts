@@ -311,8 +311,9 @@ function orchestratorOptsFrom(cli: ApplyMigrationsArgs): OrchestratorOpts {
 export interface ApplyMigrationsRunOpts {
   /**
    * #1553: one-shot capability for manual/destructive schema migrations,
-   * issued by the `gbrain apply-migrations --yes` dispatch and threaded to
-   * the schema-migration calls below. Undefined on every other path
+   * issued by the `gbrain apply-migrations --yes` / `--non-interactive`
+   * dispatch (issueManualMigrationCapabilityForArgv) and threaded to the
+   * schema-migration calls below. Undefined on every other path
    * (including --list / --dry-run), so those fail closed at the gate.
    */
   manualCapability?: ManualMigrationCapability;
@@ -396,6 +397,18 @@ export async function runApplyMigrations(
       await eng.connect(toEngineConfig(cfg));
       console.log('Running schema migrations from current config.version...');
       const result = await runMigrations(eng, { manualCapability: opts.manualCapability });
+      // #1553: the run may have stopped BEFORE a manual/destructive
+      // migration (no valid capability, or the one-shot capability was
+      // already consumed by an earlier gated migration in this run). That
+      // is not success — say so and exit non-zero.
+      if (result.blocked) {
+        console.error(
+          `Stopped before manual/destructive migration v${result.blocked.version} (${result.blocked.name}); ` +
+          `schema remains at v${result.current}. Re-run with explicit approval: gbrain apply-migrations --yes`,
+        );
+        await eng.disconnect();
+        process.exit(1);
+      }
       console.log(`Applied ${result.applied} schema migration(s); now at v${result.current}.`);
       await eng.disconnect();
     } catch (err) {
@@ -426,27 +439,40 @@ export async function runApplyMigrations(
       // lock release and hit a 30s timeout. The orchestrators handle
       // schema lifecycle internally on PGLite (phase A routes in-process),
       // so the warning here adds no information for PGLite users.
-      const skipPreflight = cfg.engine === 'pglite';
+      //
+      // #1553 exception: when this run holds an explicit-approval
+      // capability (`--yes` / `--non-interactive`, never --list/--dry-run),
+      // the pre-flight MUST run on PGLite too — orchestrator schema phases
+      // call runMigrations without a capability and stop at the manual
+      // gate, so skipping here would leave PGLite brains with no path
+      // across a gated migration (e.g. v126) at all.
+      const skipPreflight = cfg.engine === 'pglite' && !opts.manualCapability;
       if (!skipPreflight) {
         const eng = await createEngine(toEngineConfig(cfg));
-        await eng.connect(toEngineConfig(cfg));
-        const verStr = await eng.getConfig('version');
-        const schemaVer = parseInt(verStr || '1', 10);
-        const { runMigrations } = await import('../core/migrate.ts');
-        schemaBehind = await resolveSchemaBehind({
-          schemaVer,
-          latest: LATEST_VERSION,
-          // --list and --dry-run are read-only surfaces: never mutate schema
-          // even when combined with --yes/--non-interactive.
-          autoApply: (cli.yes || cli.nonInteractive) && !cli.dryRun && !cli.list,
-          run: () => runMigrations(eng, { manualCapability: opts.manualCapability }),
-        });
-        await eng.disconnect();
+        try {
+          await eng.connect(toEngineConfig(cfg));
+          const verStr = await eng.getConfig('version');
+          const schemaVer = parseInt(verStr || '1', 10);
+          const { runMigrations } = await import('../core/migrate.ts');
+          schemaBehind = await resolveSchemaBehind({
+            schemaVer,
+            latest: LATEST_VERSION,
+            // --list and --dry-run are read-only surfaces: never mutate schema
+            // even when combined with --yes/--non-interactive.
+            autoApply: (cli.yes || cli.nonInteractive) && !cli.dryRun && !cli.list,
+            run: () => runMigrations(eng, { manualCapability: opts.manualCapability }),
+          });
+        } finally {
+          await eng.disconnect();
+        }
       }
     }
-  } catch {
-    // Non-fatal: if DB is unreachable, orchestrator migrations can still
-    // run their filesystem-only phases.
+  } catch (err) {
+    // #1553: this pre-flight is the only PGLite path that can carry an
+    // explicit manual-migration capability. Treat a failure as schema behind
+    // rather than allowing the orchestrator tail to report false success.
+    schemaBehind = true;
+    console.error(`Schema pre-flight failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   const completed = loadCompletedMigrations();
@@ -565,7 +591,19 @@ export async function runApplyMigrations(
     }
   }
 
-  if (failed) process.exit(1);
+  // #1553: schemaBehind means the schema pre-flight stopped before a
+  // manual/destructive migration (one approval crosses at most ONE gate —
+  // with two gated migrations pending, the second is still blocked). The
+  // orchestrator chain finishing cleanly must NOT turn that into a
+  // successful exit: the command did not bring the schema to head.
+  if (schemaBehind && !failed) {
+    console.error(
+      'Orchestrator migrations finished, but schema migrations are still pending ' +
+      '(a manual/destructive migration requires explicit approval). ' +
+      'Run `gbrain apply-migrations --yes` to apply them.',
+    );
+  }
+  if (failed || schemaBehind) process.exit(1);
 }
 
 /** Exported for unit tests only. Do not use from production code. */

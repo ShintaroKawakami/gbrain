@@ -93,6 +93,26 @@ export function isMigrationIdempotent(m: Migration): boolean {
 }
 
 /**
+ * #1553: module-private issuer token. The ManualMigrationCapability
+ * constructor requires it, so production callers outside this module cannot
+ * construct a capability directly — and subclassing does not help, because
+ * `super()` would need the same token. Combined with the
+ * `issuedManualCapabilities` registry check in runMigrations(), a
+ * structurally-faked object (e.g. `Object.create(prototype)`) is rejected at
+ * the gate even though `instanceof` would pass.
+ */
+const MANUAL_CAPABILITY_ISSUER = Symbol('manual-migration-capability-issuer');
+
+/**
+ * #1553: module-private registry of legitimately-issued capabilities.
+ * runMigrations() only honors a capability that is BOTH a
+ * ManualMigrationCapability instance AND present here, so the only way to
+ * obtain a gate-crossing value is issueManualMigrationCapabilityForArgv().
+ */
+const issuedManualCapabilities = new WeakSet<ManualMigrationCapability>();
+let manualCapabilityIssuedForProcess = false;
+
+/**
  * #1553: one-shot capability authorizing exactly ONE manual/destructive
  * migration crossing (`manual: true`). Deliberately NOT module-global state:
  * there is no ambient grant for runMigrations() to pick up — the capability
@@ -100,7 +120,8 @@ export function isMigrationIdempotent(m: Migration): boolean {
  * consumed the first time runMigrations() crosses a gated migration with
  * it, so one approval can never implicitly authorize a later manual
  * migration in the same process. The ONLY production issuer is the
- * `gbrain apply-migrations --yes` dispatch in src/cli.ts (never --list,
+ * `gbrain apply-migrations --yes` / `--non-interactive` dispatch in
+ * src/cli.ts via issueManualMigrationCapabilityForArgv() (never --list,
  * --dry-run, or any other command); the engine initSchema() paths (ordinary
  * CLI connect, serve startup) call runMigrations() with no options, so they
  * can neither obtain nor reuse a capability.
@@ -108,14 +129,17 @@ export function isMigrationIdempotent(m: Migration): boolean {
 export class ManualMigrationCapability {
   private consumed = false;
 
-  private constructor() {}
-
   /**
-   * Issue a fresh one-shot capability. Called exclusively from the
-   * `gbrain apply-migrations --yes` dispatch.
+   * Not a public factory: the issuer token is module-private, so arbitrary
+   * callers cannot forge an instance. Use issueManualMigrationCapabilityForArgv().
    */
-  static issue(): ManualMigrationCapability {
-    return new ManualMigrationCapability();
+  constructor(issuerToken: symbol) {
+    if (issuerToken !== MANUAL_CAPABILITY_ISSUER) {
+      throw new Error(
+        'ManualMigrationCapability cannot be constructed directly; ' +
+        'it is issued only by the approved `gbrain apply-migrations --yes` dispatch.',
+      );
+    }
   }
 
   /** Flipped by runMigrations() the moment the capability crosses a gate. */
@@ -127,6 +151,31 @@ export class ManualMigrationCapability {
   consume(): void {
     this.consumed = true;
   }
+}
+
+/**
+ * #1553: the ONLY issuance path for a manual/destructive migration
+ * capability, and the single source of truth for the CLI approval contract:
+ * `--yes` and `--non-interactive` are equivalent explicit approvals, and the
+ * read-only surfaces (`--list`, `--dry-run`) NEVER receive a capability —
+ * even combined with an approval flag. Returns undefined when argv carries
+ * no valid approval, so callers fail closed by default.
+ */
+export function issueManualMigrationCapabilityForCurrentProcess(
+): ManualMigrationCapability | undefined {
+  const argv = process.argv.slice(2);
+  const approved = argv.includes('--yes') || argv.includes('--non-interactive');
+  const readOnly = argv.includes('--list') || argv.includes('--dry-run');
+  if (!approved || readOnly || manualCapabilityIssuedForProcess) return undefined;
+  manualCapabilityIssuedForProcess = true;
+  const capability = new ManualMigrationCapability(MANUAL_CAPABILITY_ISSUER);
+  issuedManualCapabilities.add(capability);
+  return capability;
+}
+
+/** Test-only seam; never use this from production command paths. */
+export function resetManualMigrationCapabilityForTest(): void {
+  manualCapabilityIssuedForProcess = false;
 }
 
 /** #1553: identifies a manual/destructive migration the runner stopped before. */
@@ -5925,6 +5974,47 @@ export async function pendingManualMigration(engine: BrainEngine): Promise<Manua
 }
 
 /**
+ * #1553: strict version of pendingManualMigration() for startup fail-closed.
+ *
+ * Three-valued result so the ordinary connectEngine / serve path can tell
+ * "no gated migration pending" apart from "I could not determine that":
+ *
+ *   - 'clear'   — version probe read a valid version and no manual migration
+ *                 is pending past it.
+ *   - 'blocked' — a manual/destructive migration is pending; startup must
+ *                 refuse until `gbrain apply-migrations --yes` crosses it.
+ *   - 'unknown' — the version probe FAILED (getConfig threw) or returned an
+ *                 unparseable value. An unreadable probe can hide a pending
+ *                 gated migration, so startup must refuse here too.
+ *
+ * pendingManualMigration() keeps its lenient null-on-failure contract for
+ * diagnostic callers; this probe is the one startup gates on.
+ */
+export type ManualMigrationGateProbe =
+  | { status: 'clear' }
+  | { status: 'blocked'; block: ManualMigrationBlock }
+  | { status: 'unknown'; reason: string };
+
+export async function probeManualMigrationGate(engine: BrainEngine): Promise<ManualMigrationGateProbe> {
+  let currentStr: string | null;
+  try {
+    currentStr = await engine.getConfig('version');
+  } catch (err) {
+    return { status: 'unknown', reason: err instanceof Error ? err.message : String(err) };
+  }
+  const normalized = currentStr?.trim() ?? '';
+  if (!/^[1-9]\d*$/.test(normalized)) {
+    return { status: 'unknown', reason: `unparseable schema version: ${JSON.stringify(currentStr)}` };
+  }
+  const current = Number(normalized);
+  if (!Number.isSafeInteger(current) || current > LATEST_VERSION) {
+    return { status: 'unknown', reason: `out-of-range schema version: ${JSON.stringify(currentStr)}` };
+  }
+  const m = MIGRATIONS.find(m => m.version > current && m.manual === true);
+  return m ? { status: 'blocked', block: { version: m.version, name: m.name } } : { status: 'clear' };
+}
+
+/**
  * v0.41.6.0 D4 — race-tolerant CLI-side migration runner.
  *
  * Wraps `engine.initSchema()` with a deadlock-aware retry + poll loop so
@@ -6065,10 +6155,11 @@ export interface RunMigrationsResult {
 export interface RunMigrationsOptions {
   /**
    * #1553: one-shot capability authorizing a single manual/destructive
-   * migration crossing, issued by the `gbrain apply-migrations --yes`
-   * dispatch and threaded through runApplyMigrations. Undefined on every
-   * ordinary path (connectEngine / serve startup via engine initSchema()),
-   * which therefore fails closed at the gate.
+   * migration crossing, issued by the `gbrain apply-migrations --yes` /
+   * `--non-interactive` dispatch (issueManualMigrationCapabilityForArgv) and
+   * threaded through runApplyMigrations. Undefined on every ordinary path
+   * (connectEngine / serve startup via engine initSchema()), which therefore
+   * fails closed at the gate.
    */
   manualCapability?: ManualMigrationCapability;
 }
@@ -6134,7 +6225,11 @@ export async function runMigrations(
     // stays clean for JSON-parsing callers.
     if (m.manual === true) {
       const capability = opts.manualCapability;
-      if (!(capability instanceof ManualMigrationCapability) || capability.isConsumed) {
+      if (
+        !(capability instanceof ManualMigrationCapability) ||
+        !issuedManualCapabilities.has(capability) ||
+        capability.isConsumed
+      ) {
         blocked = { version: m.version, name: m.name };
         process.stderr.write(
           `  [${m.version}] ${m.name} is a manual/destructive migration and requires explicit approval.\n` +

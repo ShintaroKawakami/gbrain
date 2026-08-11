@@ -1785,19 +1785,18 @@ async function handleCliOnly(command: string, args: string[]) {
     // connecting a second time when the orchestrator shells out to
     // `gbrain init --migrate-only` and `gbrain jobs smoke`.
     //
-    // #1553: `--yes` is the ONLY dispatch that may issue the one-shot
-    // capability authorizing manual/destructive schema migrations (e.g. v126
-    // oauth_clients reset). Issue it here and pass it into
-    // runApplyMigrations so its in-process runMigrations calls (schema
-    // pre-flight / --force-schema) can cross the gate; the capability is
-    // consumed by that crossing. Read-only surfaces (--list / --dry-run) and
-    // every other command never receive one, so their runMigrations calls
-    // stop before gated migrations.
-    let manualCapability: import('./core/migrate.ts').ManualMigrationCapability | undefined;
-    if (args.includes('--yes') && !args.includes('--list') && !args.includes('--dry-run')) {
-      const { ManualMigrationCapability } = await import('./core/migrate.ts');
-      manualCapability = ManualMigrationCapability.issue();
-    }
+    // #1553: explicit approval (`--yes` or `--non-interactive` — the two are
+    // the SAME contract here) is the ONLY dispatch that may carry the
+    // one-shot capability authorizing manual/destructive schema migrations
+    // (e.g. v126 oauth_clients reset). Issuance lives in migrate.ts
+    // (issueManualMigrationCapabilityForCurrentProcess) so the approval contract has a
+    // single source of truth: read-only surfaces (--list / --dry-run) never
+    // receive a capability, even combined with an approval flag, and every
+    // other command never receives one — their runMigrations calls stop
+    // before gated migrations. The capability is consumed by the first gated
+    // crossing, so one approval can never authorize a second manual migration.
+    const { issueManualMigrationCapabilityForCurrentProcess } = await import('./core/migrate.ts');
+    const manualCapability = issueManualMigrationCapabilityForCurrentProcess();
     const { runApplyMigrations } = await import('./commands/apply-migrations.ts');
     await runApplyMigrations(args, { manualCapability });
     return;
@@ -2902,15 +2901,22 @@ async function connectEngine(opts?: { probeOnly?: boolean }): Promise<BrainEngin
   // A still-pending gated migration means ordinary startup must NOT
   // continue serving as if migration succeeded — refuse here, before any
   // caller (the serve listener included) receives a live engine. The only
-  // way across is `gbrain apply-migrations --yes`.
+  // way across is `gbrain apply-migrations --yes`. The probe itself must
+  // fail closed too: an unreadable or unparseable schema version can hide a
+  // pending gated migration, so 'unknown' refuses startup exactly like
+  // 'blocked' does.
   {
-    const { pendingManualMigration } = await import('./core/migrate.ts');
-    const blocked = await pendingManualMigration(engine);
-    if (blocked) {
+    const { probeManualMigrationGate } = await import('./core/migrate.ts');
+    const gate = await probeManualMigrationGate(engine);
+    if (gate.status !== 'clear') {
       await engine.disconnect().catch(() => { /* best-effort: startup is aborting */ });
       throw new Error(
-        `Schema migration v${blocked.version} (${blocked.name}) is manual/destructive and requires explicit approval. ` +
-        `Refusing to start with a partially-migrated schema. Run: gbrain apply-migrations --yes`,
+        gate.status === 'blocked'
+          ? `Schema migration v${gate.block.version} (${gate.block.name}) is manual/destructive and requires explicit approval. ` +
+            `Refusing to start with a partially-migrated schema. Run: gbrain apply-migrations --yes`
+          : `Could not determine the schema version (${gate.reason}). ` +
+            `Refusing to start: an unreadable version probe can hide a pending manual/destructive migration. ` +
+            `Run \`gbrain doctor\` to diagnose, then \`gbrain apply-migrations --yes\`.`,
       );
     }
   }

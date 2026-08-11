@@ -5,12 +5,15 @@
  * and one-shot (`idempotent: false`). It must never auto-apply from the
  * ordinary connectEngine / serve startup path (engine initSchema()); only a
  * runMigrations call holding a ONE-SHOT ManualMigrationCapability — issued
- * by the `gbrain apply-migrations --yes` CLI dispatch and passed via
- * RunMigrationsOptions.manualCapability — may run it. The capability is
- * consumed the moment the runner crosses the gate, so one approval can
- * never implicitly authorize a later manual migration in the same process.
- * There is no module-global grant: issuing a capability does not arm the
- * runner, and ordinary paths have nothing to pick up. These tests pin all
+ * only by issueManualMigrationCapabilityForCurrentProcess() behind the
+ * `gbrain apply-migrations --yes` / `--non-interactive` CLI dispatch and
+ * passed via RunMigrationsOptions.manualCapability — may run it. The
+ * capability is consumed the moment the runner crosses the gate, so one
+ * approval can never implicitly authorize a later manual migration in the
+ * same process. There is no module-global grant and no public factory on
+ * the class: the constructor requires a module-private issuer token, and
+ * runMigrations additionally rejects any instance the issuer did not
+ * register, so structurally-forged capabilities fail closed. These tests pin all
  * four halves:
  *
  *   1. The ordinary path fails closed BEFORE v126: SQL never runs,
@@ -34,10 +37,25 @@ import {
   runMigrations,
   hasPendingMigrations,
   pendingManualMigration,
+  probeManualMigrationGate,
   ManualMigrationCapability,
+  issueManualMigrationCapabilityForCurrentProcess,
+  resetManualMigrationCapabilityForTest,
 } from '../src/core/migrate.ts';
+import { __testing as applyMigrationsTesting } from '../src/commands/apply-migrations.ts';
 
 const V126_BLOCK = { version: 126, name: 'oauth_clients_pending_approval_state' } as const;
+
+function issueForTest(args: string[]): ManualMigrationCapability | undefined {
+  const previous = process.argv;
+  try {
+    process.argv = [...previous.slice(0, 2), 'apply-migrations', ...args];
+    resetManualMigrationCapabilityForTest();
+    return issueManualMigrationCapabilityForCurrentProcess();
+  } finally {
+    process.argv = previous;
+  }
+}
 
 describe('manual/destructive migration gate (v126)', () => {
   let engine: PGLiteEngine;
@@ -72,6 +90,11 @@ describe('manual/destructive migration gate (v126)', () => {
     expect('authorizeManualMigrations' in migrate).toBe(false);
     expect('resetManualMigrationAuthorization' in migrate).toBe(false);
     expect('pendingManualGrant' in migrate).toBe(false);
+    // The class itself carries no public factory either: issuance goes
+    // through issueManualMigrationCapabilityForCurrentProcess, which validates the
+    // CLI approval contract and registers the instance in a module-private
+    // registry the gate checks.
+    expect('issue' in ManualMigrationCapability).toBe(false);
   });
 
   test('ordinary initSchema stops before v126 without advancing the version', async () => {
@@ -95,7 +118,7 @@ describe('manual/destructive migration gate (v126)', () => {
     // Issuing a capability (what the apply-migrations --yes dispatch does)
     // must not change the behavior of capability-less runMigrations calls —
     // there is no ambient grant for the runner to pick up.
-    const capability = ManualMigrationCapability.issue();
+    const capability = issueForTest(['--yes'])!;
     const blocked = await runMigrations(engine);
     expect(blocked.applied).toBe(0);
     expect(blocked.current).toBe(125);
@@ -129,7 +152,7 @@ describe('manual/destructive migration gate (v126)', () => {
 
     // The apply-migrations --yes path: issue the one-shot capability, then
     // the same runMigrations entry point crosses the gate with it.
-    const capability = ManualMigrationCapability.issue();
+    const capability = issueForTest(['--yes'])!;
     const res = await runMigrations(engine, { manualCapability: capability });
     expect(res.applied).toBe(1);
     expect(res.current).toBe(126);
@@ -195,7 +218,7 @@ describe('manual/destructive migration gate (v126)', () => {
     );
 
     // First authorized crossing: applies v126 and CONSUMES the capability.
-    const capability = ManualMigrationCapability.issue();
+    const capability = issueForTest(['--yes'])!;
     const first = await runMigrations(engine, { manualCapability: capability });
     expect(first.applied).toBe(1);
     expect(first.current).toBe(126);
@@ -225,11 +248,183 @@ describe('manual/destructive migration gate (v126)', () => {
 
     // A freshly-issued capability (a new apply-migrations --yes invocation)
     // is the only thing that crosses.
-    const fresh = ManualMigrationCapability.issue();
+    const fresh = issueForTest(['--yes'])!;
     const third = await runMigrations(engine, { manualCapability: fresh });
     expect(third.applied).toBe(1);
     expect(third.current).toBe(126);
     expect(third.blocked).toBeNull();
     expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(126);
   }, 60000);
+});
+
+describe('capability issuance contract (#1553)', () => {
+  test('--yes and --non-interactive are the same approval; read-only flags never receive a capability', () => {
+    // The single source of truth cli.ts dispatches through. Both approval
+    // spellings must issue; neither read-only surface may — even combined
+    // with an approval flag.
+    expect(issueForTest(['--yes'])).toBeInstanceOf(ManualMigrationCapability);
+    expect(issueForTest(['--non-interactive'])).toBeInstanceOf(ManualMigrationCapability);
+    expect(issueForTest(['--yes', '--non-interactive'])).toBeInstanceOf(ManualMigrationCapability);
+    expect(issueForTest([])).toBeUndefined();
+    expect(issueForTest(['--list'])).toBeUndefined();
+    expect(issueForTest(['--dry-run'])).toBeUndefined();
+    expect(issueForTest(['--yes', '--list'])).toBeUndefined();
+    expect(issueForTest(['--yes', '--dry-run'])).toBeUndefined();
+    expect(issueForTest(['--non-interactive', '--list'])).toBeUndefined();
+    expect(issueForTest(['--non-interactive', '--dry-run'])).toBeUndefined();
+  });
+
+  test('the capability cannot be constructed directly (module-private issuer token)', () => {
+    expect(() => new ManualMigrationCapability(Symbol('forged'))).toThrow();
+  });
+
+  test('a process can issue at most one capability from its actual CLI argv', () => {
+    const previous = process.argv;
+    try {
+      process.argv = [...previous.slice(0, 2), 'apply-migrations', '--yes'];
+      resetManualMigrationCapabilityForTest();
+      expect(issueManualMigrationCapabilityForCurrentProcess()).toBeInstanceOf(ManualMigrationCapability);
+      expect(issueManualMigrationCapabilityForCurrentProcess()).toBeUndefined();
+    } finally {
+      process.argv = previous;
+      resetManualMigrationCapabilityForTest();
+    }
+  });
+
+  test('a structurally-forged capability fails closed at the gate', async () => {
+    // instanceof passes for a prototype-derived object, but the runner also
+    // requires the module-private issuer registry entry — so this forgery
+    // must behave exactly like no capability at all.
+    const engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
+    try {
+      expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(125);
+      const forged = Object.create(ManualMigrationCapability.prototype) as ManualMigrationCapability;
+      expect(forged).toBeInstanceOf(ManualMigrationCapability);
+      const res = await runMigrations(engine, { manualCapability: forged });
+      expect(res.applied).toBe(0);
+      expect(res.current).toBe(125);
+      expect(res.blocked).toEqual(V126_BLOCK);
+      expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(125);
+    } finally {
+      await engine.disconnect();
+    }
+  }, 60000);
+});
+
+describe('version probe fail-closed (#1553)', () => {
+  let engine: PGLiteEngine;
+
+  beforeEach(async () => {
+    engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
+  });
+
+  afterEach(async () => {
+    await engine.disconnect();
+  });
+
+  test('blocked / clear reflect the gated migration state', async () => {
+    // v126 pending (fresh brain stops at 125): startup must refuse.
+    expect(await probeManualMigrationGate(engine)).toEqual({ status: 'blocked', block: V126_BLOCK });
+
+    // After an approved crossing: startup proceeds.
+    const capability = issueForTest(['--yes'])!;
+    const res = await runMigrations(engine, { manualCapability: capability });
+    expect(res.current).toBe(126);
+    expect(await probeManualMigrationGate(engine)).toEqual({ status: 'clear' });
+  }, 60000);
+
+  test('an unparseable version value reports unknown (startup must refuse)', async () => {
+    await engine.setConfig('version', 'not-a-number');
+    const probe = await probeManualMigrationGate(engine);
+    expect(probe.status).toBe('unknown');
+    // The lenient diagnostic probe keeps its old contract (null on
+    // failure); only the strict startup probe fails closed.
+    expect(await pendingManualMigration(engine)).toBeNull();
+  }, 60000);
+
+  test.each(['126junk', '1.5', '0', '127'])('version %p reports unknown (startup must refuse)', async (version) => {
+    await engine.setConfig('version', version);
+    expect((await probeManualMigrationGate(engine)).status).toBe('unknown');
+  }, 60000);
+
+  test('a failing version read reports unknown (startup must refuse)', async () => {
+    // An engine that was never connected throws from getConfig — the same
+    // shape as a broken config table at startup.
+    const broken = new PGLiteEngine();
+    const probe = await probeManualMigrationGate(broken);
+    expect(probe.status).toBe('unknown');
+  }, 60000);
+});
+
+describe('one approval, two gated migrations (#1553)', () => {
+  let engine: PGLiteEngine;
+
+  beforeEach(async () => {
+    engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
+  });
+
+  afterEach(async () => {
+    await engine.disconnect();
+  });
+
+  test('a single capability crosses only the FIRST of two consecutive manual migrations', async () => {
+    // Simulate the future shape the contract guards against: a SECOND
+    // manual/destructive migration pending right behind v126. One approval
+    // must apply v126 and stop before v127 — and the run must report the
+    // stop (blocked set, current < latest) so the CLI exits non-zero.
+    const secondGate = {
+      version: 127,
+      name: 'test_second_manual_gate',
+      idempotent: false,
+      manual: true,
+      sql: '',
+    };
+    MIGRATIONS.push(secondGate);
+    try {
+      const capability = issueForTest(['--yes'])!;
+      const res = await runMigrations(engine, { manualCapability: capability });
+      expect(res.applied).toBe(1); // v126 only
+      expect(res.current).toBe(126);
+      expect(res.blocked).toEqual({ version: 127, name: 'test_second_manual_gate' });
+      expect(capability.isConsumed).toBe(true);
+      expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(126);
+
+      // No ambient approval is left behind: a capability-less retry stays
+      // blocked at the second gate.
+      const retry = await runMigrations(engine);
+      expect(retry.applied).toBe(0);
+      expect(retry.current).toBe(126);
+      expect(retry.blocked).toEqual({ version: 127, name: 'test_second_manual_gate' });
+      expect(parseInt((await engine.getConfig('version'))!, 10)).toBe(126);
+    } finally {
+      MIGRATIONS.splice(MIGRATIONS.findIndex(m => m.version === 127), 1);
+    }
+  }, 60000);
+
+  test('resolveSchemaBehind stays true when the run stops before a later gated migration', async () => {
+    // The CLI contract behind "one approval ≠ success with two gated
+    // migrations": the pre-flight run crossed v126 (125 → 126) but stopped
+    // before the next manual migration, so the schema is still behind and
+    // runApplyMigrations must not report success.
+    const { resolveSchemaBehind } = applyMigrationsTesting;
+    await expect(resolveSchemaBehind({
+      schemaVer: 125,
+      latest: 127,
+      autoApply: true,
+      run: async () => ({ applied: 1, current: 126 }),
+    })).resolves.toBe(true);
+    // Sanity: a run that actually reaches head reports not-behind.
+    await expect(resolveSchemaBehind({
+      schemaVer: 125,
+      latest: 127,
+      autoApply: true,
+      run: async () => ({ applied: 2, current: 127 }),
+    })).resolves.toBe(false);
+  });
 });
