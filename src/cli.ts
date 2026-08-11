@@ -1780,6 +1780,12 @@ async function handleCliOnly(command: string, args: string[]) {
     return;
   }
   if (command === 'apply-migrations') {
+    // #1553: apply-migrations opens the host config/engine directly. A
+    // mounted-brain selector must never authorize destructive host migration.
+    const { resolveBrainId } = await import('./core/brain-resolver.ts');
+    if (resolveBrainId(getCliOptions().brain) !== 'host') {
+      throw new Error('apply-migrations is host-only; remove --brain or select the host brain explicitly.');
+    }
     // Does not need connectEngine — each phase (schema, smoke, host-rewrite)
     // manages its own subprocess or file-layer access directly. Avoids
     // connecting a second time when the orchestrator shells out to
