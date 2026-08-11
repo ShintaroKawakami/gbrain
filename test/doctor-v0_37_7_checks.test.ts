@@ -83,8 +83,8 @@ describe('checkOauthConfidentialHealth (#1166)', () => {
 
   test('public client (auth_method=none, hash=NULL) → ok (v0.34.1.0 shape preserved)', async () => {
     await engine.executeRaw(
-      `INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris, grant_types, scope, token_endpoint_auth_method)
-       VALUES ('pkce-pub', NULL, 'pub', $1, $2, 'read', 'none')`,
+      `INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris, grant_types, response_types, scope, token_endpoint_auth_method, approval_state, source_id, federated_read)
+       VALUES ('pkce-pub', NULL, 'pub', $1, $2, ARRAY['code'], 'read', 'none', 'approved', 'default', ARRAY['default'])`,
       [['https://e.test/cb'], ['authorization_code']],
     );
     const r = await checkOauthConfidentialHealth(engine);
@@ -93,8 +93,8 @@ describe('checkOauthConfidentialHealth (#1166)', () => {
 
   test('confidential client with NULL hash → fail (the #1166 regression fingerprint)', async () => {
     await engine.executeRaw(
-      `INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris, grant_types, scope, token_endpoint_auth_method)
-       VALUES ('conf-broken', NULL, 'broken', $1, $2, 'read', 'client_secret_post')`,
+      `INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris, grant_types, response_types, scope, token_endpoint_auth_method, approval_state, source_id, federated_read)
+       VALUES ('conf-broken', NULL, 'broken', $1, $2, ARRAY['code'], 'read', 'client_secret_post', 'approved', 'default', ARRAY['default'])`,
       [['https://e.test/cb'], ['authorization_code']],
     );
     const r = await checkOauthConfidentialHealth(engine);
@@ -105,8 +105,8 @@ describe('checkOauthConfidentialHealth (#1166)', () => {
 
   test('confidential client with proper hash → ok', async () => {
     await engine.executeRaw(
-      `INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris, grant_types, scope, token_endpoint_auth_method)
-       VALUES ('healthy', 'abc123def', 'h', $1, $2, 'read', 'client_secret_post')`,
+      `INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris, grant_types, response_types, scope, token_endpoint_auth_method, approval_state, source_id, federated_read)
+       VALUES ('healthy', 'abc123def', 'h', $1, $2, ARRAY['code'], 'read', 'client_secret_post', 'approved', 'default', ARRAY['default'])`,
       [['https://e.test/cb'], ['authorization_code']],
     );
     const r = await checkOauthConfidentialHealth(engine);

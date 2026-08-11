@@ -66,11 +66,11 @@ async function seedClient(clientId: string, opts: SeedOpts = {}): Promise<void> 
   await engine.executeRaw(
     `INSERT INTO oauth_clients
        (client_id, client_name, client_secret_hash, scope, grant_types,
-        redirect_uris, token_endpoint_auth_method,
+        response_types, redirect_uris, token_endpoint_auth_method, approval_state, source_id, federated_read,
         bound_tools, bound_source_id, bound_brain_id, bound_slug_prefixes,
         bound_max_concurrent, budget_usd_per_day, created_at, deleted_at)
      VALUES ($1, $1, '', $2, ARRAY['client_credentials'],
-             ARRAY[]::text[], 'client_secret_post',
+             ARRAY[]::text[], ARRAY[]::text[], 'client_secret_post', 'approved', 'default', ARRAY['default'],
              $3, $4, $5, $6, $7, $8, now(), NULL)
      ON CONFLICT (client_id) DO UPDATE SET
        bound_tools = EXCLUDED.bound_tools,

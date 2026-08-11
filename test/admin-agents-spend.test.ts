@@ -50,11 +50,11 @@ async function seedClient(opts: {
   await engine.executeRaw(
     `INSERT INTO oauth_clients
        (client_id, client_name, client_secret_hash, scope, grant_types,
-        redirect_uris, token_endpoint_auth_method,
+        response_types, redirect_uris, token_endpoint_auth_method, approval_state, source_id, federated_read,
         bound_tools, bound_max_concurrent, budget_usd_per_day,
         created_at, deleted_at)
      VALUES ($1, $2, '', $3, ARRAY['client_credentials'],
-             ARRAY[]::text[], 'client_secret_post',
+             ARRAY[]::text[], ARRAY[]::text[], 'client_secret_post', 'approved', 'default', ARRAY['default'],
              $4, 1, $5, now(), $6)`,
     [
       opts.id,

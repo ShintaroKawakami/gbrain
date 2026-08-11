@@ -30,8 +30,8 @@ beforeEach(async () => {
 async function seedClient(clientId: string, capUsd: number | null): Promise<void> {
   await engine.executeRaw(
     `INSERT INTO oauth_clients
-       (client_id, client_name, client_secret_hash, scope, grant_types, redirect_uris, token_endpoint_auth_method, budget_usd_per_day, created_at, deleted_at)
-     VALUES ($1, $1, '', 'agent', ARRAY['client_credentials'], ARRAY[]::text[], 'client_secret_post', $2, now(), NULL)
+       (client_id, client_name, client_secret_hash, scope, grant_types, response_types, redirect_uris, token_endpoint_auth_method, approval_state, source_id, federated_read, budget_usd_per_day, created_at, deleted_at)
+     VALUES ($1, $1, '', 'agent', ARRAY['client_credentials'], ARRAY[]::text[], ARRAY[]::text[], 'client_secret_post', 'approved', 'default', ARRAY['default'], $2, now(), NULL)
      ON CONFLICT (client_id) DO UPDATE SET budget_usd_per_day = EXCLUDED.budget_usd_per_day`,
     [clientId, capUsd],
   );
