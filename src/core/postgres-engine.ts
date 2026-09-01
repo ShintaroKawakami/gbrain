@@ -3870,9 +3870,9 @@ export class PostgresEngine implements BrainEngine {
         : opts?.sourceId
           ? sql`AND p.source_id = ${opts.sourceId}`
           : sql``;
-    // #4524: default mode 'islanded' — identical predicate to getHealth's
-    // orphan_pages (no live inbound AND no live outbound; outbound counts
-    // only when its TARGET page is live, per gbrain#4153 endpoint liveness).
+    // #2336: membership is registry plumbing, not reachability. IS DISTINCT FROM keeps
+    // manual/markdown/extractor/legacy NULL; rejecting all non-manual hides wikilinks.
+    // #4524: default 'islanded' matches getHealth; outbound requires a live target.
     // mode 'inbound' preserves the legacy no-inbound-only view.
     const outboundFilter =
       (opts?.mode ?? 'islanded') === 'islanded'
@@ -3881,7 +3881,7 @@ export class PostgresEngine implements BrainEngine {
             FROM links l
             JOIN pages tgt ON tgt.id = l.to_page_id
             WHERE l.from_page_id = p.id
-              AND tgt.deleted_at IS NULL
+              AND tgt.deleted_at IS NULL AND l.link_source IS DISTINCT FROM 'gbrain-source-membership-v1'
           )`
         : sql``;
     const rows = await sql`
@@ -3897,7 +3897,7 @@ export class PostgresEngine implements BrainEngine {
           FROM links l
           JOIN pages src ON src.id = l.from_page_id
           WHERE l.to_page_id = p.id
-            AND src.deleted_at IS NULL
+            AND src.deleted_at IS NULL AND l.link_source IS DISTINCT FROM 'gbrain-source-membership-v1'
         )
         ${outboundFilter}
       ORDER BY p.slug
@@ -5063,11 +5063,11 @@ export class PostgresEngine implements BrainEngine {
       SELECT p.slug,
              (NOT EXISTS (SELECT 1 FROM links l
                           JOIN pages src ON src.id = l.from_page_id
-                          WHERE l.to_page_id = p.id AND src.deleted_at IS NULL
+                          WHERE l.to_page_id = p.id AND src.deleted_at IS NULL AND l.link_source IS DISTINCT FROM 'gbrain-source-membership-v1'
                             AND (${scope}::text[] IS NULL OR src.source_id = ANY(${scope})))
               AND NOT EXISTS (SELECT 1 FROM links l
                           JOIN pages tgt ON tgt.id = l.to_page_id
-                          WHERE l.from_page_id = p.id AND tgt.deleted_at IS NULL
+                          WHERE l.from_page_id = p.id AND tgt.deleted_at IS NULL AND l.link_source IS DISTINCT FROM 'gbrain-source-membership-v1'
                             AND (${scope}::text[] IS NULL OR tgt.source_id = ANY(${scope})))) as islanded,
              EXISTS (SELECT 1 FROM timeline_entries te WHERE te.page_id = p.id) as has_timeline
       FROM pages p
