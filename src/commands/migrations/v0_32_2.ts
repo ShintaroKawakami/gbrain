@@ -11,9 +11,11 @@
  *   A. Schema       — assert migration v51 has run.
  *   B. Fence facts  — backfill DB facts → entity-page fences (dry-run
  *                     by default; explicit --write required).
- *   C. Verify       — re-parse each touched page, count rows, compare
+ *   C. Verify       — re-parse each fence-owned page, count rows, compare
  *                     against the DB rows for that page; partial on
- *                     mismatch.
+ *                     mismatch. Conversation-miner (`cli:`) facts are not
+ *                     fence-owned (extract-conversation-facts writes the
+ *                     chat log as source of truth) and are excluded.
  *   D. Record       — runner-owned ledger write (apply-migrations.ts).
  *
  * Idempotency: phase B only touches rows with row_num IS NULL. Re-runs
@@ -186,17 +188,6 @@ async function phaseBFenceFacts(
     const localPathById = new Map<string, string | null>();
     for (const s of sources) localPathById.set(s.id, s.local_path);
 
-    // Dirty-tree refusal: check every source's local_path before writing.
-    for (const [id, localPath] of localPathById) {
-      if (localPath && isLocalPathDirty(localPath)) {
-        return {
-          name: 'fence_facts',
-          status: 'failed',
-          detail: `source "${id}" has uncommitted changes in ${localPath}. Commit or stash, then re-run.`,
-        };
-      }
-    }
-
     // Walk legacy rows in (source_id, entity_slug) groups for per-page
     // atomic writes.
     const legacy = await engine.executeRaw<LegacyFactRow>(
@@ -233,6 +224,21 @@ async function phaseBFenceFacts(
       const list = groups.get(key) ?? [];
       list.push(row);
       groups.set(key, list);
+    }
+
+    // Dirty-tree refusal: check ONLY the sources we are about to write
+    // into. A dirty tree in an unrelated source (or zero fenceable rows
+    // at all) must not block a no-op or a targeted backfill (#927).
+    const targetSourceIds = new Set([...groups.keys()].map(k => k.split('\0')[0]));
+    for (const id of targetSourceIds) {
+      const localPath = localPathById.get(id);
+      if (localPath && isLocalPathDirty(localPath)) {
+        return {
+          name: 'fence_facts',
+          status: 'failed',
+          detail: `source "${id}" has uncommitted changes in ${localPath}. Commit or stash, then re-run.`,
+        };
+      }
     }
 
     for (const [key, group] of groups) {
@@ -368,10 +374,15 @@ async function phaseCVerify(
     const localPathById = new Map<string, string | null>();
     for (const s of sources) localPathById.set(s.id, s.local_path);
 
+    // Conversation-miner rows stamp row_num without a ## Facts fence
+    // (chat-log shape is the source of truth). Same cli: exclusion as
+    // extract_facts reconciliation. Counting them here fails every brain
+    // that ran extract-conversation-facts.
     const groups = await engine.executeRaw<{ source_id: string; source_markdown_slug: string; n: string }>(
       `SELECT source_id, source_markdown_slug, COUNT(*) AS n
          FROM facts
         WHERE row_num IS NOT NULL
+          AND COALESCE(source, '') NOT LIKE 'cli:%'
         GROUP BY source_id, source_markdown_slug`,
     );
 

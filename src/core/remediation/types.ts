@@ -63,6 +63,16 @@ export interface RemediationOpts {
   resumePlanHash?: string;
   /** Whether to attempt resume at all (default false). */
   resume?: boolean;
+  /**
+   * Caller-supplied RemediationStep entries threaded into the planner.
+   * Mirrors RemediationPlanOpts.extraRemediations so onboard's --apply
+   * --auto path (and MCP run_onboard auto modes) forward the same
+   * onboard-check remediations the --check path already passes through
+   * computeRemediationPlan. Without this the runner saw only generic
+   * brain_score remediations and reported "Nothing to do" whenever the
+   * only applicable work was an extra (e.g. extract-ner).
+   */
+  extraRemediations?: RemediationStep[];
 }
 
 /**
@@ -74,6 +84,13 @@ export interface StepResult {
   id: string;
   job_id: number | null;
   status: string;
+  /** True when the submit deduped onto an existing IN-FLIGHT (waiting/active)
+   *  row — job_id is that row; no new work was inserted (#3626). */
+  coalesced?: boolean;
+  /** #3626: set when a prior run's terminal (completed/failed) row still held
+   *  the content-hash key. Carries that stale row's id; the step re-ran for
+   *  real under a `:r:<doctor_run_id>`-rotated key (job_id is the fresh job). */
+  deduped_job_id?: number;
 }
 
 /**

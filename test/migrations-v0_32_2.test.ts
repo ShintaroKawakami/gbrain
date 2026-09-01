@@ -10,10 +10,11 @@
  * __setTestEngineOverride so we don't need a configured brain.
  */
 
-import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { v0_32_2, __setTestEngineOverride, __testing } from '../src/commands/migrations/v0_32_2.ts';
@@ -238,6 +239,52 @@ describe('phaseBFenceFacts — happy path backfill', () => {
   });
 });
 
+describe('phaseBFenceFacts — dirty-tree refusal scoping (#927)', () => {
+  let dirtyDir: string;
+
+  beforeEach(async () => {
+    // A second source whose local_path is a git repo with uncommitted changes.
+    dirtyDir = mkdtempSync(join(tmpdir(), 'mig-v0_32_2-dirty-'));
+    execFileSync('git', ['-C', dirtyDir, 'init', '-q']);
+    writeFileSync(join(dirtyDir, 'uncommitted.md'), 'dirty', 'utf-8');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (engine as any).db.query(
+      `INSERT INTO sources (id, name, local_path) VALUES ('other', 'other', $1)`,
+      [dirtyDir],
+    );
+  });
+
+  afterEach(async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (engine as any).db.query(`DELETE FROM sources WHERE id = 'other'`);
+    rmSync(dirtyDir, { recursive: true, force: true });
+  });
+
+  test('no legacy facts at all → complete, dirty unrelated source ignored', async () => {
+    const r = await __testing.phaseBFenceFacts(engine, OPTS);
+    expect(r.status).toBe('complete');
+    expect(r.detail).toContain('scanned=0');
+  });
+
+  test('facts scoped to a clean source fence despite dirty unrelated source', async () => {
+    await seedLegacyFact({ entity_slug: 'people/alice', fact: 'Founded Acme' });
+
+    const r = await __testing.phaseBFenceFacts(engine, OPTS);
+    expect(r.status).toBe('complete');
+    expect(r.detail).toContain('fenced=1');
+    expect(existsSync(join(brainDir, 'people/alice.md'))).toBe(true);
+  });
+
+  test('still refuses when the TARGETED source is dirty', async () => {
+    await seedLegacyFact({ entity_slug: 'people/alice', fact: 'F1', source_id: 'other' });
+
+    const r = await __testing.phaseBFenceFacts(engine, OPTS);
+    expect(r.status).toBe('failed');
+    expect(r.detail).toContain('"other"');
+    expect(r.detail).toContain('uncommitted changes');
+  });
+});
+
 describe('phaseCVerify', () => {
   test('returns complete when fence + DB row counts match', async () => {
     await seedLegacyFact({ entity_slug: 'people/alice', fact: 'F1' });
@@ -266,6 +313,31 @@ describe('phaseCVerify', () => {
     expect(r.status).toBe('failed');
     expect(r.detail).toContain('drifted');
     expect(r.detail).toContain('people/alice');
+  });
+
+  test('ignores conversation-miner facts that have no markdown fence', async () => {
+    await seedLegacyFact({ entity_slug: 'people/alice', fact: 'F1' });
+    await __testing.phaseBFenceFacts(engine, OPTS);
+
+    const slug = 'cursor-sessions/chat-1';
+    mkdirSync(join(brainDir, 'cursor-sessions'), { recursive: true });
+    writeFileSync(
+      join(brainDir, `${slug}.md`),
+      '---\ntype: conversation\n---\n\n# chat\n\nhello\n',
+      'utf-8',
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (engine as any).db.query(
+      `INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, notability,
+                          valid_from, source, confidence, row_num, source_markdown_slug)
+       VALUES ('default', NULL, 'Said hello', 'fact', 'private', 'medium',
+               now(), 'cli:extract-conversation-facts:seg', 1.0, 1, $1)`,
+      [slug],
+    );
+
+    const r = await __testing.phaseCVerify(engine, OPTS);
+    expect(r.status).toBe('complete');
+    expect(r.detail).toContain('pages_checked=1');
   });
 });
 

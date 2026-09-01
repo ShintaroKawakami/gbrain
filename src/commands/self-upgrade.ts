@@ -1,5 +1,5 @@
 import { VERSION } from '../version.ts';
-import { isMinorOrMajorBump, isValidVersionString } from '../core/semver.ts';
+import { isNewerVersion, isValidVersionString } from '../core/semver.ts';
 import { fetchChangelog, fetchLatestRelease } from './check-update.ts';
 import { detectInstallMethod, runUpgrade } from './upgrade.ts';
 import { writeUpdateCache } from '../core/self-upgrade.ts';
@@ -35,9 +35,10 @@ export async function runSelfUpgrade(args: string[]): Promise<void> {
   const force = args.includes('--force');
   const json = args.includes('--json');
 
-  const release = await fetchLatestRelease();
+  const result = await fetchLatestRelease();
+  const release = result.ok ? result : null;
   const latest = release ? release.tag.replace(/^v/, '') : null;
-  const behind = !!latest && isValidVersionString(latest) && isMinorOrMajorBump(VERSION, latest);
+  const behind = !!latest && isValidVersionString(latest) && isNewerVersion(VERSION, latest);
 
   // Warm the cache so the next invocation's startup hook can emit without a fetch.
   try {
@@ -98,5 +99,9 @@ export async function runSelfUpgrade(args: string[]): Promise<void> {
   }
 
   // Apply: delegate to the hardcoded upgrade path (full swap + post-upgrade).
-  await runUpgrade([]);
+  // Pass the fetched target so runUpgrade can detect exact-tag no-op
+  // "upgrades" instead of reporting false success (#4366).
+  await runUpgrade([], {
+    targetVersion: latest && isValidVersionString(latest) ? latest : undefined,
+  });
 }

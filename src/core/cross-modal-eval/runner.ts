@@ -44,9 +44,18 @@ export const DEFAULT_DIMENSIONS: string[] = [
  * `--slot-a-model`, `--slot-b-model`, `--slot-c-model` on the CLI.
  */
 export const DEFAULT_SLOTS: SlotConfig[] = [
-  { id: 'A', model: 'openai:gpt-4o' },
+  // Every default MUST be listed in its recipe's chat touchpoint (pinned by
+  // test/cross-modal-default-slots.test.ts) — `openai:gpt-4o` sat here after
+  // the OpenAI recipe dropped it, so slot A errored "not listed for OpenAI
+  // chat" on every install and the 3-slot panel could never reach its
+  // 2-model quorum without a Google key (verdict: permanently inconclusive).
+  { id: 'A', model: 'openai:gpt-5.2' },
   { id: 'B', model: 'anthropic:claude-opus-4-7' },
-  { id: 'C', model: 'google:gemini-1.5-pro' },
+  // gemini-1.5-pro was retired by Google (#3510), so slot C failed even with
+  // a Google key configured. deepseek:deepseek-v4-pro preserves the
+  // three-distinct-provider contract with a model registered in both the
+  // recipe and canonical pricing tables (same replacement as PR #3501).
+  { id: 'C', model: 'deepseek:deepseek-v4-pro' },
 ];
 
 export interface SlotConfig {
@@ -255,8 +264,26 @@ async function callSlot(
   }
 }
 
-function buildPrompt(task: string, dimensions: string[], output: string): string {
+/**
+ * The JSON key a judge must use for a dimension: the label before the
+ * ` — ` separator (whole trimmed string when a custom dimension has none).
+ * Exported for the prompt-pinning test.
+ */
+export function dimensionScoreKey(dimension: string): string {
+  return dimension.split('—')[0].trim();
+}
+
+/** Exported for the judge-key pinning test only. */
+export function buildPrompt(task: string, dimensions: string[], output: string): string {
   const dimList = dimensions.map((d, i) => `${i + 1}. ${d}`).join('\n');
+  // Root-cause fix for cross-model dimension splits (#3491, the #4338
+  // approach): pin the exact "scores" keys instead of the old "dim_1_name"
+  // placeholder that let each judge invent its own spelling/casing.
+  // aggregate.ts's trim+lowercase normalization stays as the deterministic
+  // backstop for judges that ignore the pinning.
+  const scoreKeys = dimensions
+    .map((d) => `    ${JSON.stringify(dimensionScoreKey(d))}: { "score": N, "feedback": "..." },`)
+    .join('\n');
   return [
     'You are a strict quality evaluator. Given a TASK and an OUTPUT, evaluate whether the output achieves the task goals.',
     '',
@@ -275,11 +302,10 @@ function buildPrompt(task: string, dimensions: string[], output: string): string
     '',
     'Then list exactly 10 specific, actionable improvements — concrete changes with examples, prioritized by impact.',
     '',
-    'Respond in JSON only (no markdown fences):',
+    'Respond in JSON only (no markdown fences), using EXACTLY these keys under "scores":',
     '{',
     '  "scores": {',
-    '    "dim_1_name": { "score": N, "feedback": "..." },',
-    '    ...',
+    scoreKeys,
     '  },',
     '  "overall": N,',
     '  "improvements": ["1. ...", "2. ...", ... "10. ..."]',

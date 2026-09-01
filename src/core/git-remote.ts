@@ -140,14 +140,58 @@ export class GitOperationError extends Error {
   }
 }
 
-export const GIT_ENV = {
-  // Confine to the gbrain SSRF model — no credential helpers, no SSH askpass,
-  // no GUI prompts. Inherit PATH so git itself is findable.
-  GIT_TERMINAL_PROMPT: '0',
-  GCM_INTERACTIVE: 'never',
-  GIT_ASKPASS: '/bin/false',
-  SSH_ASKPASS: '/bin/false',
-} as const;
+/**
+ * Stderr-first error detail for a failed git subprocess (#1315).
+ *
+ * execFileSync errors put the full argv echo FIRST
+ * ("Command failed: git -C <path> -c http.followRedirects=false …") and the
+ * real `fatal: …` stderr last — so every downstream `.slice(0, N)` (sync's
+ * warn-and-continue lines, phase breadcrumbs) truncated the message before
+ * the actual reason ever appeared. Lead with the captured stderr; fall back
+ * to the envelope message when stderr is empty (e.g. spawn failures).
+ */
+function gitErrorDetail(e: unknown): string {
+  const stderr = (e as { stderr?: unknown } | null)?.stderr;
+  if (stderr != null) {
+    const s = String(stderr).trim();
+    if (s) return s;
+  }
+  return e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * Build the strict no-prompt git env for the current (or given) platform.
+ *
+ * POSIX: confine to the gbrain SSRF model — no credential helpers, no SSH
+ * askpass, no GUI prompts (`/bin/false` fails any askpass invocation fast).
+ *
+ * win32 (#1315): `/bin/false` does not exist, so pointing GIT_ASKPASS at it
+ * makes every authed operation die with a confusing "could not run askpass"
+ * spawn error instead of failing auth cleanly. Drop both askpass overrides
+ * there and set `SSH_ASKPASS_REQUIRE=never` (OpenSSH 8.4+) so ssh never
+ * pops a GUI prompt; `GIT_TERMINAL_PROMPT=0` remains the no-terminal-prompt
+ * guard on every platform.
+ *
+ * Pure + platform-parameterized so the win32 shape is unit-testable on
+ * POSIX CI (no Windows runner exists).
+ */
+export function buildGitEnv(
+  platform: NodeJS.Platform = process.platform,
+): Record<string, string> {
+  const env: Record<string, string> = {
+    GIT_TERMINAL_PROMPT: '0',
+    GCM_INTERACTIVE: 'never',
+  };
+  if (platform === 'win32') {
+    env.SSH_ASKPASS_REQUIRE = 'never';
+  } else {
+    env.GIT_ASKPASS = '/bin/false';
+    env.SSH_ASKPASS = '/bin/false';
+  }
+  return env;
+}
+
+export const GIT_ENV = buildGitEnv();
 
 /**
  * Auth-capable git env for the durability push/probe paths (v0.42.44).
@@ -208,15 +252,21 @@ export function cloneRepo(url: string, destDir: string, opts: CloneOpts = {}): v
   } catch (e) {
     throw new GitOperationError(
       'clone',
-      `git clone failed for ${url}: ${(e as Error).message}`,
+      `git clone failed for ${url}: ${gitErrorDetail(e)}`,
       e,
     );
   }
 }
 
-/** Pull a repo with --ff-only and the same SSRF-defensive flags as cloneRepo. */
+/**
+ * Pull a repo with --ff-only and the same SSRF-defensive flags as cloneRepo.
+ * #3836: global flags build via durableSsrfFlags() so the documented
+ * GBRAIN_GIT_ALLOW_FILE_TRANSPORT=1 escape hatch reaches sync's pull —
+ * self-hosted local-filesystem remotes could clone but never pull. Default
+ * stays `never`; the origin was already validated at clone time.
+ */
 export function pullRepo(repoPath: string, opts: { timeoutMs?: number } = {}): void {
-  const args: string[] = ['-C', repoPath, ...GIT_SSRF_FLAGS, 'pull', ...GIT_SSRF_SUBCOMMAND_FLAGS, '--ff-only'];
+  const args: string[] = ['-C', repoPath, ...durableSsrfFlags(), 'pull', ...GIT_SSRF_SUBCOMMAND_FLAGS, '--ff-only'];
   try {
     execFileSync('git', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -226,7 +276,7 @@ export function pullRepo(repoPath: string, opts: { timeoutMs?: number } = {}): v
   } catch (e) {
     throw new GitOperationError(
       'pull',
-      `git pull failed in ${repoPath}: ${(e as Error).message}`,
+      `git pull failed in ${repoPath}: ${gitErrorDetail(e)}`,
       e,
     );
   }
@@ -241,7 +291,9 @@ export function pullRepo(repoPath: string, opts: { timeoutMs?: number } = {}): v
  * the estimator catches and falls back to local HEAD.
  */
 export function fetchRemote(repoPath: string, branch: string, opts: { timeoutMs?: number } = {}): void {
-  const args: string[] = ['-C', repoPath, ...GIT_SSRF_FLAGS, 'fetch', ...GIT_SSRF_SUBCOMMAND_FLAGS, 'origin', branch];
+  // #3836: durableSsrfFlags (not the hardcoded GIT_SSRF_FLAGS) so the
+  // file-transport escape hatch applies to the estimator's fetch too.
+  const args: string[] = ['-C', repoPath, ...durableSsrfFlags(), 'fetch', ...GIT_SSRF_SUBCOMMAND_FLAGS, 'origin', branch];
   try {
     execFileSync('git', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -251,7 +303,7 @@ export function fetchRemote(repoPath: string, branch: string, opts: { timeoutMs?
   } catch (e) {
     throw new GitOperationError(
       'fetch',
-      `git fetch failed in ${repoPath}: ${(e as Error).message}`,
+      `git fetch failed in ${repoPath}: ${gitErrorDetail(e)}`,
       e,
     );
   }
@@ -303,6 +355,83 @@ export function validateRepoState(
   return 'healthy';
 }
 
+/**
+ * True if `path` is itself a git repo OR a subdirectory of one, per
+ * `git rev-parse --show-toplevel`. Mirrors the walk-up discovery
+ * `sync.ts:discoverGitRoot` performs at sync time (#753/#774 — subdir-of-git
+ * sources are valid), so a directory that passes this check is guaranteed
+ * not to hit sync's "Not inside a git repository" error later. Used by
+ * `addSource` (#2707) to validate `--path` at registration time instead of
+ * deferring the failure to the first sync.
+ */
+export function isInsideGitRepo(path: string): boolean {
+  try {
+    execFileSync('git', ['-C', path, 'rev-parse', '--show-toplevel'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 10_000,
+      env: { ...process.env, ...GIT_ENV },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The empty-tree object ID for `path`'s repo, derived (not hardcoded) so
+ * this works for both the default SHA-1 object format and the opt-in
+ * `--object-format=sha256` one (git 2.29+) — each has its own empty-tree
+ * OID. `git hash-object -t tree --stdin < /dev/null` computes the hash of
+ * a zero-entry tree using whatever hash algorithm `path`'s repo is
+ * configured for, without needing to know which one that is. #2707 codex
+ * round 4 (P2): an earlier version hardcoded the well-known SHA-1 constant
+ * (`4b825dc6...`), which silently mismatched — and so let an empty
+ * SHA-256 repo through — on a SHA-256 repo's real (different) empty-tree
+ * OID.
+ */
+function emptyTreeOid(path: string): string {
+  return execFileSync('git', ['-C', path, 'hash-object', '-t', 'tree', '--stdin'], {
+    input: '',
+    stdio: ['pipe', 'pipe', 'pipe'],
+    timeout: 10_000,
+    env: { ...process.env, ...GIT_ENV },
+  }).toString().trim();
+}
+
+/**
+ * True if `path`'s HEAD tree has at least one tracked entry scoped to
+ * `path` itself. `-C path` + the `HEAD:./` revision syntax resolves the
+ * tree object for `path` specifically (not the whole repo root), so this
+ * is correct for both a repo's toplevel AND a subdirectory-of-a-repo
+ * source — then a single OID comparison against that repo's empty-tree
+ * object (see `emptyTreeOid`) tells us whether that tree is empty. #2707
+ * codex round 3 (P2): unlike listing (`ls-tree`), this is O(1) output — no
+ * `maxBuffer` exposure on a repo with a very large number of entries.
+ *
+ * Subsumes "no commits at all" (`HEAD:./` on an unborn repo fails to
+ * resolve — there's no HEAD) AND "has a HEAD commit but it's empty"
+ * (#2707 codex round 2): `git commit --allow-empty` followed by creating
+ * untracked files resolves `HEAD:./` successfully (to the empty-tree OID)
+ * but that tree has zero entries — a directory that would pass a bare
+ * `rev-parse HEAD` check yet still can't sync (or worse, "succeeds"
+ * importing nothing and then never notices the untracked files change —
+ * the silent-staleness class #2707 exists to prevent). A directory
+ * that's `git init`ed but never committed, or where this specific path
+ * was never `git add`ed, fails this check either way.
+ */
+export function hasTrackedContent(path: string): boolean {
+  try {
+    const out = execFileSync('git', ['-C', path, 'rev-parse', '--verify', 'HEAD:./'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 10_000,
+      env: { ...process.env, ...GIT_ENV },
+    });
+    return out.toString().trim() !== emptyTreeOid(path);
+  } catch {
+    return false;
+  }
+}
+
 // ── Durability helpers (v0.42.44) ───────────────────────────────────────────
 // Used by the brain-repo durability feature (`gbrain sources harden/pull`) and
 // the DB-free pull cron. These are the auth-capable, rebase-aware counterparts
@@ -316,7 +445,7 @@ export function validateRepoState(
  * transport. Default stays `never`. These ops act on an ALREADY-validated origin
  * (set + checked at clone time); `http.followRedirects=false` is the live guard.
  */
-function durableSsrfFlags(): string[] {
+export function durableSsrfFlags(): string[] {
   const fileAllow = process.env.GBRAIN_GIT_ALLOW_FILE_TRANSPORT === '1' ? 'always' : 'never';
   return [
     '-c', 'http.followRedirects=false',
@@ -346,7 +475,7 @@ function runGit(
     );
     return out.toString().trim();
   } catch (e) {
-    throw new GitOperationError(op, `git ${subcommand} failed in ${repoPath}: ${(e as Error).message}`, e);
+    throw new GitOperationError(op, `git ${subcommand} failed in ${repoPath}: ${gitErrorDetail(e)}`, e);
   }
 }
 

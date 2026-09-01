@@ -24,10 +24,42 @@ import { importFromContent } from '../../src/core/import-file.ts';
 const skip = !hasDatabase();
 const describeE2E = skip ? describe.skip : describe;
 
-function makeCtx(opts: { remote?: boolean } = {}): OperationContext {
+// HOME isolation. Several tests in this file shell out to `gbrain init` and
+// `gbrain import` via Bun.spawnSync. `gbrain init` calls saveConfig() which
+// writes to $HOME/.gbrain/config.json, and `gbrain import` writes a sync
+// bookmark to the same directory. Without isolating $HOME, these tests
+// clobber the user's real production gbrain config every time `bun run
+// test:e2e` is executed. Sibling test/e2e/migration-flow.test.ts solved
+// this with a module-level temp HOME; mirror that pattern here so the
+// E2E suite stops mutating user state.
+let _origHome: string | undefined;
+let _tmpHome: string | undefined;
+if (!skip) {
+  _origHome = process.env.HOME;
+  _tmpHome = mkdtempSync(join(tmpdir(), 'gbrain-e2e-mechanical-home-'));
+  process.env.HOME = _tmpHome;
+}
+
+afterAll(() => {
+  if (skip) return;
+  if (_origHome === undefined) delete process.env.HOME;
+  else process.env.HOME = _origHome;
+  try { if (_tmpHome) rmSync(_tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
+});
+
+function makeCtx(
+  opts: { remote?: boolean; storage?: { backend: 'local'; localPath: string } } = {},
+): OperationContext {
   return {
     engine: getEngine(),
-    config: { engine: 'postgres', database_url: process.env.DATABASE_URL! },
+    config: {
+      engine: 'postgres',
+      database_url: process.env.DATABASE_URL!,
+      // #4302: file_upload / file_url are fail-closed — they refuse with a
+      // typed storage_error unless a storage backend is configured. Tests
+      // that exercise the success path pass a local (temp-dir) backend here.
+      ...(opts.storage ? { storage: opts.storage } : {}),
+    },
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     dryRun: false,
     // Default: trusted local invocation (matches `gbrain call` semantics).
@@ -175,6 +207,15 @@ describeE2E('E2E: Search', () => {
     for (const [query, score] of Object.entries(scores)) {
       console.log(`    "${query}": ${(score * 100).toFixed(0)}%`);
     }
+
+    // Guard value: every known-item query must surface at least one ground-truth
+    // doc in the top 5. This is a deliberately loose floor (not a tuned P@5
+    // threshold) — it catches a total keyword-retrieval regression without
+    // breaking on every scoring/fixture tweak. Without it this test asserted
+    // nothing and a 0%-precision result passed silently.
+    for (const [query, score] of Object.entries(scores)) {
+      expect(score).toBeGreaterThan(0);
+    }
   });
 });
 
@@ -205,10 +246,22 @@ describeE2E('E2E: Links', () => {
   }, 30_000);
 
   test('traverse_graph finds connected pages', async () => {
-    // Links should already be added from prior test in this describe block
-    const graph = await callOp('traverse_graph', { slug: 'people/sarah-chen', depth: 2 }) as any;
+    // Self-contained: do not depend on a prior test's add_link. add_link is
+    // idempotent (ON CONFLICT DO NOTHING), so re-adding here is safe whether or
+    // not the round-trip test ran first, and the test no longer false-passes or
+    // false-fails based on describe-block ordering.
+    await callOp('add_link', {
+      from: 'people/sarah-chen',
+      to: 'companies/novamind',
+      link_type: 'founded',
+    });
+
+    const graph = await callOp('traverse_graph', { slug: 'people/sarah-chen', depth: 2 }) as any[];
     expect(Array.isArray(graph)).toBe(true);
     expect(graph.length).toBeGreaterThanOrEqual(1);
+    // Content assertion, not just shape: the linked company must be reachable.
+    const reachable = graph.map((n: any) => n.slug ?? n.to_slug ?? n.to_page_slug);
+    expect(reachable).toContain('companies/novamind');
   });
 
   test('remove_link removes the link', async () => {
@@ -271,18 +324,25 @@ describeE2E('E2E: Timeline', () => {
   afterAll(teardownDB);
 
   test('add_timeline_entry + get_timeline round trip', async () => {
-    await callOp('add_timeline_entry', {
+    const entryParams = {
       slug: 'people/sarah-chen',
       date: '2025-04-01',
       summary: 'Test timeline entry',
       detail: 'Added via E2E test',
       source: 'e2e-test',
-    });
+    };
+    const first = await callOp('add_timeline_entry', entryParams);
+    expect(first).toMatchObject({ status: 'ok' }); // #1856: result also carries write_through
+
+    // #3827: an identical retry is deduplicated by the unique index — the op
+    // must report the drop instead of a silent 'ok'.
+    const dup = await callOp('add_timeline_entry', entryParams);
+    expect(dup).toMatchObject({ status: 'skipped', reason: 'duplicate' });
 
     const timeline = await callOp('get_timeline', { slug: 'people/sarah-chen' }) as any[];
     expect(timeline.length).toBeGreaterThanOrEqual(1);
-    const entry = timeline.find((e: any) => e.summary === 'Test timeline entry');
-    expect(entry).toBeDefined();
+    const matching = timeline.filter((e: any) => e.summary === 'Test timeline entry');
+    expect(matching.length).toBe(1);
   }, 30_000);
 });
 
@@ -469,8 +529,14 @@ describeE2E('E2E: Admin', () => {
   test('get_health returns valid structure', async () => {
     const health = await callOp('get_health') as any;
     expect(health).toBeDefined();
-    expect(typeof health.page_count).toBe('number');
-    expect(typeof health.embed_coverage).toBe('number');
+    // Value bounds, not just types: page_count must match the fixture inventory
+    // and embed_coverage is a 0..1 fraction (src/commands/doctor.ts multiplies
+    // by 100 and compares to 0.9). Type-only checks let embed_coverage: -9999
+    // through; these catch a genuinely broken health payload.
+    expect(health.page_count).toBe(16);
+    expect(Number.isFinite(health.embed_coverage)).toBe(true);
+    expect(health.embed_coverage).toBeGreaterThanOrEqual(0);
+    expect(health.embed_coverage).toBeLessThanOrEqual(1);
   });
 });
 
@@ -488,7 +554,17 @@ describeE2E('E2E: Chunks & Resolution', () => {
   test('get_chunks returns chunks for imported page', async () => {
     const chunks = await callOp('get_chunks', { slug: 'people/sarah-chen' }) as any[];
     expect(chunks.length).toBeGreaterThan(0);
-    expect(chunks[0].chunk_text).toBeTruthy();
+    // Content + ordering, not just truthiness (a whitespace-only chunk is truthy):
+    // every chunk has real text and a numeric index, the indexes are
+    // non-decreasing in return order, and the page's own name appears somewhere.
+    for (const c of chunks) {
+      expect(typeof c.chunk_text).toBe('string');
+      expect(c.chunk_text.trim().length).toBeGreaterThan(0);
+      expect(typeof c.chunk_index).toBe('number');
+    }
+    const indexes = chunks.map((c: any) => c.chunk_index);
+    expect(indexes).toEqual([...indexes].sort((x, y) => x - y));
+    expect(chunks.some((c: any) => c.chunk_text.includes('Sarah'))).toBe(true);
   }, 30_000);
 
   test('resolve_slugs finds partial match', async () => {
@@ -549,7 +625,7 @@ describeE2E('E2E: Ingest Log & Raw Data', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────
-// Files (stub verification)
+// Files (fail-closed refusal without a backend + real local-backend path)
 // ─────────────────────────────────────────────────────────────────
 
 describeE2E('E2E: Files', () => {
@@ -571,7 +647,24 @@ describeE2E('E2E: Files', () => {
     writeFileSync(tmpFile, 'fake pdf content');
 
     try {
-      const result = await callOp('file_upload', {
+      // #4302 (fail-closed storage honesty): with NO storage backend
+      // configured, file_upload must refuse with a typed storage_error and
+      // must NOT record a phantom files row.
+      let refused: any = null;
+      try {
+        await callOp('file_upload', { path: tmpFile, page_slug: 'people/sarah-chen' });
+      } catch (e) {
+        refused = e;
+      }
+      expect(refused).not.toBeNull();
+      expect(refused.code).toBe('storage_error');
+      expect(((await callOp('file_list', {})) as any[]).length).toBe(0);
+
+      // Success path: a real (local, temp-dir) backend — bytes stored,
+      // files row recorded, file_list + file_url read it back.
+      const storage = { backend: 'local' as const, localPath: join(tmpDir, 'storage') };
+      const uploadOp = operationsByName['file_upload'];
+      const result = await uploadOp.handler(makeCtx({ storage }), {
         path: tmpFile,
         page_slug: 'people/sarah-chen',
       }) as any;
@@ -582,9 +675,18 @@ describeE2E('E2E: Files', () => {
       const files = await callOp('file_list', {}) as any[];
       expect(files.length).toBe(1);
 
-      // Verify file_url returns URI format
-      const url = await callOp('file_url', { storage_path: result.storage_path }) as any;
-      expect(url.url).toContain('gbrain:files/');
+      // Regression: Postgres BIGINT(size_bytes) returned native BigInt before
+      // v0.22.5 so the MCP serializer threw and CLI listFiles div-by-1024 threw.
+      expect(typeof files[0].size_bytes).toBe('number');
+      expect(() => JSON.stringify(files)).not.toThrow();
+
+      // Verify file_url resolves a REAL backend URL (#4302 replaced the
+      // gbrain:files/ placeholder with the backend's own URL after an
+      // existence probe; LocalStorage yields file://).
+      const urlOp = operationsByName['file_url'];
+      const url = await urlOp.handler(makeCtx({ storage }), { storage_path: result.storage_path }) as any;
+      expect(url.url).toMatch(/^file:\/\//);
+      expect(url.url).toContain('sarah-chen');
     } finally {
       rmSync(tmpDir, { recursive: true });
     }
@@ -657,9 +759,29 @@ describeE2E('E2E: file_list LIMIT enforcement', () => {
   }, 30_000);
 
   test('file_list without slug also respects LIMIT 100', async () => {
-    // The 150 rows from the previous test are still in the DB
+    // Self-sufficient: seed our own >100 rows rather than relying on the
+    // previous test's 150 rows surviving in the DB. A bun reorder, a focused
+    // `-t` run, or a failure mid-insert in the prior test would otherwise leave
+    // this asserting against an indeterminate row count.
+    const sql = getConn();
+    const seedSlug = 'test-limit-noslug';
+    await sql`
+      INSERT INTO pages (slug, title, type, compiled_truth, frontmatter)
+      VALUES (${seedSlug}, ${'Test Limit NoSlug'}, ${'note'}, ${'body'}, ${'{}'}::jsonb)
+      ON CONFLICT (source_id, slug) DO NOTHING
+    `;
+    for (let i = 0; i < 120; i++) {
+      await sql`
+        INSERT INTO files (page_slug, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
+        VALUES (${seedSlug}, ${'nf-' + String(i).padStart(3, '0') + '.txt'}, ${seedSlug + '/nf-' + i + '.txt'}, ${'text/plain'}, ${100}, ${'nhash-' + i}, ${'{}'}::jsonb)
+        ON CONFLICT (storage_path) DO NOTHING
+      `;
+    }
+    const total = await sql`SELECT count(*)::int AS n FROM files`;
+    expect(Number(total[0].n)).toBeGreaterThan(100); // cap is actually exercised
+
     const files = await callOp('file_list', {}) as any[];
-    expect(files.length).toBeLessThanOrEqual(100);
+    expect(files.length).toBe(100);
   });
 });
 

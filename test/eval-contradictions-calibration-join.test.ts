@@ -26,7 +26,7 @@ function buildMember(slug: string, holder: string | null = 'garry'): PairMember 
   return {
     slug,
     chunk_id: 1,
-    take_id: null,
+    take_id: null, take_row_num: null,
     source_tier: 'curated',
     holder,
     text: 'some text',
@@ -52,7 +52,7 @@ function buildFinding(slugA: string, slugB: string): ContradictionFinding {
 
 function buildProfile(activeTags: string[], brier: number | null = 0.21): CalibrationProfileRow {
   return {
-    id: 1,
+    id: '1',
     source_id: 'default',
     holder: 'garry',
     wave_version: 'v0.36.1.0',

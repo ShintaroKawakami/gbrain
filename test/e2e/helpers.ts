@@ -13,6 +13,7 @@ import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import * as db from '../../src/core/db.ts';
 import { importFromContent } from '../../src/core/import-file.ts';
 import { parseMarkdown } from '../../src/core/markdown.ts';
+import { assertSafeE2eDatabaseUrl } from '../helpers/db-guard.ts';
 
 // Load .env.testing if present
 const envPath = resolve(import.meta.dir, '../../.env.testing');
@@ -67,6 +68,13 @@ export function hasDatabase(): boolean {
 }
 
 /**
+ * Production guard, moved to test/helpers/db-guard.ts so test files outside
+ * test/e2e/ can import it without loading this module. Re-exported here for
+ * existing call sites (setupDB below, test/e2e/db-guard.test.ts).
+ */
+export { assertSafeE2eDatabaseUrl };
+
+/**
  * Connect to DB, run schema init, truncate all tables.
  * Call in beforeAll() of each test file.
  */
@@ -74,6 +82,7 @@ export async function setupDB(): Promise<PostgresEngine> {
   if (!DATABASE_URL) {
     throw new Error('DATABASE_URL not set. Copy .env.testing.example to .env.testing and configure it.');
   }
+  assertSafeE2eDatabaseUrl(DATABASE_URL);
 
   // Disconnect any prior connection (clean slate)
   await db.disconnect();
@@ -100,6 +109,26 @@ export async function setupDB(): Promise<PostgresEngine> {
     INSERT INTO config (key, value) VALUES ('schema_version', '1')
     ON CONFLICT (key) DO NOTHING
   `);
+
+  // Reset leaked brain identity: `sources` is not in ALL_TABLES (the default
+  // row must survive), but rows/columns written by earlier files or runs
+  // persist. writeSyncAnchor's ownership guard (#3735) keys on
+  // sources.default.local_path — a stale value from another test makes every
+  // legacy-path performSync classify as first_sync forever. 42P01-tolerant
+  // like the TRUNCATE loop above.
+  try {
+    await conn.unsafe(`DELETE FROM sources WHERE id <> 'default'`);
+    // Only the sync-identity columns: local_path feeds writeSyncAnchor's
+    // ownership guard (#3735) and last_commit/last_sync_at feed first_sync
+    // classification. chunker_version is deliberately left alone — NULLing
+    // it flips extraction-staleness semantics for unrelated suites.
+    await conn.unsafe(
+      `UPDATE sources SET local_path = NULL, last_commit = NULL, last_sync_at = NULL WHERE id = 'default'`,
+    );
+  } catch (e: unknown) {
+    const code = (e as { code?: string })?.code;
+    if (code !== '42P01' && code !== '42703') throw e; // missing table/column on older schemas
+  }
 
   engine = new PostgresEngine();
   await engine.connect({ database_url: DATABASE_URL });

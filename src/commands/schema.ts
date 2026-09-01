@@ -23,14 +23,17 @@ import {
   addAliasToType,
   addLinkTypeToPack,
   addPrefixToType,
+  BUNDLED_PACK_NAMES,
   addTypeToPack,
   invalidatePackCache,
   loadActivePack,
+  loadResolvedPackByName,
   removeAliasFromType,
   removeLinkTypeFromPack,
   removePrefixFromType,
   removeTypeFromPack,
   resolveActivePackNameOnly,
+  resolveLoadedPack,
   loadPackFromFile,
   parseSchemaPackManifest,
   runStatsCore,
@@ -47,7 +50,8 @@ import {
 } from '../core/schema-pack/index.ts';
 import type { SchemaPackManifest, PackPrimitive } from '../core/schema-pack/manifest-v1.ts';
 import { PACK_PRIMITIVES } from '../core/schema-pack/manifest-v1.ts';
-import { gbrainPath, loadConfig, configPath } from '../core/config.ts';
+import { bundledPackPath } from '../core/schema-pack/bundled-assets.ts';
+import { gbrainPath, loadConfig, configPath, toEngineConfig } from '../core/config.ts';
 
 export async function runSchema(args: string[]): Promise<void> {
   const sub = args[0];
@@ -165,8 +169,27 @@ Resolution chain (7-tier, tier 1 trust-gated):
 
 async function runActive(_args: string[]): Promise<void> {
   const cfg = loadConfig();
-  const resolution = resolveActivePackNameOnly({ cfg, remote: false });
-  const pack = await loadActivePack({ cfg, remote: false });
+  // #3792: consult the DB-plane schema_pack (tier 4) so `gbrain schema
+  // active` reports the SAME pack the engine queries with on brains whose
+  // active pack was flipped via `gbrain config set schema_pack` /
+  // unify-types. Best-effort AND gated on an actually-configured brain
+  // (cfg non-null): an unconfigured home has no DB plane to consult, and
+  // connecting would cold-CREATE a PGLite data dir as a side effect of a
+  // read-only inspection command.
+  let dbConfig: string | undefined;
+  if (cfg) {
+    try {
+      dbConfig = await withConnectedEngine(async (engine) => {
+        try {
+          return (await engine.getConfig('schema_pack')) ?? undefined;
+        } catch {
+          return undefined;
+        }
+      });
+    } catch { /* no connectable DB — file/env resolution stands */ }
+  }
+  const resolution = resolveActivePackNameOnly({ cfg, remote: false, dbConfig });
+  const pack = await loadActivePack({ cfg, remote: false, dbConfig });
   console.log(`Active pack: ${pack.manifest.name} v${pack.manifest.version}`);
   console.log(`Source: ${resolution.source}`);
   console.log(`Pack identity: ${pack.identity}`);
@@ -179,7 +202,7 @@ async function runActive(_args: string[]): Promise<void> {
 }
 
 function runList(_args: string[]): void {
-  const bundled = ['gbrain-base', 'gbrain-recommended'];
+  const bundled = [...BUNDLED_PACK_NAMES];
   const installedDir = gbrainPath('schema-packs');
   const installed: string[] = [];
   if (existsSync(installedDir)) {
@@ -366,12 +389,17 @@ function runUse(args: string[]): void {
 }
 
 function packPathByName(name: string): string | null {
-  if (name === 'gbrain-base') {
-    // Resolve bundled YAML — try a few locations.
+  if (BUNDLED_PACK_NAMES.has(name)) {
+    // Statically bundled asset path [ENG-6] (#4266): resolves in dev AND
+    // inside `bun build --compile` binaries, where the import.meta-relative
+    // candidates below don't exist.
+    const asset = bundledPackPath(name);
+    if (asset) return asset;
+    // Resolve bundled YAML — import.meta fallback, try a few locations.
     const here = dirname(new URL(import.meta.url).pathname);
     const candidates = [
-      join(here, '..', 'core', 'schema-pack', 'base', 'gbrain-base.yaml'),
-      join(here, '..', '..', 'src', 'core', 'schema-pack', 'base', 'gbrain-base.yaml'),
+      join(here, '..', 'core', 'schema-pack', 'base', `${name}.yaml`),
+      join(here, '..', '..', 'src', 'core', 'schema-pack', 'base', `${name}.yaml`),
     ];
     for (const c of candidates) {
       if (existsSync(c)) return c;
@@ -433,16 +461,12 @@ function parseFlags(args: string[]): ParsedFlags {
 
 async function withConnectedEngine<T>(fn: (engine: import('../core/engine.ts').BrainEngine) => Promise<T>): Promise<T> {
   const { createEngine } = await import('../core/engine-factory.ts');
-  const cfg = loadConfig() ?? {};
-  const engineKind = (cfg as { engine?: string }).engine === 'postgres' ? 'postgres' : 'pglite';
+  const cfg = loadConfig() ?? { engine: 'pglite' as const };
   // PR #1321 (closed) defensive fix retained: build the EngineConfig once and
   // pass it to BOTH createEngine and engine.connect. The factory captures
   // config at construction; explicit re-pass at connect() is defense in depth
   // against future engine implementations that read URL from connect-time.
-  const connectConfig: import('../core/types.ts').EngineConfig = {
-    engine: engineKind,
-    database_url: (cfg as { database_url?: string }).database_url,
-  };
+  const connectConfig = toEngineConfig(cfg);
   const engine = await createEngine(connectConfig);
   await engine.connect(connectConfig);
   try {
@@ -706,7 +730,24 @@ async function runLintCmd(args: string[]): Promise<void> {
   let pack: SchemaPackManifest | null;
   if (name) {
     const p = packPathByName(name);
-    try { pack = p ? loadPackFromFile(p) : null; } catch { pack = null; }
+    let raw: SchemaPackManifest | null;
+    try { raw = p ? loadPackFromFile(p) : null; } catch { raw = null; }
+    if (raw) {
+      // #4501: lint the MERGED manifest (extends chain + borrow_from
+      // resolved), matching the no-name branch's loadActivePack path —
+      // a child pack referencing inherited parent types must not fail
+      // raw-manifest lint. Fall back to the raw child (with a stderr
+      // warning) when the chain can't be resolved, e.g. missing parent.
+      try {
+        pack = (await loadResolvedPackByName(name)).manifest;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`warn: could not resolve extends chain for pack \`${name}\` (${msg}); linting raw manifest only`);
+        pack = raw;
+      }
+    } else {
+      pack = null;
+    }
   } else {
     pack = (await loadActivePack({ cfg, remote: false })).manifest;
   }

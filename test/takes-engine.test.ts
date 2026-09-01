@@ -6,6 +6,7 @@
  */
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { embedStaleTakes } from '../src/core/embed-takes.ts';
 
 let engine: PGLiteEngine;
 let alicePageId: number;
@@ -99,6 +100,22 @@ describe('searchTakes', () => {
   test('searchTakes honors takesHoldersAllowList', async () => {
     const worldHits = await engine.searchTakes('founder', { takesHoldersAllowList: ['world'] });
     expect(worldHits.every(h => h.holder === 'world')).toBe(true);
+  });
+
+  // #3267: whole-string trigram % structurally can't match a short keyword
+  // against a long claim (similarity between the full strings stays under the
+  // 0.3 threshold). word_similarity (<%) matches the keyword against the
+  // best-matching word span instead.
+  test('single-word keyword matches a long claim containing it (#3267)', async () => {
+    await engine.addTakesBatch([
+      {
+        page_id: acmePageId, row_num: 50,
+        claim: 'Acme will consolidate the mid-market vertical SaaS landscape through disciplined acquisitions and a shared billing platform over the next five years',
+        kind: 'bet', holder: 'garry', weight: 0.6,
+      },
+    ]);
+    const hits = await engine.searchTakes('consolidate');
+    expect(hits.some(h => h.claim.includes('consolidate the mid-market'))).toBe(true);
   });
 });
 
@@ -374,5 +391,36 @@ describe('countStaleTakes + listStaleTakes', () => {
     expect(stale.length).toBe(count);
     expect(stale[0]).toHaveProperty('take_id');
     expect(stale[0]).toHaveProperty('claim');
+  });
+});
+
+describe('take embedding writes', () => {
+  test('persists a take vector and removes it from the stale set', async () => {
+    const [take] = await engine.listTakes({ page_id: alicePageId, active: true, limit: 1 });
+    expect(take).toBeDefined();
+    const dims = Number(await engine.getConfig('embedding_dimensions')) || 1536;
+
+    const updated = await engine.updateTakeEmbeddings([{
+      take_id: take!.id,
+      embedding: new Float32Array(dims).fill(0.25),
+    }]);
+
+    expect(updated).toBe(1);
+    expect(await engine.countStaleTakes()).toBeGreaterThanOrEqual(0);
+    const stored = await engine.getTakeEmbeddings([take!.id]);
+    expect(stored.get(take!.id)?.length).toBe(dims);
+  });
+
+  test('embedding pass writes provider vectors and activates vector search', async () => {
+    const dims = Number(await engine.getConfig('embedding_dimensions')) || 1536;
+    const result = await embedStaleTakes(engine, {
+      batchSize: 2,
+      embedFn: async (texts) => texts.map(() => new Float32Array(dims).fill(0.5)),
+    });
+
+    expect(result.failures).toBe(0);
+    expect(result.embedded).toBeGreaterThan(0);
+    const hits = await engine.searchTakesVector(new Float32Array(dims).fill(0.5), { limit: 10 });
+    expect(hits.length).toBeGreaterThan(0);
   });
 });

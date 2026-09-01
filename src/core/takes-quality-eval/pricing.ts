@@ -34,12 +34,20 @@ export interface ModelPricing {
 const SUPPORTED_MODELS = [
   'openai:gpt-4o',
   'openai:gpt-5',
+  'openai:gpt-5.2',
   'openai:gpt-5.5',
+  'anthropic:claude-opus-5',
   'anthropic:claude-opus-4-8',
   'anthropic:claude-opus-4-7',
+  'anthropic:claude-sonnet-5',
   'anthropic:claude-sonnet-4-6',
   'anthropic:claude-haiku-4-5',
-  'google:gemini-1.5-pro',
+  // gemini-2.5-flash holds the DEFAULT_MODEL_PANEL slot; gemini-1.5-pro
+  // (#3510) and the gemini-2.0 family before it were retired by Google. The
+  // retired ids stay listed so a `--models` run over historical results still
+  // budget-gates, but they are no longer reachable defaults.
+  'google:gemini-2.5-flash',
+  'google:gemini-2.0-flash',
   'google:gemini-2-flash',
 ] as const;
 

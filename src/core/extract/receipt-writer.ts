@@ -85,11 +85,21 @@ const RUN_ID_SHORT_LEN = 8;
 /**
  * Truncate a run id to the standard 8-char short form used in slug
  * paths. Idempotent — passing an already-short id returns it unchanged.
- * Non-hex / non-alphanumeric chars survive (op-checkpoint ids may
- * include dashes or other separators).
+ * Non-hex / non-alphanumeric chars survive INSIDE the short form
+ * (op-checkpoint ids may include dashes or other separators), but
+ * boundary hyphens are trimmed (#3443): `slugifySegment()` strips
+ * leading/trailing hyphens during repo sync, so a short form like
+ * 'propose-' (from propose-<timestamp> run ids) made the DB receipt
+ * slug and its Git-backed slug disagree — writing the receipt through
+ * to the repo created a normalized sibling instead of materializing
+ * the existing page. Invariant: slugifySegment(shortRunId(x)) ===
+ * shortRunId(x) for slug-safe run ids.
  */
 export function shortRunId(runId: string): string {
-  return runId.slice(0, RUN_ID_SHORT_LEN);
+  // ponytail: truncation-based discrimination is only as good as the run id's
+  // first 8 chars; families that need per-run uniqueness must front-load it.
+  const short = runId.slice(0, RUN_ID_SHORT_LEN).replace(/^-+|-+$/g, '');
+  return short || (runId ? 'run' : '');
 }
 
 /**
@@ -157,6 +167,11 @@ function buildReceiptFrontmatter(input: ExtractReceiptInput): Record<string, unk
   const fm: Record<string, unknown> = {
     type: 'extract_receipt',
     dream_generated: true,
+    // #1978: receipts record an operation, not a source document — the
+    // run_id/round fields ARE the provenance. Explicit exemption keeps the
+    // doctor raw_provenance check quiet.
+    raw_trace_exempt: true,
+    raw_trace_exempt_reason: 'operation receipt; provenance is run_id + round',
     kind: input.kind,
     source_id: input.source_id,
     run_id: input.run_id,
@@ -203,6 +218,16 @@ export async function writeReceipt(
     },
     { sourceId: input.source_id },
   );
+
+  // #4009: receipts are audit artifacts — deliberately never run through
+  // the contextual-retrieval ladder. Born with a NULL
+  // contextual_retrieval_mode they tripped doctor's
+  // contextual_retrieval_coverage warn on every extraction run right
+  // after a reindex. Stamp mode 'none' so receipts are born CR-evaluated.
+  // NOT permanent: a reindex that takes the DB fallback clears the stamp
+  // and it recurs per receipt — the doctor check also excludes
+  // type='extract_receipt' from mode_null (belt+braces).
+  await engine.updatePageContextualRetrievalState(slug, input.source_id, 'none', null);
 
   return { slug, page };
 }

@@ -34,7 +34,8 @@ describe('dream CLI flag wiring', () => {
   });
 
   test('--input implies --phase synthesize', () => {
-    expect(dreamSrc).toContain("phase = 'synthesize'");
+    // #4493: phase became the phases[] array (repeated --phase flags all run).
+    expect(dreamSrc).toContain("phases = ['synthesize']");
   });
 
   test('--from > --to range validation', () => {
@@ -55,7 +56,7 @@ describe('dream CLI flag wiring', () => {
   });
 
   test('help text documents dry-run synthesis semantics (Codex finding #8)', () => {
-    expect(dreamSrc).toContain('skips the Sonnet');
+    expect(dreamSrc).toContain('skips the synthesis subagents');
     expect(dreamSrc.toLowerCase()).toContain('zero llm calls');
   });
 
@@ -115,7 +116,8 @@ describe('dream CLI flag wiring', () => {
     });
 
     test('--drain defaults to extract_atoms and rejects other phases', () => {
-      expect(dreamSrc).toContain("phase = 'extract_atoms'");
+      // #4493: phase became the phases[] array (repeated --phase flags all run).
+      expect(dreamSrc).toContain("phases = ['extract_atoms']");
       expect(dreamSrc).toContain('--drain currently supports only --phase extract_atoms');
     });
 
@@ -133,6 +135,55 @@ describe('dream CLI flag wiring', () => {
     test('drain reports remaining + exits non-zero when incomplete', () => {
       expect(dreamSrc).toContain('EXIT_DRAIN_INCOMPLETE');
       expect(dreamSrc).toContain('cycle_already_running');
+    });
+  });
+
+  // issue #2860 — --once one-shot phase-enabled-gate bypass (structural).
+  // Behavioral coverage: test/e2e/dream-patterns-pglite.test.ts (bypass +
+  // config-untouched) and test/core/cycle.serial.test.ts (non-leak across
+  // phases via CycleOpts.onceForPhase).
+  describe('--once wiring (issue #2860)', () => {
+    test('declares --once flag', () => {
+      expect(dreamSrc).toContain("'--once'");
+    });
+
+    test('rejects bare --once with no --phase (exit 2)', () => {
+      expect(dreamSrc).toContain('--once requires an explicit --phase <name>');
+      // --help must short-circuit this validation (Codex review finding) —
+      // see the "--help --once" test in test/dream.test.ts for the
+      // behavioral pin of this exact ordering.
+      expect(dreamSrc).toContain('if (once && !phaseWasExplicit && !wantsHelp)');
+    });
+
+    // Codex P3 finding: the derived phase value gets populated by
+    // --input/--drain BEFORE this validation used to run, so those two
+    // silently slipped past an emptiness-based check. The fix validates
+    // against `phaseWasExplicit` (captured from the raw flag occurrences,
+    // before any implicit defaulting) instead. Behavioral pins live in
+    // test/dream.test.ts. (#4493: the capture source moved from
+    // `phaseIdx !== -1` to `phaseValues.length > 0` when --phase became
+    // repeatable — same before-defaulting ordering contract.)
+    test('validates against phaseWasExplicit, captured before --input/--drain defaulting', () => {
+      expect(dreamSrc).toContain('const phaseWasExplicit = phaseValues.length > 0;');
+      // Must be declared before the --input-implies-synthesize and
+      // --drain-implies-extract_atoms defaulting blocks so it captures
+      // presence prior to any implicit phase assignment.
+      const explicitIdx = dreamSrc.indexOf('const phaseWasExplicit = phaseValues.length > 0;');
+      const inputImpliesIdx = dreamSrc.indexOf("phases = ['synthesize']");
+      const drainImpliesIdx = dreamSrc.indexOf("phases = ['extract_atoms']");
+      expect(explicitIdx).toBeGreaterThan(-1);
+      expect(explicitIdx).toBeLessThan(inputImpliesIdx);
+      expect(explicitIdx).toBeLessThan(drainImpliesIdx);
+    });
+
+    test('threads onceForPhase to runCycle, gated on opts.once', () => {
+      // #4493: opts.phases[0] — parseArgs guarantees exactly one when --once.
+      expect(dreamSrc).toMatch(/onceForPhase:\s*opts\.once\s*\?\s*opts\.phases\[0\]!\s*:\s*undefined/);
+    });
+
+    test('documents --once in --help output', () => {
+      expect(dreamSrc).toContain('--once');
+      expect(dreamSrc).toContain('Never reads or writes config');
     });
   });
 });

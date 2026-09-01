@@ -4,7 +4,7 @@ import { operationsByName } from '../src/core/operations.ts';
 import { runThink, persistSynthesis, type ThinkLLMClient } from '../src/core/think/index.ts';
 import { sanitizeTakeForPrompt, renderTakesBlock } from '../src/core/think/sanitize.ts';
 import { resolveCitations, parseInlineCitations, normalizeStructuredCitations } from '../src/core/think/cite-render.ts';
-import { runGather } from '../src/core/think/gather.ts';
+import { runGather, renderPagesBlock } from '../src/core/think/gather.ts';
 import { withoutAnthropicKey } from './helpers/no-anthropic-key.ts';
 
 let engine: PGLiteEngine;
@@ -141,6 +141,146 @@ describe('runGather', () => {
   });
 });
 
+describe('runGather — anchor page hydration (#2903)', () => {
+  test('anchor content lands in pages + renderPagesBlock even when hybrid misses it', async () => {
+    // The alice page was written via bare putPage (no chunks), and the
+    // question shares no tokens with it — hybrid returns nothing for the
+    // anchor. Pre-#2903 the anchor arm delivered slugs only, so <pages>
+    // carried zero anchor content.
+    const r = await runGather(engine, {
+      question: 'zzz-unrelated-nonsense-query-xqj',
+      anchor: 'people/alice-example',
+    });
+    const anchorHit = r.pages.find(p => p.slug === 'people/alice-example');
+    expect(anchorHit).toBeDefined();
+    expect(anchorHit!.chunk_text).toContain('Alice founded Acme.');
+    expect(anchorHit!.chunk_source).toBe('compiled_truth');
+    expect(r.warnings).not.toContain('ANCHOR_PAGE_NOT_FOUND');
+    const block = renderPagesBlock(r.pages, 600, 'zzz-unrelated-nonsense-query-xqj');
+    expect(block).toContain('people/alice-example');
+    expect(block).toContain('Alice founded Acme.');
+  });
+
+  test('dedupes when hybrid already returned the anchor page', async () => {
+    // 'Alice founded Acme' overlaps the page title/body → keyword arm can
+    // return it. Either way, exactly one row per slug must survive.
+    const r = await runGather(engine, {
+      question: 'Alice founded Acme',
+      anchor: 'people/alice-example',
+    });
+    const hits = r.pages.filter(p => p.slug === 'people/alice-example');
+    expect(hits.length).toBe(1);
+  });
+
+  test('missing anchor page → ANCHOR_PAGE_NOT_FOUND warning, no synthetic row', async () => {
+    const r = await runGather(engine, {
+      question: 'technical founder',
+      anchor: 'people/no-such-anchor',
+    });
+    expect(r.warnings).toContain('ANCHOR_PAGE_NOT_FOUND');
+    expect(r.pages.some(p => p.slug === 'people/no-such-anchor')).toBe(false);
+  });
+
+  test('getPage failure → GATHER_ANCHOR_HYDRATE_FAILED, pipeline survives', async () => {
+    const failing = new Proxy(engine, {
+      get(target, prop) {
+        if (prop === 'getPage') {
+          return async () => { throw new Error('getPage boom'); };
+        }
+        const v = Reflect.get(target, prop, target);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    }) as PGLiteEngine;
+    const r = await runGather(failing, {
+      question: 'technical founder',
+      anchor: 'people/alice-example',
+    });
+    expect(r.warnings).toContain('GATHER_ANCHOR_HYDRATE_FAILED');
+    expect(r.warnings).not.toContain('ANCHOR_PAGE_NOT_FOUND');
+  });
+});
+
+describe('runGather — per-stream typed warnings (GATHER_*_FAILED)', () => {
+  /** Delegating wrapper: listed methods reject; everything else hits the real engine. */
+  function withFailing(methods: string[]): PGLiteEngine {
+    return new Proxy(engine, {
+      get(target, prop) {
+        if (typeof prop === 'string' && methods.includes(prop)) {
+          return async () => { throw new Error(`${prop} boom`); };
+        }
+        const v = Reflect.get(target, prop, target);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    }) as PGLiteEngine;
+  }
+
+  test('clean run reports no gather warnings', async () => {
+    const r = await runGather(engine, { question: 'technical founder' });
+    expect(r.warnings).toEqual([]);
+  });
+
+  test('a keyword-arm failure degrades inside hybrid — no gather warning, takes keep working', async () => {
+    // #4296: the keyword arm fails open INSIDE hybridSearch, so the
+    // gather-level GATHER_HYBRID_FAILED is reserved for a hybrid call that
+    // throws outright, not a degraded arm.
+    const r = await runGather(withFailing(['searchKeyword']), { question: 'technical founder' });
+    expect(r.warnings).not.toContain('GATHER_HYBRID_FAILED');
+    // Fail-open: the takes stream keeps working.
+    expect(r.takes.length).toBeGreaterThan(0);
+  });
+
+  test('each failing stream maps to its own code', async () => {
+    const r = await runGather(
+      withFailing(['searchKeyword', 'searchTakes', 'searchTakesVector', 'traversePaths']),
+      {
+        question: 'technical founder',
+        anchor: 'people/alice-example',
+        questionEmbedding: new Float32Array(8),
+      },
+    );
+    // #4296: a degraded keyword arm no longer surfaces GATHER_HYBRID_FAILED;
+    // the takes/graph streams still map failures to their own codes.
+    expect([...r.warnings].sort()).toEqual([
+      'GATHER_GRAPH_FAILED',
+      'GATHER_TAKES_KEYWORD_FAILED',
+      'GATHER_TAKES_VECTOR_FAILED',
+    ]);
+    expect(r.takes).toEqual([]);
+    expect(r.graphSlugs).toEqual([]);
+  });
+
+  // No engine-level failure reaches GATHER_HYBRID_FAILED anymore: every arm
+  // inside hybridSearch fails open (#4296 completed the set), verified by
+  // attempting to trip it with every query surface rejecting. The gather-level
+  // catch stays as a defensive backstop for non-engine throws (bad opts,
+  // programming errors) and is deliberately untested rather than artificially
+  // triggered.
+
+  test('runThink folds gather warnings into ThinkResult.warnings', async () => {
+    const stubClient: ThinkLLMClient = {
+      create: async () => ({
+        id: 'msg_gather_warn',
+        type: 'message',
+        role: 'assistant',
+        model: 'stub',
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, server_tool_use: null, service_tier: null },
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ answer: 'stubbed answer', citations: [], gaps: [] }),
+        }],
+      }),
+    };
+    const result = await runThink(withFailing(['searchTakes']), {
+      question: 'technical founder',
+      client: stubClient,
+    });
+    expect(result.warnings).toContain('GATHER_TAKES_KEYWORD_FAILED');
+    expect(result.warnings).not.toContain('GATHER_HYBRID_FAILED');
+  });
+});
+
 describe('runThink (with stub client)', () => {
   test('full pipeline: gather → stub synthesize → result', async () => {
     const stubClient: ThinkLLMClient = {
@@ -177,6 +317,70 @@ describe('runThink (with stub client)', () => {
     expect(result.gaps).toEqual(['no info on funding history']);
     expect(result.takesGathered).toBeGreaterThan(0);
     expect(result.warnings).not.toContain('LLM_OUTPUT_NOT_JSON');
+    // think's own cost was previously unsurfaced anywhere (not in this CLI's
+    // output, not in budget_ledger, and invisible to a wrapping caller's own
+    // token accounting since the LLM call is think's own, separate call).
+    // usage flows through from the real client.create() response so the CLI
+    // can compute cost_usd from it via canonicalLookup(modelUsed).
+    expect(result.usage).toEqual({ input_tokens: 10, output_tokens: 10 });
+  });
+
+  test('passes the question into page excerpt selection', async () => {
+    const prefix = [
+      '# Widget Co',
+      'General company background and operating context. '.repeat(18),
+    ].join('\n');
+    const lateFact = 'Enterprise pricing: the plan costs 125 credits per month.';
+    const content = `${prefix}\n${lateFact}\n${'Other context. '.repeat(80)}`;
+    let pageId: number | undefined;
+    let capturedUser = '';
+    const stubClient: ThinkLLMClient = {
+      create: async (params) => {
+        const userMessage = params.messages[0]?.content;
+        capturedUser = typeof userMessage === 'string'
+          ? userMessage
+          : JSON.stringify(userMessage);
+        return {
+          id: 'msg_excerpt_wiring',
+          type: 'message',
+          role: 'assistant',
+          model: 'stub',
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, server_tool_use: null, service_tier: null },
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ answer: 'stubbed answer', citations: [], gaps: [] }),
+          }],
+        };
+      },
+    };
+
+    try {
+      const page = await engine.putPage('companies/widget-co', {
+        title: 'Widget Co', type: 'company', compiled_truth: content,
+      });
+      pageId = page.id;
+      await engine.executeRaw('DELETE FROM content_chunks WHERE page_id = $1', [page.id]);
+      await engine.executeRaw(
+        `INSERT INTO content_chunks (page_id, chunk_index, chunk_text, chunk_source)
+         VALUES ($1, 0, $2, 'compiled_truth')`,
+        [page.id, content],
+      );
+
+      const result = await runThink(engine, {
+        question: 'What is Widget Co enterprise pricing in credits per month?',
+        client: stubClient,
+        withTrajectory: false,
+      });
+
+      expect(result.pagesGathered).toBeGreaterThan(0);
+      expect(capturedUser).toContain(lateFact);
+    } finally {
+      if (pageId !== undefined) {
+        await engine.executeRaw('DELETE FROM pages WHERE id = $1', [pageId]);
+      }
+    }
   });
 
   test('handles malformed LLM output gracefully (regex citation fallback)', async () => {
@@ -215,6 +419,26 @@ describe('runThink (with stub client)', () => {
     expect(result.warnings).toContain('NO_ANTHROPIC_API_KEY');
     expect(result.answer).toContain('no LLM available');
     expect(result.rounds).toBe(0);
+  });
+
+  test('labels an unusable CONFIGURED model honestly (MODEL_NOT_USABLE, not NO_ANTHROPIC_API_KEY)', async () => {
+    // Regression guard: a configured model the recipe rejects (unknown_model)
+    // used to be stamped NO_ANTHROPIC_API_KEY, sending operators to debug
+    // env/keychain when the fix was the model id. Model validity beats the key
+    // check in probeChatModel, so the honest label holds even keyless.
+    // voyage has no chat touchpoint — the surviving unknown_model trigger now
+    // that unlisted ids on chat-capable providers pass through to the provider.
+    await engine.setConfig('models.think', 'voyage:voyage-3');
+    try {
+      const result = await withoutAnthropicKey(() => runThink(engine, { question: 'bad model test' }));
+      expect(result.warnings).toContain('MODEL_NOT_USABLE:unknown_model');
+      expect(result.warnings).not.toContain('NO_ANTHROPIC_API_KEY');
+      expect(result.answer).toContain('not usable');
+      expect(result.rounds).toBe(0);
+      expect(result.synthesisOk).toBe(false);
+    } finally {
+      await engine.unsetConfig('models.think');
+    }
   });
 
   test('persistSynthesis writes synthesis page + evidence rows', async () => {
@@ -276,22 +500,38 @@ describe('runThink — #1698 explicit-model hard error', () => {
     ).rejects.toThrow(/not usable.*unknown_provider/);
   });
 
-  test('explicit typo native --model THROWS (unknown_model)', async () => {
+  test('explicit --model on a chat-less provider THROWS (unknown_model)', async () => {
     await expect(
-      runThink(engine, { question: 'x', model: 'anthropic:claude-bogus-9', modelExplicit: true }),
+      runThink(engine, { question: 'x', model: 'voyage:voyage-3', modelExplicit: true }),
     ).rejects.toThrow(/not usable.*unknown_model/);
   });
 
   test('NON-explicit bad model does NOT throw — graceful degrade (no modelExplicit)', async () => {
     // model present but modelExplicit unset → early gate skipped; builder returns null.
     // Hermetic no-key so the assertion can't be perturbed by a configured key.
+    // Post-honest-labeling: an unknown PROVIDER is a model problem, not a key
+    // problem — the warning names it instead of the old NO_ANTHROPIC_API_KEY
+    // catch-all. The graceful no-throw contract is unchanged.
     const result = await withoutAnthropicKey(() => runThink(engine, { question: 'nonexplicit bad', model: 'bogusprovider:foo' }));
-    expect(result.warnings).toContain('NO_ANTHROPIC_API_KEY');
+    expect(result.warnings).toContain('MODEL_NOT_USABLE:unknown_provider');
     expect(result.synthesisOk).toBe(false);
   });
 });
 
 describe('runThink + persistSynthesis — #1698 never persist empty', () => {
+  test('#3734: question embedder is called for vector takes retrieval', async () => {
+    let embeddedQuestion: string | undefined;
+    await runThink(engine, {
+      question: 'Which claims matter?',
+      embedQuestion: async (question) => {
+        embeddedQuestion = question;
+        return new Float32Array(4).fill(0.25);
+      },
+      stubResponse: { answer: 'has content', citations: [], gaps: [] },
+    });
+    expect(embeddedQuestion).toBe('Which claims matter?');
+  });
+
   test('empty-but-valid-JSON answer → synthesisOk false → persist-skip signal', async () => {
     const result = await runThink(engine, {
       question: 'empty answer test',
@@ -336,6 +576,19 @@ describe('runThink + persistSynthesis — #1698 never persist empty', () => {
       question: 'stub full', stubResponse: { answer: 'has content', citations: [], gaps: [] },
     });
     expect(full.synthesisOk).toBe(true);
+  });
+
+  test('opts.stubResponse path never made a real LLM call — usage stays null', async () => {
+    // Same distinction synthesisOk already makes: opts.stubResponse bypasses
+    // client.create() entirely, so there is no real usage to report. cost_usd
+    // must not be computed (and should render as null in --json) when this
+    // happens, since there is nothing to compute it from. Since the [E2]
+    // MEMORY_VERBS usage-accounting change, "no LLM ran" is spelled `null`
+    // (the frozen cost-block contract), not `undefined`.
+    const result = await runThink(engine, {
+      question: 'stub no usage', stubResponse: { answer: 'has content', citations: [], gaps: [] },
+    });
+    expect(result.usage).toBeNull();
   });
 
   test('pre-existing ThinkResult literal without synthesisOk still persists (back-compat)', async () => {

@@ -134,3 +134,49 @@ describe('dimsProviderOptions — OpenAI on openai-compatible adapter (Azure cas
     expect(JSON.stringify(opts)).not.toContain('input_type');
   });
 });
+
+describe('dimsProviderOptions — prefixed model IDs (OpenRouter / proxy providers)', () => {
+  test('openai/text-embedding-3-large at 1536d returns dimensions=1536', () => {
+    const opts = dimsProviderOptions('openai-compatible', 'openai/text-embedding-3-large', 1536);
+    expect(opts).toEqual({ openaiCompatible: { dimensions: 1536 } });
+  });
+
+  test('openai/text-embedding-3-small at 768d returns dimensions=768', () => {
+    const opts = dimsProviderOptions('openai-compatible', 'openai/text-embedding-3-small', 768);
+    expect(opts).toEqual({ openaiCompatible: { dimensions: 768 } });
+  });
+
+  test('openai/text-embedding-3-large at 5000d throws AIConfigError', () => {
+    expect(() => dimsProviderOptions('openai-compatible', 'openai/text-embedding-3-large', 5000))
+      .toThrow(AIConfigError);
+  });
+
+  test('error message preserves full prefixed model ID for clarity', () => {
+    try {
+      dimsProviderOptions('openai-compatible', 'openai/text-embedding-3-large', 5000);
+      throw new Error('should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(AIConfigError);
+      expect((err as Error).message).toContain('openai/text-embedding-3-large');
+    }
+  });
+});
+
+describe('mixed-case ids on the openai-compatible path (#4123)', () => {
+  test('cased Azure-hosted text-embedding-3 id pins dimensions', () => {
+    expect(dimsProviderOptions('openai-compatible', 'azure/Text-Embedding-3-Small', 1024))
+      .toEqual({ openaiCompatible: { dimensions: 1024 } });
+  });
+
+  test('cased id out of range throws with the ORIGINAL casing in the message (paste-ready)', () => {
+    expect(() => dimsProviderOptions('openai-compatible', 'azure/Text-Embedding-3-Small', 5000))
+      .toThrow(/Text-Embedding-3-Small/);
+    expect(() => dimsProviderOptions('openai-compatible', 'azure/Text-Embedding-3-Small', 5000))
+      .toThrow(/1\.\.1536/);
+  });
+
+  test('predicates fold: cased ids recognized, max resolved', () => {
+    expect(isOpenAITextEmbedding3Model('Text-Embedding-3-Large')).toBe(true);
+    expect(maxOpenAITextEmbedding3Dim('TEXT-EMBEDDING-3-SMALL')).toBe(1536);
+  });
+});

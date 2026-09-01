@@ -10,6 +10,7 @@ import {
 } from '../src/core/brain-writer.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 const fence = '---';
 
@@ -30,6 +31,43 @@ describe('autoFixFrontmatter', () => {
     const idxHeading = content.indexOf('# A heading');
     expect(idxClose).toBeGreaterThan(0);
     expect(idxClose).toBeLessThan(idxHeading);
+  });
+
+  // Regression for #3225: a `#`-prefixed line inside an already-closed
+  // frontmatter fence is a YAML comment, not a markdown heading. The old
+  // MISSING_CLOSE scan broke out on the first heading-shaped line without
+  // continuing to look for the real closer, so it inserted a spurious
+  // `---` before the comment and split valid frontmatter in two — pushing
+  // the real keys (title, pubDate, ...) into the document body.
+  test('does not corrupt closed frontmatter containing a YAML comment line', () => {
+    const input = `${fence}\n# a YAML comment inside the frontmatter block\ntitle: "Real Title"\npubDate: 2026-06-29\n${fence}\nBody...`;
+    const { content, fixes } = autoFixFrontmatter(input);
+    expect(content).toBe(input);
+    expect(fixes).toEqual([]);
+  });
+
+  test('does not corrupt closed frontmatter that is comment-only', () => {
+    const input = `${fence}\n# just a comment\n# another comment\n${fence}\nBody`;
+    const { content, fixes } = autoFixFrontmatter(input);
+    expect(content).toBe(input);
+    expect(fixes).toEqual([]);
+  });
+
+  test('does not corrupt closed frontmatter with an indented `#` line inside a YAML block scalar', () => {
+    const input = `${fence}\ndescription: |\n  # not a heading, just literal block-scalar text\ntitle: ok\n${fence}\nBody`;
+    const { content, fixes } = autoFixFrontmatter(input);
+    expect(content).toBe(input);
+    expect(fixes).toEqual([]);
+  });
+
+  test('YAML comment before close does not suppress an unrelated real fix (SLUG_MISMATCH)', () => {
+    const input = `${fence}\n# a YAML comment\ntitle: hi\nslug: wrong-slug\n${fence}\nBody`;
+    const { content, fixes } = autoFixFrontmatter(input, { filePath: 'people/jane-doe.md' });
+    expect(fixes.some(f => f.code === 'MISSING_CLOSE')).toBe(false);
+    expect(fixes.some(f => f.code === 'SLUG_MISMATCH')).toBe(true);
+    // The frontmatter fence itself must stay intact — only the slug line
+    // is removed, the comment/title/close survive unchanged.
+    expect(content).toBe(`${fence}\n# a YAML comment\ntitle: hi\n\n${fence}\nBody`);
   });
 
   test('rewrites nested-quote title to single-quoted', () => {
@@ -197,7 +235,7 @@ describe('scanBrainSources (PGLite)', () => {
   let engine: PGLiteEngine;
 
   // One PGLite per file — beforeEach wipes data only. PGLite cold-start is
-  // ~20s on CI; sharing one engine across 6 tests in this block saves ~2 min.
+  // ~20s on CI; sharing one engine across 7 tests in this block saves ~2 min.
   beforeAll(async () => {
     engine = new PGLiteEngine();
     await engine.connect({});
@@ -291,6 +329,20 @@ describe('scanBrainSources (PGLite)', () => {
     // The walk should complete without infinite-looping; at most one .md
     // entry visited (via the real path, not the symlink).
     expect(report.per_source[0]!.total).toBe(0);
+  });
+
+  test('does not parse multimodal image assets as Markdown frontmatter', async () => {
+    writeFileSync(join(tmp, 'good.md'), `${fence}\ntype: concept\ntitle: ok\n${fence}\n\nbody`);
+    writeFileSync(join(tmp, 'photo.jpg'), Buffer.from([0xff, 0xd8, 0xff, 0x00, 0x01, 0xd9]));
+    await registerSource('multimodal', tmp);
+
+    await withEnv({ GBRAIN_EMBEDDING_MULTIMODAL: 'true' }, async () => {
+      const report = await scanBrainSources(engine);
+      const source = report.per_source.find(s => s.source_id === 'multimodal')!;
+      expect(source.total).toBe(0);
+      expect(source.errors_by_code.NULL_BYTES).toBeUndefined();
+      expect(source.files_scanned).toBe(1);
+    });
   });
 
   test('AbortSignal before scan: every source marked skipped (v0.38.2.0 partial-state contract)', async () => {

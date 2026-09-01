@@ -6,9 +6,11 @@
  * degrades to gather-only output with a warning if missing.
  */
 import type { BrainEngine } from '../core/engine.ts';
-import { runThink, persistSynthesis } from '../core/think/index.ts';
+import { runThink, persistSynthesis, stripGapsSection } from '../core/think/index.ts';
 import { loadConfig, isThinClient } from '../core/config.ts';
 import { callRemoteTool, unpackToolResult } from '../core/mcp-client.ts';
+import { canonicalLookup } from '../core/model-pricing.ts';
+import { embedQuery } from '../core/embedding.ts';
 
 function flagValue(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
@@ -18,6 +20,27 @@ function flagValue(args: string[], name: string): string | undefined {
 
 function flagPresent(args: string[], name: string): boolean {
   return args.includes(name);
+}
+
+/**
+ * think's own cost was previously unsurfaced anywhere: not in this CLI's own
+ * `--json` output, not in `budget_ledger`, and invisible to a wrapping
+ * caller's own token accounting (the LLM call `think` makes is its own,
+ * separate API call). Returns undefined when `usage` is absent (no-client/
+ * stub paths, or a remote-MCP call that didn't forward it) or when the
+ * resolved model has no entry in the canonical pricing table.
+ */
+export function computeThinkCostUsd(
+  usage: { input_tokens: number; output_tokens: number } | undefined,
+  modelUsed: string,
+): number | undefined {
+  if (!usage) return undefined;
+  const pricing = canonicalLookup(modelUsed);
+  if (!pricing) return undefined;
+  return Number(
+    ((usage.input_tokens / 1_000_000) * pricing.input
+      + (usage.output_tokens / 1_000_000) * pricing.output).toFixed(4),
+  );
 }
 
 export async function runThinkCli(engine: BrainEngine, args: string[]): Promise<void> {
@@ -33,8 +56,12 @@ Options:
                            provider/model or a bare alias. An explicit --model that
                            can't be resolved is a hard error (exit 1) — never a
                            silent no-LLM degrade.
+  --source <id>            Scope evidence gathering to this source. An unknown
+                           or archived source is a hard error (exit 1).
   --since YYYY-MM-DD       Start of temporal window
   --until YYYY-MM-DD       End of temporal window
+  --with-calibration       Inject the active calibration profile (anti-bias rewrite)
+  --calibration-holder <h> Holder whose calibration profile to use (default: self)
   --json                   Output as JSON
   --help                   Show this help
 
@@ -50,8 +77,11 @@ prints what would have been the input (exit 0).
     return;
   }
 
-  // Strip flags from positional args
-  const flagNames = ['--anchor', '--rounds', '--model', '--since', '--until'];
+  // Strip flags from positional args.
+  // #4508: --source and --calibration-holder were MISSING here — the flag and
+  // its value joined the positional question, so `think "q" --source X`
+  // echoed `# --source X q` and silently ignored the scope.
+  const flagNames = ['--anchor', '--rounds', '--model', '--since', '--until', '--source', '--calibration-holder'];
   const positional: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -79,6 +109,9 @@ prints what would have been the input (exit 0).
   // profile gets injected per D22 placement (after retrieval, before question).
   const withCalibration = flagPresent(args, '--with-calibration');
   const calibrationHolder = flagValue(args, '--calibration-holder');
+  // #4508: parse --source; validated (existence + shape) in the local branch
+  // below where a real engine is available.
+  const source = flagValue(args, '--source');
 
   if (take && !anchor) {
     console.error('--take requires --anchor (the take row needs a target page)');
@@ -92,6 +125,9 @@ prints what would have been the input (exit 0).
   let result: any;
   let savedSlug: string | undefined;
   let evidenceInserted = 0;
+  // #2556: --take persistence outputs.
+  let takeRow: number | null = null;
+  let takePath: string | undefined;
   const cfg = loadConfig();
   if (isThinClient(cfg)) {
     if (save || take) {
@@ -99,6 +135,14 @@ prints what would have been the input (exit 0).
         '[thin-client] --save and --take are server-gated for remote callers ' +
         '(trust-boundary policy). Run on the host or use the MCP `think` tool ' +
         'with the `viaSubagent` context if you need persistence.',
+      );
+    }
+    if (source !== undefined) {
+      // #4508: the remote `think` op scopes by the server's session/auth, not
+      // a per-call param — say so instead of silently dropping the flag.
+      console.error(
+        '[thin-client] --source is scoped by the remote server (session/auth) ' +
+        'and cannot be overridden per call — the flag is not forwarded.',
       );
     }
     const raw = await callRemoteTool(cfg!, 'think', {
@@ -109,8 +153,23 @@ prints what would have been the input (exit 0).
     result = unpackToolResult<any>(raw);
   } else {
     try {
+      // #4508: validate --source before the gather runs — an unknown or
+      // archived source is a hard exit 1 (SourceTargetError message names
+      // it), never a silent full-brain gather.
+      let sourceId: string | undefined;
+      if (source !== undefined) {
+        const { resolveSourceWithTier } = await import('../core/source-resolver.ts');
+        sourceId = (await resolveSourceWithTier(engine, source)).source_id;
+      }
       result = await runThink(engine, {
         question, anchor, rounds, save, take, model, since, until,
+        // Fail-closed trust: local CLI must say so explicitly, or trajectory
+        // injection degrades to visibility='world' rows.
+        remote: false,
+        // #3734: activate takes' vector retrieval arm for CLI think.
+        embedQuestion: (q) => embedQuery(q),
+        // #4508: thread the validated scope (RunThinkOpts.sourceId).
+        ...(sourceId ? { sourceId } : {}),
         // #1698: explicit --model → hard error on an unresolvable model (no silent
         // degrade to the no-LLM stub). Omitting --model keeps the graceful default path.
         modelExplicit: !!model,
@@ -138,6 +197,25 @@ prints what would have been the input (exit 0).
           process.exit(1);
         }
       }
+
+      // #2556: --take was documented (and parsed) since v0.28 but never
+      // executed — runThink ignored opts.take entirely. Persist md-first
+      // through the canonical takes write-through; a refusal (no repo, empty
+      // answer, failed synthesis, write error) exits non-zero (same F2
+      // posture as --save: the user explicitly asked for a persist).
+      if (take && anchor) {
+        const { persistTakeFromSynthesis } = await import('../core/think/persist-take.ts');
+        const persisted = await persistTakeFromSynthesis(engine, result, { anchor });
+        takeRow = persisted.take_row;
+        takePath = persisted.path;
+        for (const w of persisted.warnings) result.warnings.push(w);
+        if (persisted.take_row === null) {
+          console.error(
+            `think: --take requested but no take row was appended (${persisted.warnings.join(', ') || 'unknown reason'}).`,
+          );
+          process.exit(1);
+        }
+      }
     } catch (e) {
       // #1698: an unresolvable explicit --model throws here. Clean non-zero exit
       // with the actionable message, not a stack trace.
@@ -146,18 +224,25 @@ prints what would have been the input (exit 0).
     }
   }
 
+  const costUsd = computeThinkCostUsd(
+    (result as { usage?: { input_tokens: number; output_tokens: number } }).usage,
+    result.modelUsed,
+  );
+
   if (json) {
     console.log(JSON.stringify({
       ...result,
+      cost_usd: costUsd ?? null,
       saved_slug: savedSlug ?? null,
       evidence_inserted: evidenceInserted,
+      take_row: takeRow,
     }, null, 2));
     return;
   }
 
   // Human-readable output
   console.log(`# ${question}\n`);
-  console.log(result.answer);
+  console.log(stripGapsSection(result.answer));
   console.log('');
   if (result.gaps.length > 0) {
     console.log('## Gaps');
@@ -165,9 +250,13 @@ prints what would have been the input (exit 0).
     console.log('');
   }
   console.log('---');
-  console.log(`Model: ${result.modelUsed} | Pages: ${result.pagesGathered} | Takes: ${result.takesGathered} | Graph: ${result.graphHits} | Citations: ${result.citations.length}`);
+  const costSuffix = costUsd !== undefined ? ` | Cost: $${costUsd.toFixed(4)}` : '';
+  console.log(`Model: ${result.modelUsed} | Pages: ${result.pagesGathered} | Takes: ${result.takesGathered} | Graph: ${result.graphHits} | Citations: ${result.citations.length}${costSuffix}`);
   if (savedSlug) {
     console.log(`Saved: ${savedSlug} (${evidenceInserted} evidence rows)`);
+  }
+  if (takeRow !== null) {
+    console.log(`Take: row ${takeRow} appended to ${anchor}${takePath ? ` (${takePath})` : ''}`);
   }
   if (result.warnings.length > 0) {
     console.error(`Warnings: ${result.warnings.join(', ')}`);

@@ -9,6 +9,16 @@
  * Before this module these predicates lived inline at each site and drifted
  * over time. One source of truth here; new call sites import the typed
  * helper instead of pattern-matching the same regexes again.
+ *
+ * TWO-AXIS DESIGN NOTE (do not "fix" one side to match the other):
+ * this module answers "should I retry?" — and deliberately treats
+ * `password authentication failed` as RETRYABLE (auth race during DNS
+ * failover). The REASON classifier (`src/core/pg-access-classify.ts`)
+ * answers "what went wrong and what fixes it?" — and reports the same
+ * error as `auth_failed` with `transient: false` (a persistently wrong
+ * password is not transient). Both are correct on their own axis.
+ * This module's only exports consumed there are the predicates plus the
+ * `getCode`/`getMessage` shape helpers; no new patterns land here.
  */
 
 const CONN_PATTERNS = [
@@ -52,7 +62,7 @@ interface PgError {
   problem?: string;
 }
 
-function getCode(err: unknown): string | undefined {
+export function getCode(err: unknown): string | undefined {
   if (err && typeof err === 'object') {
     const code = (err as PgError).code;
     if (typeof code === 'string') return code;
@@ -60,7 +70,7 @@ function getCode(err: unknown): string | undefined {
   return undefined;
 }
 
-function getMessage(err: unknown): string {
+export function getMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (err && typeof err === 'object') {
     const msg = (err as PgError).message;
@@ -112,6 +122,11 @@ export function isRetryableConnError(err: unknown): boolean {
   // v0.42.5.0 (issue #1678): postgres.js's library-level connection-ended
   // code. Not an 08xxx SQLSTATE, so the /^08/ test above misses it.
   if (code === 'CONNECTION_ENDED') return true;
+  // issue #1720: postgres.js also throws code 'CONNECTION_CLOSED' when the
+  // pooler closes the socket mid-query ("write CONNECTION_CLOSED host:port").
+  // The message form is already caught by /connection.*closed/i below; match
+  // the code too for wrappers that rethrow with the code but a new message.
+  if (code === 'CONNECTION_CLOSED') return true;
   // v0.42.x (#1794): SQLSTATE 53300 too_many_connections — pool/pooler
   // exhaustion. Starts with 53 not 08, so the /^08/ test above misses it.
   // Transient: the spike clears as in-flight queries release connections.

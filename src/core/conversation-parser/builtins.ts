@@ -1,7 +1,7 @@
 /**
  * v0.41.16.0 — Built-in conversation parser pattern registry.
  *
- * Fourteen hand-vetted patterns covering the chat-export formats this
+ * Eighteen hand-vetted patterns covering the chat-export formats this
  * codebase is most likely to encounter. Each pattern's regex was
  * derived from a public format reference (source_doc field) so future
  * maintainers can verify against the wild shape.
@@ -50,7 +50,7 @@ export function cleanSpeaker(raw: string, override?: RegExp): string {
   return stripped || raw.trim();
 }
 
-/** The 14 hand-vetted built-in patterns. */
+/** The 18 hand-vetted built-in patterns. */
 export const BUILTIN_PATTERNS: readonly PatternEntry[] = [
   // -------------------------------------------------------------------
   // INLINE-DATE patterns (date in every line; less ambiguous; tried first).
@@ -74,7 +74,13 @@ export const BUILTIN_PATTERNS: readonly PatternEntry[] = [
     date_source: 'inline',
     time_format: '12h_ampm',
     timezone_policy: 'inline_utc',
-    multi_line: false,
+    // Transcript imports preserve embedded newlines in each turn. Treat
+    // non-anchor lines as message continuations when scoring so a small
+    // number of long coding turns does not fall below the global 5% density
+    // floor and become unparseable. The continuation-aware scorer still
+    // requires an anchor on the first line or at least two valid anchors.
+    multi_line: true,
+    score_continuations_as_body: true,
     quick_reject: /^\*\*/,
     test_positive: [
       '**Alice Example** (2024-03-15 9:00 AM): hello',
@@ -176,6 +182,252 @@ export const BUILTIN_PATTERNS: readonly PatternEntry[] = [
     ],
     source_doc:
       'OpenClaw meeting-ingestion pipeline reformat of Circleback transcripts (see your OpenClaw skills/meeting-ingestion/SKILL.md)',
+  },
+
+  {
+    // iMessage sync's time-only 12-hour shape. AM/PM is required so this
+    // cannot shadow bold-paren-time's 24-hour form or imessage-slack's
+    // full-date form.
+    id: 'bold-paren-time-12h',
+    origin: 'builtin',
+    regex: /^\*\*(.+?)\*\*\s*\((\d{1,2}):(\d{2})\s*(AM|PM|am|pm)\)\s*:\s*(.*)$/,
+    captures: {
+      speaker_group: 1,
+      hour_group: 2,
+      minute_group: 3,
+      ampm_group: 4,
+      text_group: 5,
+    },
+    date_source: 'frontmatter',
+    time_format: '12h_ampm',
+    timezone_policy: 'utc_assumed_with_warn',
+    multi_line: false,
+    quick_reject: /^\*\*/,
+    test_positive: [
+      '**Me** (9:04 AM): sounds good, see you then',
+      '**+155****0135** (9:39 AM): Will do',
+      '**Alice Example** (12:00 PM): noon message',
+      '**Bob Example** (5:38 pm): lowercase ampm',
+    ],
+    test_negative: [
+      '**Alice** (00:00): 24h shape',
+      '**Alice Example** (2024-03-15 9:00 AM): full-date iMessage shape',
+      '**[18:37] G T:** telegram bracket',
+      'Alice (9:00 AM): missing the bold',
+    ],
+    source_doc:
+      'Time-only 12h AM/PM iMessage export shape: `**Speaker** (H:MM AM): text`',
+  },
+
+  {
+    // Some Slack-to-Markdown normalizers render one message anchor as:
+    //
+    //   **Speaker Name** 09:15 — message text
+    //
+    // The date lives in page frontmatter while each line supplies a 24-hour
+    // wall-clock time. The separator varies by renderer: Unicode em dash,
+    // Unicode en dash, and ASCII hyphen all appear in otherwise identical
+    // exports. Treating all three as the same deterministic grammar avoids
+    // sending long, regular transcripts through the bounded LLM fallback.
+    //
+    // CONTINUATION SEMANTICS: normalized messages can contain Markdown lists,
+    // quoted blocks, or generated summaries below the anchor line. multi_line
+    // is therefore true; applyPattern appends every non-anchor line to the
+    // preceding message until the next matching anchor.
+    //
+    // DATE/TIME SEMANTICS: date_source='frontmatter' combines the resolved page
+    // date with the captured hour and minute. timezone_policy intentionally
+    // matches the other time-only Markdown formats: the captured clock value
+    // is emitted with `Z`; timezone metadata controls the warning but does not
+    // currently convert the wall-clock value.
+    //
+    // NON-SHADOW GUARANTEE: this grammar requires the closing bold marker,
+    // whitespace, a valid 24-hour time, and a dash. It cannot match the
+    // parenthesized bold formats (`**Name** (09:15): text`), the no-time bold
+    // format (`**Name:** text`), or the inline-date iMessage format. Parser
+    // declaration order is only a score tie-breaker, so these distinctions
+    // must remain structural in the regex.
+    id: 'bold-time-dash',
+    origin: 'builtin',
+    regex:
+      /^\*\*(.+?)\*\*\s+([01]?\d|2[0-3]):([0-5]\d)\s+[-\u2013\u2014]\s*(.*)$/,
+    captures: {
+      speaker_group: 1,
+      hour_group: 2,
+      minute_group: 3,
+      text_group: 4,
+    },
+    date_source: 'frontmatter',
+    time_format: '24h',
+    timezone_policy: 'utc_assumed_with_warn',
+    multi_line: true,
+    score_continuations_as_body: true,
+    quick_reject: /^\*\*/,
+    test_positive: [
+      '**Alice Example** 09:15 — hello world',
+      '**Summary Bot** 23:04 – nightly summary follows',
+      '**Bob Example** 7:05 - ASCII dash export',
+    ],
+    test_negative: [
+      '**Alice Example** (09:15): parenthesized meeting shape',
+      '**Alice Example** (9:15 AM): parenthesized 12-hour shape',
+      '**Alice Example:** no-time transcript shape',
+      '**Alice Example** (2024-03-15 9:00 AM): inline-date shape',
+      '**Alice Example** 24:00 — invalid 24-hour time',
+      '**Alice Example** 09:60 — invalid minute',
+    ],
+    source_doc:
+      'Normalized Slack Markdown: `**Speaker** HH:MM — text`, with the date in page frontmatter',
+  },
+
+  {
+    // Fathom/phone-call raw transcripts in this workspace use a plain
+    // `Speaker A: ...` / `Speaker B: ...` shape with no per-line time.
+    // Narrow on the literal `Speaker ` prefix so we don't accidentally
+    // parse ordinary prose labels (`Owner:`, `Decision:`) as chat.
+    id: 'speaker-letter-no-time',
+    origin: 'builtin',
+    regex: /^(Speaker [A-Z0-9]+):\s*(.*)$/,
+    captures: {
+      speaker_group: 1,
+      text_group: 2,
+    },
+    date_source: 'frontmatter',
+    time_format: '24h',
+    timezone_policy: 'utc_assumed_with_warn',
+    multi_line: false,
+    quick_reject: /^Speaker /,
+    score_full_body: true,
+    test_positive: [
+      'Speaker A: That is exactly the issue.',
+      'Speaker B: Yeah, I know.',
+      'Speaker Z9: Let me ask him.',
+    ],
+    test_negative: [
+      '**Speaker A:** bold no-time shape',
+      'Speaker: missing participant suffix',
+      'Owner: this is a prose label, not a transcript line',
+      'Participant 2: different raw format',
+    ],
+    source_doc:
+      'Workspace raw transcript sidecar shape from capture-cli / phone-call transcripts: `Speaker A: ...`',
+  },
+
+  {
+    // ChatGPT's web-export → Markdown conversion anchors every turn
+    // with a literal `**You:**` / `**ChatGPT:**` label followed by a
+    // BLANK line and then a multi-paragraph reply (often 20-30+ lines
+    // of prose before the next anchor). bold-name-no-time (declared
+    // directly below) is `multi_line: false`, so on this shape it
+    // treats every reply paragraph as an unrelated non-matching line:
+    // a 156-line export with 4 real anchors scores ~4/156 ≈ 0.026 via
+    // its own score_full_body density check — correctly for THAT
+    // pattern (it has no way to know a plain-prose paragraph belongs
+    // to the preceding anchor), but the page as a whole should have
+    // parsed.
+    //
+    // NARROW-BY-CONSTRUCTION (this is what keeps the BROAD-REGEX GUARD
+    // on bold-name-no-time meaningful — this pattern does NOT reopen
+    // it): bold-name-no-time's speaker capture is `(.+?)` — any label.
+    // This pattern's speaker capture is a closed two-value enumeration
+    // (`You` or `ChatGPT` exactly). It can never match an arbitrary
+    // `**Label:** text` prose idiom (`**Note:**`, `**Owner:**`,
+    // `**Attendees:**`, …), so a notes page cannot accidentally clear
+    // this pattern's anchor regex no matter how its bold labels are
+    // clustered — see the 'REGRESSION: notes-page bold labels never
+    // match the enumerated ChatGPT speakers' test below, which reuses
+    // bold-name-no-time's own F1 notes-page fixture.
+    //
+    // multi_line + score_continuations_as_body (mirrors bold-time-dash
+    // above) absorbs every non-`**`-prefixed reply line as message
+    // body EXCLUDED from the density denominator, so long
+    // multi-paragraph replies don't dilute the anchor ratio the way
+    // bold-name-no-time's flat line-count density does — a real
+    // export scores ~1.0 instead of ~0.026. score_full_body is ALSO
+    // set as a belt-and-suspenders full-body recompute of the WINNING
+    // candidate (same guarantee bold-name-no-time takes from
+    // score_full_body), so acceptance never depends on where the
+    // first anchor happens to land inside the head-pass window.
+    //
+    // score_continuations_min_distinct_speakers: 2 is a SECOND, narrower
+    // guard on top of that: unlike bold-time-dash's anchor grammar (bold
+    // name + valid 24h time + dash, implausible by coincidence), a bare
+    // `**You:**` / `**ChatGPT:**` heading is a plausible label in ordinary
+    // prose ABOUT ChatGPT. Without this gate, one solitary heading (via
+    // `firstLineAnchored`) or several repeats of the SAME role's heading
+    // would get the identical density-exclusion immunity a genuine
+    // back-and-forth transcript gets. Requiring BOTH roles to actually
+    // appear scopes that immunity to pages that look like a real exchange.
+    //
+    // score_continuations_max_preamble_lines: 5 is a THIRD guard, because
+    // distinct-speaker count alone still lets ONE illustrative `**You:**` /
+    // `**ChatGPT:**` example pair ANYWHERE inside an otherwise unrelated
+    // long document (a tutorial, a "how I use ChatGPT" article) through —
+    // both roles are present, so it would still get full density immunity.
+    // Requiring the first anchor's index to be <= 5 (i.e. at or before the
+    // 6th scored line, tolerating a short title/heading before the
+    // transcript starts, but not an arbitrary amount of unrelated prose)
+    // keeps that immunity scoped to pages that look like a real export
+    // from the top.
+    //
+    // DECLARATION ORDER (tie-break only — the safety is the enumerated
+    // regex, not this position): declared BEFORE bold-name-no-time so
+    // that on an input matching BOTH regexes (a literal `**You:**` /
+    // `**ChatGPT:**` line, which the broader `(.+?)` pattern also
+    // matches), the more specific ChatGPT-export identification wins
+    // the score tie instead of the generic Circleback/Granola/Zoom id.
+    id: 'chatgpt-export-you-chatgpt',
+    origin: 'builtin',
+    // Matches: **You:** message text / **ChatGPT:** message text
+    // (colon INSIDE bold, same shape as bold-name-no-time, speaker
+    // restricted to the two literal ChatGPT-export labels).
+    regex: /^\*\*(You|ChatGPT):\*\*\s*(.*)$/,
+    captures: {
+      speaker_group: 1,
+      text_group: 2,
+    },
+    date_source: 'frontmatter',
+    time_format: '24h',
+    timezone_policy: 'utc_assumed_with_warn',
+    multi_line: true,
+    score_continuations_as_body: true,
+    // Unlike bold-time-dash's anchor grammar (bold name + valid 24h time +
+    // dash — implausible to occur by coincidence), a bare `**You:**` /
+    // `**ChatGPT:**` heading is a plausible label in ordinary prose about
+    // ChatGPT (prompt-writing notes, comparison articles, documentation).
+    // Without this gate, score_continuations_as_body's density-exclusion
+    // would give a page containing just ONE such heading — or several
+    // repeats of the SAME role's heading — the same acceptance immunity a
+    // genuine back-and-forth transcript gets, regardless of how much
+    // surrounding non-conversational prose exists. Requiring both roles
+    // (You AND ChatGPT) to actually appear keeps that immunity scoped to
+    // pages that look like a real two-party exchange.
+    score_continuations_min_distinct_speakers: 2,
+    score_continuations_max_preamble_lines: 5,
+    score_full_body: true,
+    quick_reject: /^\*\*(?:You|ChatGPT):\*\*/,
+    test_positive: [
+      '**You:** what is the capital of France?',
+      '**ChatGPT:** The capital of France is Paris.',
+      '**You:** thanks',
+    ],
+    test_negative: [
+      // bold-name-no-time's own generic shape MUST fall through —
+      // any label other than the literal You/ChatGPT enumeration:
+      '**Alice Example:** hello world',
+      '**Assistant:** not the literal ChatGPT label',
+      '**User:** not the literal You label',
+      // bold-paren-time shape (colon OUTSIDE bold) MUST fall through:
+      '**You** (00:00): text',
+      // Bold but no colon at all:
+      '**You** hello world',
+      // No bold markers:
+      'You: plain no bold',
+      // telegram-bracket shape (timestamp INSIDE bold) MUST NOT match:
+      '**[18:37] \u{1f464} You:** hello',
+    ],
+    source_doc:
+      'ChatGPT web export → Markdown conversion: `**You:**` / `**ChatGPT:**` turn labels with multi-paragraph bodies separated by blank lines',
   },
 
   {
@@ -541,6 +793,46 @@ export const BUILTIN_PATTERNS: readonly PatternEntry[] = [
     test_negative: ['<alice> classic irc, no time', '[18:37] @alice: matrix'],
     source_doc: 'weechat default logger.format `%H:%M %p\\t%m`',
   },
+
+  {
+    id: 'markdown-heading-turn',
+    origin: 'builtin',
+    // gbrain transcript-ingest shape: a heading-only line ('## User' /
+    // '## Assistant' / '### Human') opens a turn; the message text is
+    // the continuation lines below the heading (D5), not anything on
+    // the heading line itself. No per-line timestamps — date comes
+    // from frontmatter / effective_date. The speaker set is closed
+    // (User/Assistant/Human/System only) so ordinary section headings
+    // like '## Summary' never match, and a heading with trailing prose
+    // ('## User said hello') is rejected rather than mis-captured.
+    regex: /^#{2,3}\s+(User|Assistant|Human|System)\s*:?\s*()$/,
+    captures: {
+      speaker_group: 1,
+      text_group: 2,
+    },
+    date_source: 'frontmatter',
+    time_format: '24h',
+    timezone_policy: 'utc_assumed_with_warn',
+    multi_line: true,
+    score_continuations_as_body: true,
+    // Narrowed to a role-prefix superset (NOT bare `/^#{2,3}\s/`): a body
+    // that pastes unrelated markdown headings (e.g. a document with many
+    // '## Section' headings) would otherwise inflate the D18 scorer's
+    // anchor-candidate denominator without inflating the anchored count,
+    // starving the pattern's score toward 0 on otherwise-valid transcripts.
+    // Still a strict superset of `regex` per validatePatternEntry's
+    // invariant (every test_positive sample passes both).
+    quick_reject: /^#{2,3}\s+(?:User|Assistant|Human|System)\b/,
+    test_positive: ['## User', '## Assistant', '### Human', '## System', '## User:'],
+    test_negative: [
+      '## Summary',
+      '#### User',
+      'User: plain no heading',
+      '## User said hello',
+    ],
+    source_doc:
+      'gbrain nightly transcript ingest: compiled_truth bodies use markdown headings per turn',
+  },
 ];
 
 /**
@@ -579,17 +871,28 @@ export function validatePatternEntry(entry: PatternEntry): void {
   if (entry.test_positive.length > 0) {
     const m = entry.regex.exec(entry.test_positive[0]);
     if (m === null) return; // already thrown above
-    const requiredGroups = [
-      entry.captures.speaker_group,
-      entry.captures.date_group,
-      entry.captures.hour_group,
-      entry.captures.minute_group,
-      entry.captures.ampm_group,
-    ].filter((g): g is number => typeof g === 'number');
-    for (const g of requiredGroups) {
-      if (g >= m.length) {
+    const captureGroups: Array<[
+      name: string,
+      group: number | undefined,
+      minimum: number,
+    ]> = [
+      ['speaker_group', entry.captures.speaker_group, 1],
+      ['text_group', entry.captures.text_group, 0],
+      ['date_group', entry.captures.date_group, 1],
+      ['hour_group', entry.captures.hour_group, 1],
+      ['minute_group', entry.captures.minute_group, 1],
+      ['ampm_group', entry.captures.ampm_group, 1],
+    ];
+    for (const [name, group, minimum] of captureGroups) {
+      if (group === undefined) continue;
+      if (!Number.isInteger(group) || group < minimum) {
         throw new Error(
-          `[conversation-parser] PatternEntry '${entry.id}' captures group ${g} but regex only emits ${m.length - 1} groups`,
+          `[conversation-parser] PatternEntry '${entry.id}' ${name} must be an integer >= ${minimum}; got ${group}`,
+        );
+      }
+      if (group > 0 && group >= m.length) {
+        throw new Error(
+          `[conversation-parser] PatternEntry '${entry.id}' captures group ${group} but regex only emits ${m.length - 1} groups`,
         );
       }
     }

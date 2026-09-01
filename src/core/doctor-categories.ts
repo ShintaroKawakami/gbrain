@@ -35,10 +35,11 @@
  *
  * The doctor renders both side by side.
  *
- * Drift contract: every check name that ships in doctor.ts MUST appear in
+ * Drift contract: every check name that ships through doctor MUST appear in
  * exactly one set below. The drift-guard test in
- * `test/doctor-categories.test.ts` enforces this by reading doctor.ts source
- * via a tagged-string scan and asserting set membership exactly.
+ * `test/doctor-categories.test.ts` enforces this by reading doctor check
+ * emitter sources via a tagged-string scan and asserting set membership
+ * exactly.
  *
  * If you add a new doctor check, you MUST add its name to the appropriate
  * set here. The categorize step in `src/commands/doctor.ts` falls through
@@ -59,6 +60,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'calibration_freshness',
   'child_table_orphans',
   'chronicle_projection_health',
+  'code_chunk_metadata',
+  'content_hash_duplicates',
   'content_sanity_audit_recent',
   'contextual_retrieval_coverage',
   'contradictions',
@@ -67,12 +70,16 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'conversation_parser_probe_health',
   'cross_modal_modality_backfill',
   'cycle_freshness',
+  'dangling_aliases',
   'effective_date_health',
+  'embed_staleness',
   'embedding_column_registry',
   'embedding_env_override',
+  'embedding_migration_state',
   'embedding_provider',
   'embedding_width_consistency',
   'embeddings',
+  'entity_link_coverage',
   'eval_drift',
   'extract_atoms_backlog',
   'extract_health',
@@ -80,6 +87,7 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'facts_extraction_health',
   'facts_health',
   'frontmatter_integrity',
+  'malformed_path_pages',
   'grade_confidence_drift',
   'graph_coverage',
   'graph_signals_coverage',
@@ -87,6 +95,10 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'image_assets',
   'integrity',
   'jsonb_integrity',
+  // #4222 — near-empty entity pages that accreted huge edge counts (junk
+  // hubs polluting the graph): a data-quality signal, sibling of
+  // scraper_junk_pages / graph_coverage.
+  'junk_entity_hubs',
   'link_resolution_opportunity',
   'links_extraction_lag',
   'markdown_body_completeness',
@@ -94,16 +106,24 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'ocr_health',
   'orphan_ratio',
   'oversized_pages',
+  'pglite_scratch_probe',
   'quarantined_pages',
+  'raw_provenance',
   'flagged_pages',
   'salience_health',
   'scraper_junk_pages',
+  'source_config_shape',
   'source_routing_health',
+  'stale_mentions',
   'stub_guard_24h',
   'sync_failures',
   'sync_freshness',
+  'takes_count',
   'takes_weight_grid',
+  'timeline_coverage',
+  'undeclared_db_only_pages',
   'unified_multimodal_coverage',
+  'unverified_extractions',
   'voice_gate_health',
 ]);
 
@@ -116,10 +136,17 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
  * skill-flavored name) live under 'brain'.
  */
 export const SKILL_CHECK_NAMES: ReadonlySet<string> = new Set([
+  'memory_verbs_usage',
   'resolver_health',
   'retrieval_reflex_health',
+  // Harness hook adapters: per-channel push-context visibility (sibling of
+  // retrieval_reflex_health — same "is my agent's context wiring live?" question).
+  'volunteer_channels',
   'skill_brain_first',
   'skill_conformance',
+  'skills_manifest_integrity',
+  'skill_currency',
+  'skill_preconditions',
   'whoknows_health',
 ]);
 
@@ -130,18 +157,41 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'alternative_providers',
   'autopilot_fanout_concurrency',
   'autopilot_lock_scope',
+  'bootstrap_hook_schema_pairing',
+  'bootstrap_harness_health',
+  'bootstrap_hooks_heartbeat',
+  'bootstrap_last_verify',
+  'memorable_relay_health',
+  'backup_coverage',
+  'bootstrap_push_health',
+  'bootstrap_durability_job',
+  'bootstrap_runbook_skew',
+  'bootstrap_serve_lock',
   'batch_retry_health',
   'brainstorm_health',
+  'connectors',
+  'chat_fallback_chain_inert',
   'connection',
+  'db_only_collector_collision',
   'federation_health',
+  'google_oauth',
   'home_dir_in_worktree',
   'index_audit',
+  'npm_squat',
+  'oauth_client_scope_health',
   'oauth_confidential_client_health',
   'orphan_clones',
   'pgbouncer_prepare',
+  'pglite_data_dir',
+  // db-availability loop: engine-fit + repair-recurrence signals.
+  'pglite_scale',
+  'db_repair_recurrence',
+  'pglite_leftovers',
   'pgvector',
+  'plugin_lane_collision',
   'pool_budget',
   'progressive_batch_audit_health',
+  'provider_sunset',
   'queue_health',
   'reranker_health',
   'rls',
@@ -157,6 +207,7 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'supervisor_singleton',
   'sync_consolidation',
   'wedged_queue',
+  'orphaned_private_queue',
   'worker_oom_loop',
   'ze_embedding_health',
 ]);
@@ -170,12 +221,19 @@ export const META_CHECK_NAMES: ReadonlySet<string> = new Set([
   'eval_capture',
   'minions_migration',
   'multi_source_drift',
+  'pack_upgrade_available',
+  // #550 — pages UNIQUE(source_id, slug) upsert arbiter presence: schema
+  // coherence healed by `gbrain apply-migrations` (sibling of
+  // timeline_dedup_index / schema_version).
+  'pages_upsert_arbiter',
+  'schema_columns',
   'schema_pack_active',
   'schema_pack_consistency',
   'schema_pack_source_drift',
   'schema_version',
   'slug_fallback_audit',
   'timeline_dedup_index',
+  'type_proliferation',
   'upgrade_errors',
 ]);
 
