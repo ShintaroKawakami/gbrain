@@ -176,6 +176,62 @@ describe('extract --source-id flag (#1204)', () => {
     expect(rows).toEqual([{ to_source_id: 'alpha' }]);
   });
 
+  test('#2336: six adjacent unicode links produce five default edges and one local edge', async () => {
+    const defaultTargets = [
+      '判断軸/疑われたらまず実績を数える',
+      '判断軸/できないと言われたらまず同じ手順で再現する',
+      '判断軸/破られても壊れない形を先に考える',
+      '判断軸/正しく振る舞っている人に我慢を強いる対策を選ばない',
+      '判断軸/記録は見られる形になって初めて完成',
+    ];
+    const localTarget = '判断軸/できなかった報告はまず本題か環境かを分ける';
+    const content = [...defaultTargets.slice(0, 1), localTarget, ...defaultTargets.slice(1)]
+      .map(target => `- [[${target}]]`)
+      .join('\n');
+    await engine.executeRaw(
+      `UPDATE sources SET config = $1::text::jsonb WHERE id = 'alpha'`,
+      [JSON.stringify({ federated: true })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO pages (slug, source_id, type, title, compiled_truth, timeline)
+       VALUES ($1, 'alpha', 'note', '起点', $2, '')`,
+      ['判断軸/行動が無いように見えるときは塞がっているものを先に見る', content],
+    );
+    await engine.executeRaw(
+      `INSERT INTO pages (slug, source_id, type, title, compiled_truth, timeline)
+       VALUES ($1, 'alpha', 'note', 'Local', 'Local target.', '')`,
+      [localTarget],
+    );
+    for (const target of defaultTargets) {
+      await engine.executeRaw(
+        `INSERT INTO pages (slug, source_id, type, title, compiled_truth, timeline)
+         VALUES ($1, 'default', 'note', $1, 'Default target.', '')`,
+        [target],
+      );
+    }
+    const origLog = console.log;
+    console.log = () => {};
+    try {
+      await runExtract(engine, ['links', '--source', 'db', '--source-id', 'alpha', '--json']);
+    } finally {
+      console.log = origLog;
+    }
+    const rows = await engine.executeRaw<{ slug: string; source_id: string }>(
+      `SELECT t.slug, t.source_id
+         FROM links l
+         JOIN pages f ON f.id = l.from_page_id
+         JOIN pages t ON t.id = l.to_page_id
+        WHERE f.slug = $1
+        ORDER BY t.slug`,
+      ['判断軸/行動が無いように見えるときは塞がっているものを先に見る'],
+    );
+    expect(rows).toHaveLength(6);
+    expect(rows.filter(row => row.source_id === 'default')).toHaveLength(5);
+    expect(rows.filter(row => row.source_id === 'alpha')).toEqual([
+      { slug: localTarget, source_id: 'alpha' },
+    ]);
+  });
+
   test('#3478: isolated source never falls back to a default-source target', async () => {
     // $N::text::jsonb (never bare ::jsonb on a stringified param) per the
     // JSONB invariant in CLAUDE.md.
