@@ -166,6 +166,20 @@ describe('extractEntityRefs', () => {
     expect(wikiRefs[0].needsResolution).toBe(true);
   });
 
+  test('#2336: unicode slash path is exact while alias and anchor stay intact', () => {
+    const refs = extractEntityRefs(
+      'See [[判断軸/疑われたらまず実績を数える#確認|実績を確認する]].',
+    );
+    expect(refs).toHaveLength(1);
+    expect(refs[0]).toMatchObject({
+      name: '実績を確認する',
+      slug: '判断軸/疑われたらまず実績を数える',
+      dir: '判断軸',
+      exactPath: true,
+    });
+    expect(refs[0].needsResolution).toBeUndefined();
+  });
+
   test('recognizes reference-page wikilinks as concrete targets', () => {
     const refs = extractEntityRefs('See [[reference/mcminnville-market-data]] for source context.');
     expect(refs.length).toBe(1);
