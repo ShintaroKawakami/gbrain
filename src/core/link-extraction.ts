@@ -86,14 +86,15 @@ export interface EntityRef {
    * pass (not gated by DIR_PATTERN). The `slug` field holds the literal
    * wikilink text — callers MUST run it through a SlugResolver's
    * `resolveBasenameMatches` (gated by `link_resolution.global_basename`)
-   * before persisting. Untagged refs already match a known entity dir
-   * (people/, companies/, etc.) and need no resolution.
+   * before persisting. `exactPath` marks generic slash paths that also emit
+   * their literal slug without widening the basename resolver's source scope.
    *
    * One ref tagged `needsResolution: true` may resolve to MULTIPLE target
    * slugs when multiple pages share the basename. The caller emits one
    * LinkCandidate per resolved match.
    */
   needsResolution?: boolean;
+  exactPath?: boolean;
   /**
    * Number of leading `../` segments on the original markdown link (0 when
    * absent or for engine-slug refs). The match regex strips the `../` run, so
@@ -431,16 +432,15 @@ export function extractEntityRefs(content: string): EntityRef[] {
     unqualifiedRanges.push([match.index, match.index + match[0].length]);
   }
 
-  // 2c. Issue #972: generic `[[bare-name]]` wikilinks not gated by
-  //     DIR_PATTERN. Wiki/topic/learning content frequently uses these
-  //     where the bare text isn't a canonical brain slug. Tagged
-  //     `needsResolution: true` so the caller routes them through a
-  //     SlugResolver's `resolveBasenameMatches` before persisting.
-  //     Mask out 2a/2b ranges so we don't double-emit; skip qualified-
-  //     syntax tokens (contain `:`) that would be 2a's job. Issue #972
-  //     (codex [P2]): ALSO mask pass-1 markdown-link ranges so a wikilink
-  //     inside a markdown label — `[see [[acme]]](companies/acme.md)` —
-  //     doesn't spawn a stray generic basename ref from inside the label.
+  // 2c. #2336: generic slash paths (including Unicode dirs) are exactPath,
+  //     because routing them through #972's source-scoped basename index
+  //     drops valid federated local-first/default-fallback links before the
+  //     source resolver sees them. Slashless names retain needsResolution;
+  //     widening basename scope was rejected because it joins unrelated
+  //     sources. Mask 2a/2b and markdown-label ranges to avoid double emits,
+  //     and leave qualified `source:path` tokens to 2a. The downstream page
+  //     existence checks still reject nonexistent exact paths, so this wider
+  //     Unicode path grammar cannot persist dangling edges.
   const labelWikilinkRanges: Array<[number, number]> = [];
   const labelWlPattern = new RegExp(MARKDOWN_LABEL_WIKILINK_RE.source, MARKDOWN_LABEL_WIKILINK_RE.flags);
   while ((match = labelWlPattern.exec(stripped)) !== null) {
@@ -459,7 +459,7 @@ export function extractEntityRefs(content: string): EntityRef[] {
     if (slug.endsWith('.md')) slug = slug.slice(0, -3);
     const displayName = (match[2] || slug).trim();
     const dir = slug.includes('/') ? slug.split('/')[0] : '';
-    refs.push({ name: displayName, slug, dir, needsResolution: true });
+    refs.push({ name: displayName, slug, dir, ...(slug.includes('/') ? { exactPath: true } : { needsResolution: true }) });
   }
 
   return refs;
@@ -635,7 +635,7 @@ export async function extractPageLinks(
     // flag is off (default), drop silently — back-compat with the
     // pre-v0.40.8.2 behavior of dropping bare wikilinks outside
     // DIR_PATTERN.
-    if (ref.needsResolution) {
+    if (ref.needsResolution || ref.exactPath) {
       const slashIdx = ref.slug.lastIndexOf('/');
       // #2576 (bug 2): a slash-shaped wikilink outside DIR_PATTERN
       // (`[[ops/services/pointer-agent]]`) gets the SAME treatment a
