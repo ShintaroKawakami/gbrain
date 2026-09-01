@@ -123,6 +123,59 @@ describe('extract --source-id flag (#1204)', () => {
     expect(Number(linkRows[0]?.n ?? 0)).toBe(0);
   });
 
+  test('#2336: unicode exact path falls back from federated alpha to default', async () => {
+    await engine.executeRaw(
+      `UPDATE sources SET config = $1::text::jsonb WHERE id = 'alpha'`,
+      [JSON.stringify({ federated: true })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO pages (slug, source_id, type, title, compiled_truth, timeline)
+       VALUES
+         ('判断軸/起点', 'alpha', 'note', '起点', 'See [[判断軸/既定だけ]].', ''),
+         ('判断軸/既定だけ', 'default', 'note', '既定', 'Default target.', '')`,
+    );
+    const origLog = console.log;
+    console.log = () => {};
+    try {
+      await runExtract(engine, ['links', '--source', 'db', '--source-id', 'alpha', '--json']);
+    } finally {
+      console.log = origLog;
+    }
+    const rows = await engine.executeRaw<{ from_source_id: string; to_source_id: string }>(
+      `SELECT f.source_id AS from_source_id, t.source_id AS to_source_id
+         FROM links l
+         JOIN pages f ON f.id = l.from_page_id
+         JOIN pages t ON t.id = l.to_page_id
+        WHERE f.slug = '判断軸/起点' AND t.slug = '判断軸/既定だけ'`,
+    );
+    expect(rows).toEqual([{ from_source_id: 'alpha', to_source_id: 'default' }]);
+  });
+
+  test('#2336: unicode exact path prefers the origin source over default', async () => {
+    await engine.executeRaw(
+      `INSERT INTO pages (slug, source_id, type, title, compiled_truth, timeline)
+       VALUES
+         ('判断軸/起点', 'alpha', 'note', '起点', 'See [[判断軸/共有]].', ''),
+         ('判断軸/共有', 'alpha', 'note', 'Alpha', 'Local target.', ''),
+         ('判断軸/共有', 'default', 'note', 'Default', 'Default target.', '')`,
+    );
+    const origLog = console.log;
+    console.log = () => {};
+    try {
+      await runExtract(engine, ['links', '--source', 'db', '--source-id', 'alpha', '--json']);
+    } finally {
+      console.log = origLog;
+    }
+    const rows = await engine.executeRaw<{ to_source_id: string }>(
+      `SELECT t.source_id AS to_source_id
+         FROM links l
+         JOIN pages f ON f.id = l.from_page_id
+         JOIN pages t ON t.id = l.to_page_id
+        WHERE f.slug = '判断軸/起点' AND t.slug = '判断軸/共有'`,
+    );
+    expect(rows).toEqual([{ to_source_id: 'alpha' }]);
+  });
+
   test('#3478: isolated source never falls back to a default-source target', async () => {
     // $N::text::jsonb (never bare ::jsonb on a stringified param) per the
     // JSONB invariant in CLAUDE.md.
