@@ -160,8 +160,10 @@ export async function getHealth(
   const { rows: linkableGroups } = await exec.run<LinkableTypeGroup>(sqlFragment`
     WITH linkable_pages AS MATERIALIZED (
       SELECT p.type,
-             (NOT EXISTS (SELECT 1 FROM links l WHERE l.to_page_id = p.id AND ${liveSrc})
-              AND NOT EXISTS (SELECT 1 FROM links l WHERE l.from_page_id = p.id AND ${liveTgt})) AS islanded,
+             (NOT EXISTS (SELECT 1 FROM links l WHERE l.to_page_id = p.id AND ${liveSrc}
+                            AND l.link_source IS DISTINCT FROM 'gbrain-source-membership-v1')
+              AND NOT EXISTS (SELECT 1 FROM links l WHERE l.from_page_id = p.id AND ${liveTgt}
+                            AND l.link_source IS DISTINCT FROM 'gbrain-source-membership-v1')) AS islanded,
              EXISTS (SELECT 1 FROM timeline_entries te WHERE te.page_id = p.id) AS has_timeline
         FROM pages p
        WHERE p.deleted_at IS NULL

@@ -389,6 +389,8 @@ export async function findOrphanPages(exec: LegacyUnscopedRead, opts?: {
         : opts?.sourceId
           ? sqlFragment`AND p.source_id = ${opts.sourceId}`
           : sqlFragment``;
+    // #2336: membership is registry plumbing, not reachability. IS DISTINCT FROM keeps
+    // manual/markdown/extractor/legacy NULL; rejecting all non-manual hides wikilinks.
     // #4524: default mode 'islanded' — identical predicate to getHealth's
     // orphan_pages (no live inbound AND no live outbound; outbound counts
     // only when its TARGET page is live, per gbrain#4153 endpoint liveness).
@@ -400,7 +402,7 @@ export async function findOrphanPages(exec: LegacyUnscopedRead, opts?: {
             FROM links l
             JOIN pages tgt ON tgt.id = l.to_page_id
             WHERE l.from_page_id = p.id
-              AND tgt.deleted_at IS NULL ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('tgt')} AND ${privateLinkOriginFilterFragment('l')}`) : sqlFragment``}
+              AND tgt.deleted_at IS NULL AND l.link_source IS DISTINCT FROM 'gbrain-source-membership-v1' ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('tgt')} AND ${privateLinkOriginFilterFragment('l')}`) : sqlFragment``}
           )`
         : sqlFragment``;
     const rows = (await exec.run(sqlFragment`
@@ -419,7 +421,7 @@ export async function findOrphanPages(exec: LegacyUnscopedRead, opts?: {
           FROM links l
           JOIN pages src ON src.id = l.from_page_id
           WHERE l.to_page_id = p.id
-            AND src.deleted_at IS NULL ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('src')} AND ${privateLinkOriginFilterFragment('l')}`) : sqlFragment``}
+            AND src.deleted_at IS NULL AND l.link_source IS DISTINCT FROM 'gbrain-source-membership-v1' ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('src')} AND ${privateLinkOriginFilterFragment('l')}`) : sqlFragment``}
         )
         ${outboundFilter}
       ORDER BY p.slug
