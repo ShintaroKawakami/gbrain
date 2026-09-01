@@ -2986,11 +2986,11 @@ export class PGLiteEngine implements BrainEngine {
       SELECT p.slug, p.type,
              (NOT EXISTS (SELECT 1 FROM links l
                           JOIN pages src ON src.id = l.from_page_id
-                          WHERE l.to_page_id = p.id AND src.deleted_at IS NULL
+                          WHERE l.to_page_id = p.id AND src.deleted_at IS NULL AND l.link_source IS DISTINCT FROM 'gbrain-source-membership-v1'
                             AND ($1::text[] IS NULL OR src.source_id = ANY($1)))
               AND NOT EXISTS (SELECT 1 FROM links l
                           JOIN pages tgt ON tgt.id = l.to_page_id
-                          WHERE l.from_page_id = p.id AND tgt.deleted_at IS NULL
+                          WHERE l.from_page_id = p.id AND tgt.deleted_at IS NULL AND l.link_source IS DISTINCT FROM 'gbrain-source-membership-v1'
                             AND ($1::text[] IS NULL OR tgt.source_id = ANY($1)))) as islanded,
              EXISTS (SELECT 1 FROM timeline_entries te WHERE te.page_id = p.id) as has_timeline
       FROM pages p
