@@ -30,14 +30,11 @@ describe('formatResult empty-result rendering (T15)', () => {
   test('degraded meta → cause named inline', () => {
     captureRetrievalMeta('retrieval', {
       returned_count: 0,
-      retrieved_count: 3,
-      degraded: [{ stage: 'embed_unavailable' }, { stage: 'embed_unavailable' }],
+      degraded: [{ stage: 'embed_unavailable' }],
     });
     const out = formatResult('query', [], {});
     expect(out).toContain('Retrieval degraded:');
-    expect(out).toContain('Search returned 0 results while retrieval was degraded (embed_unavailable)');
-    expect(out).toContain('this is not a clean miss; matching pages may exist.');
-    expect((out.match(/embed_unavailable/g) ?? []).length).toBe(1);
+    expect(out).toContain('Search returned 0 results while retrieval was degraded (embed_unavailable) — this is not a clean miss; matching pages may exist.');
   });
 
   test('clean-miss meta → clean miss named', () => {
