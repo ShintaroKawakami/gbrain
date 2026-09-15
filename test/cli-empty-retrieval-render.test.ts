@@ -35,8 +35,8 @@ describe('formatResult empty-result rendering (T15)', () => {
     });
     const out = formatResult('query', [], {});
     expect(out).toContain('Retrieval degraded:');
-    expect(out).toContain('retrieved 3 before trimming');
-    expect(out).toContain('degraded: embed_unavailable');
+    expect(out).toContain('Search returned 0 results while retrieval was degraded (embed_unavailable)');
+    expect(out).toContain('this is not a clean miss; matching pages may exist.');
     expect((out.match(/embed_unavailable/g) ?? []).length).toBe(1);
   });
 
