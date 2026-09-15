@@ -14,6 +14,7 @@ import {
   resetGateway,
   rerank,
   __setRerankTransportForTests,
+  __setSunsetClockForTests,
   _resetSunsetWarningsForTest,
 } from '../../src/core/ai/gateway.ts';
 
@@ -28,6 +29,7 @@ let stderrChunks: string[] = [];
 let origWrite: typeof process.stderr.write;
 
 beforeEach(() => {
+  __setSunsetClockForTests(() => new Date('2026-09-01T00:00:00Z'));
   _resetSunsetWarningsForTest();
   stderrChunks = [];
   origWrite = process.stderr.write.bind(process.stderr);
@@ -47,6 +49,7 @@ beforeEach(() => {
 afterEach(() => {
   process.stderr.write = origWrite;
   __setRerankTransportForTests(null);
+  __setSunsetClockForTests(null);
   _resetSunsetWarningsForTest();
   resetGateway();
 });
