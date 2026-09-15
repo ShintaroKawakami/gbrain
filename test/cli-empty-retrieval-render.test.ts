@@ -34,7 +34,7 @@ describe('formatResult empty-result rendering (T15)', () => {
       degraded: [{ stage: 'embed_unavailable' }, { stage: 'embed_unavailable' }],
     });
     const out = formatResult('query', [], {});
-    expect(out).toContain('No results.');
+    expect(out).toContain('Retrieval degraded:');
     expect(out).toContain('retrieved 3 before trimming');
     expect(out).toContain('degraded: embed_unavailable');
     expect((out.match(/embed_unavailable/g) ?? []).length).toBe(1);
