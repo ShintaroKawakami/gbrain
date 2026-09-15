@@ -201,12 +201,12 @@ jobs:
           key: pglite-snapshot-${{ runner.os }}-${{ hashFiles('src/core/migrate.ts', 'src/core/pglite-schema.ts', 'test/helpers/legacy-embedding-config.ts', 'scripts/build-pglite-snapshot.ts') }}
       - run: bun install --frozen-lockfile
       # [2026-09-15][fix] CaD: A fresh Postgres service has no GBrain schema, so
-      # bootstrap it explicitly. --no-embedding keeps this CI preflight key-free;
-      # one init step avoids coupling schema setup to an arbitrary test file.
-      - name: Bootstrap Postgres schema (no embedding)
+      # bootstrap it explicitly. CI skips credential validation while pinning
+      # the legacy 1536-dimensional E2E schema for key-free selected runs.
+      - name: Bootstrap Postgres schema (key-free, legacy 1536 dimensions)
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gbrain_test
-        run: bun run src/cli.ts init --url "$DATABASE_URL" --no-embedding --non-interactive
+        run: bun run src/cli.ts init --url "$DATABASE_URL" --embedding-model openai:text-embedding-3-large --embedding-dimensions 1536 --skip-embed-check --non-interactive
       # [2026-09-15][fix] CaD: The selected lane can run a standalone E2E file
       # against a fresh database, so seed fixture data explicitly. --no-embed
       # keeps CI key-free.

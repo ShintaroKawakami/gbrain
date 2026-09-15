@@ -45,6 +45,13 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
   beforeAll(async () => {
     const { execSync, spawn } = await import('child_process');
 
+    // [2026-09-15][fix] CaD: This file may run standalone or after another E2E
+    // file truncates shared Postgres, so seed deterministic read-control fixtures.
+    execSync(
+      'bun run src/cli.ts import test/e2e/fixtures --no-embed --workers 1',
+      { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env } }
+    );
+
     // Register a test OAuth client via CLI.
     // env: { ...process.env } is required: bun's execSync does NOT inherit
     // env mutations done via `process.env.X = ...` (only OS-level env from
