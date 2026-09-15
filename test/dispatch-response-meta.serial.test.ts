@@ -112,6 +112,25 @@ describe('dispatch response meta (WP2/D3/D8 + #2632)', () => {
     expect(retrieval.incomplete).toBe(true);
   });
 
+  test('vector_arm_failed empty → retrieval_degraded error + isError', async () => {
+    nextResults = [];
+    nextMeta = {
+      vector_enabled: false,
+      expansion_applied: false,
+      detail_resolved: null,
+      retrieved_count: 0,
+      degraded: [{ stage: 'vector_arm_failed' }],
+    };
+    const out = await callSearch();
+    expect(out.isError).toBe(true);
+    const body = JSON.parse(out.content[0].text);
+    expect(body.error).toBe('retrieval_degraded');
+    expect(body.degraded).toEqual(['vector_arm_failed']);
+    const retrieval = (out._meta as Record<string, any>).retrieval;
+    expect(retrieval.degraded).toEqual([{ stage: 'vector_arm_failed' }]);
+    expect(retrieval.incomplete).toBe(true);
+  });
+
   test('keyword_zero-only empty stays a healthy successful []', async () => {
     nextResults = [];
     nextMeta = {
