@@ -11,11 +11,19 @@
  *   - schema_missing → 'unavailable' + apply-migrations (NO db-repair marker:
  *     mid-op relation errors are code skew, not access failure)
  *   - unknown        → legacy envelope, message now REDACTED
+ *
+ * #2632 additions: the degraded-empty retrieval envelope is a DISTINCT
+ * error class — request-log taxonomy and the db-repair skill literal must
+ * never confuse the two.
  */
 
 import { describe, expect, it } from 'bun:test';
 
-import { dispatchToolCall } from '../src/mcp/dispatch.ts';
+import {
+  dispatchToolCall,
+  requestLogStatusForResult,
+  buildDegradedEmptyRetrievalEnvelope,
+} from '../src/mcp/dispatch.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 
 const OPTS = { remote: true, sourceId: 'default' } as const;
@@ -114,5 +122,28 @@ describe('MCP dispatch DB-error envelopes', () => {
     // Accept either envelope class; the LOAD-BEARING assertion is redaction.
     expect(JSON.stringify(b)).not.toContain('hunter2secret');
     expect(JSON.stringify(b)).not.toContain('1.2.3.4');
+  });
+});
+
+describe('#2632 — degraded-empty retrieval envelope is its own error class', () => {
+  it('requestLogStatusForResult classifies it as plain error (never denied_after_list, never a success class)', () => {
+    const result = {
+      content: [
+        { type: 'text', text: JSON.stringify(buildDegradedEmptyRetrievalEnvelope(['keyword_zero']), null, 2) },
+      ],
+      isError: true,
+    };
+    expect(requestLogStatusForResult(result)).toBe('error');
+  });
+
+  it('carries no db-repair marker and no DB error code — the db-repair skill literal never trips on it', () => {
+    const envelope = buildDegradedEmptyRetrievalEnvelope(['embed_unavailable', 'keyword_zero']);
+    // The CODE is its own class (not the frozen verb 'unavailable', not the
+    // non-verb 'database_error'), and the db-repair skill's literal marker
+    // appears nowhere in the envelope.
+    expect(envelope.error).toBe('retrieval_degraded');
+    expect(envelope.error).not.toBe('unavailable');
+    expect(envelope.error).not.toBe('database_error');
+    expect(JSON.stringify(envelope)).not.toContain('GBRAIN_DB_ACCESS');
   });
 });

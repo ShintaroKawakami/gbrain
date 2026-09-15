@@ -331,7 +331,7 @@ export function buildEmptyRetrievalBlock(retrieval: unknown): string | null {
   if (retrieval === null || typeof retrieval !== 'object') return null;
   const r = retrieval as {
     retrieved_count?: number;
-    degraded?: Array<{ stage?: string; reason?: string }>;
+    degraded?: Array<{ stage?: string }>;
     hint?: string;
   };
   const parts: string[] = ['0 results.'];
@@ -344,6 +344,75 @@ export function buildEmptyRetrievalBlock(retrieval: unknown): string | null {
     : 'no retrieval degradation — this is a clean miss.');
   if (typeof r.hint === 'string' && r.hint.length > 0) parts.push(`hint: ${r.hint}`);
   return parts.join(' ');
+}
+
+// ── #2632: degraded-empty retrieval signaling at the MCP/CLI boundary ──────
+
+/**
+ * #2632 — degradation stages that can themselves produce an empty result
+ * (or hide matches that exist). The D6 closed vocabulary (types.ts) splits
+ * into stages that narrow RECALL — a whole retrieval arm never ran, died,
+ * or dropped every retrieved row — and stages that only affect ORDER /
+ * presentation (`rescore_skipped`, `budget_truncated`) or provenance
+ * hygiene (`cache_prestamp`, which names unprovable cleanliness, not a
+ * lost arm). When a retrieval comes back [] AND carries any stage in this
+ * set, the [] is NOT evidence that no matches exist; issue #2632 was
+ * exactly a keyword_zero + embed_unavailable miss reaching agents as a
+ * confident empty success.
+ *
+ * Additive-forever discipline (DEGRADED_STAGES): a future stage that can
+ * empty a result set MUST be added here in the same change, or this
+ * signaling silently stops covering it. Unknown stage codes (forward
+ * skew, prestamp cache rows) deliberately do NOT match — only a stage
+ * this set names may flip a success to the error shape, so the healthy
+ * zero-hit [] contract stays byte-stable for every other degradation.
+ */
+export const RECALL_AFFECTING_STAGES: ReadonlySet<string> = new Set([
+  'embed_unavailable',
+  'embed_timeout',
+  'expansion_failed',
+  'expansion_partial',
+  'vector_arm_failed',
+  'budget_dropped_all',
+  'keyword_zero',
+]);
+
+/**
+ * #2632 — the recall-affecting stages present in a `retrieval` meta payload
+ * (deduped, emission order). Non-object payloads and payloads without a
+ * `degraded[]` stamp read as [] — the classifier is best-effort, never a
+ * failure source (same posture as buildEmptyRetrievalBlock).
+ */
+export function recallAffectingStages(retrieval: unknown): string[] {
+  if (retrieval === null || typeof retrieval !== 'object') return [];
+  const degraded = (retrieval as { degraded?: unknown }).degraded;
+  if (!Array.isArray(degraded)) return [];
+  const hit = new Set<string>();
+  for (const entry of degraded) {
+    const stage = (entry as { stage?: unknown } | null | undefined)?.stage;
+    if (typeof stage === 'string' && RECALL_AFFECTING_STAGES.has(stage)) hit.add(stage);
+  }
+  return [...hit];
+}
+
+/**
+ * #2632 — error envelope for a recall-affecting degraded+empty retrieval.
+ * The FIRST content block becomes this JSON (not `[]`) and the ToolResult
+ * flips to isError=true, so legacy first-array-only consumers (deployed
+ * thin clients that JSON.parse content[0]) cannot read the response as a
+ * normal empty success — they see an error object, and the real thin-client
+ * path (callRemoteTool) turns isError into a visible RemoteMcpError.
+ * Structured facts stay in `_meta.retrieval` (degraded stages + incomplete
+ * stamp); the D8 diagnosis block still follows as the second content block
+ * for the model.
+ */
+export function buildDegradedEmptyRetrievalEnvelope(stages: string[]): Record<string, unknown> {
+  return {
+    error: 'retrieval_degraded',
+    message: `Search returned 0 results while retrieval was degraded (${stages.join(', ')}) — this is not a clean miss; matching pages may exist.`,
+    suggestion: 'Retry the search, or run `gbrain doctor` on the brain host to diagnose the degraded stages named in _meta.retrieval.degraded.',
+    degraded: stages,
+  };
 }
 
 /**
@@ -675,11 +744,40 @@ export async function dispatchToolCall(
       });
     }
     const out: ToolResult = { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-    // D8: model-visible loudness for empty retrievals. The body stays a bare
-    // array (D3 — deployed thin-clients parse content[0] only), and a SECOND
-    // text block carries the diagnosis the model actually sees. Structured
-    // consumers read the same facts from _meta.retrieval below.
-    if (Array.isArray(result) && result.length === 0 && responseMeta.retrieval) {
+    // #2632 — degraded-empty retrieval signaling. A recall-affecting stage
+    // marks the retrieval incomplete (`_meta.retrieval.incomplete`, additive
+    // field); when the result set is ALSO empty, the first content block
+    // flips to the error envelope above so no consumer can read a degraded
+    // miss as "no matches exist". Partial hits keep the array body; healthy
+    // zero hits (clean miss, or ordering-only stages like rescore_skipped)
+    // keep the existing successful [] shape byte-for-byte.
+    const recallStages = recallAffectingStages(responseMeta.retrieval);
+    if (
+      recallStages.length > 0 &&
+      responseMeta.retrieval !== null &&
+      typeof responseMeta.retrieval === 'object'
+    ) {
+      responseMeta.retrieval = {
+        ...(responseMeta.retrieval as Record<string, unknown>),
+        incomplete: true,
+      };
+    }
+    const emptyRetrieval =
+      Array.isArray(result) && result.length === 0 && !!responseMeta.retrieval;
+    if (emptyRetrieval && recallStages.length > 0) {
+      out.content[0] = {
+        type: 'text',
+        text: JSON.stringify(buildDegradedEmptyRetrievalEnvelope(recallStages), null, 2),
+      };
+      out.isError = true;
+    }
+    // D8: model-visible loudness for empty retrievals. On a healthy empty
+    // the body stays the bare array (D3 — deployed thin-clients parse
+    // content[0] only); on the #2632 flip above it is the error envelope.
+    // Either way a SECOND text block carries the diagnosis the model
+    // actually sees; structured consumers read the same facts from
+    // _meta.retrieval below.
+    if (emptyRetrieval) {
       const block = buildEmptyRetrievalBlock(responseMeta.retrieval);
       if (block) out.content.push({ type: 'text', text: block });
     }

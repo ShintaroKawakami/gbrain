@@ -31,7 +31,7 @@ shape for it.
 | Key | Producer | Contents |
 |-----|----------|----------|
 | `brain_hot_memory` | serve-http `metaHook` (`getBrainHotMemoryMeta`) | Hot-memory facts relevant to the call (v0.31 eD3) |
-| `retrieval` | `search`/`query` op handlers | `returned_count`, `retrieved_count`, `vector_enabled`, `expansion_applied`, `cache`, `token_budget`, `degraded[]` (closed stage vocabulary, D6), `hint` (non-contractual prose, E1) |
+| `retrieval` | `search`/`query` op handlers | `returned_count`, `retrieved_count`, `vector_enabled`, `expansion_applied`, `cache`, `token_budget`, `degraded[]` (closed stage vocabulary, D6), `incomplete` (#2632 — true when a recall-affecting stage is stamped), `hint` (non-contractual prose, E1) |
 | `warnings` | dispatch strict-params warn mode (WP3) | `[{code: 'unknown_param', param, suggestion?}]` |
 
 Inbound `_meta` (e.g. `_meta.session_id` inside tool ARGUMENTS, CX2-11) is a
@@ -40,3 +40,30 @@ lives in JSON BODIES of eval commands — a third, unrelated plane. Ambient
 recall (#4028) rides content/hooks, not `_meta`.
 
 Adding a key: register it in the table above, one producer, additive-forever.
+
+## Degraded-empty retrieval signaling (#2632)
+
+`_meta` never changes the response BODY shape — but #2632 defines when the
+dispatch layer (`src/mcp/dispatch.ts`) changes the body itself. When a
+retrieval op returns `[]` AND the `retrieval` meta's `degraded[]` carries a
+recall-affecting stage (closed set: `embed_unavailable`, `embed_timeout`,
+`expansion_failed`, `expansion_partial`, `vector_arm_failed`,
+`budget_dropped_all`, `keyword_zero` — see `RECALL_AFFECTING_STAGES`), the
+empty result is not evidence that no matches exist, so the dispatcher flips
+the response:
+
+- content[0] becomes the `{"error":"retrieval_degraded", ...}` envelope
+  (not `[]`) and `isError: true` — legacy first-array-only consumers cannot
+  read a degraded miss as a normal empty success, and the thin-client
+  `callRemoteTool` path surfaces it as a visible tool error;
+- the D8 diagnosis block still follows as the second content block;
+- `_meta.retrieval` still carries the structured facts, plus `incomplete:
+  true`.
+
+Partial hits (degraded but non-empty) keep the successful array body and are
+marked `incomplete: true` on `_meta.retrieval`. Healthy zero hits — clean
+miss, pre-stamp meta, or ordering-only stages (`rescore_skipped`,
+`budget_truncated`, `cache_prestamp`) — keep the existing successful `[]`
+shape byte-for-byte. A future degradation stage that can empty a result set
+MUST be added to `RECALL_AFFECTING_STAGES` in the same change that adds it
+to the D6 vocabulary.

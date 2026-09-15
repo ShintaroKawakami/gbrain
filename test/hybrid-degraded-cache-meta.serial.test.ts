@@ -15,6 +15,10 @@
  *     with ttl_seconds=60; a clean set keeps the resolved TTL (3600)
  *   - null-embedding store is a silent no-op (ENG-6 — total embed outage
  *     is uncacheable by construction)
+ *   - #2632 end-to-end: the REAL pipeline's recall-affecting stamps
+ *     (embed_unavailable + keyword_zero on the no-provider path) drive
+ *     dispatchToolCall's degraded-empty error envelope, and the
+ *     keyword-only-config healthy empty keeps the successful [] shape.
  *
  * Serial: mock.module + gateway/global-env mutation (isolation guard R2).
  */
@@ -60,21 +64,27 @@ const {
 const { SemanticQueryCache } = await import('../src/core/search/query-cache.ts');
 const { configureGateway, resetGateway } = await import('../src/core/ai/gateway.ts');
 const { PGLiteEngine } = await import('../src/core/pglite-engine.ts');
+const { dispatchToolCall } = await import('../src/mcp/dispatch.ts');
 
 let engine: InstanceType<typeof PGLiteEngine>;
 let tmpHome: string;
 const savedGbrainHome = process.env.GBRAIN_HOME;
+
+// The file's gateway posture (a provider-keyed embedding config). Extracted
+// so the #2632 describe can take the gateway down and restore THIS exact
+// state afterwards — later tests need isAvailable('embedding') true.
+const FILE_GATEWAY_CONFIG = {
+  embedding_model: 'openai:text-embedding-3-large',
+  embedding_dimensions: 1536,
+  env: { OPENAI_API_KEY: 'sk-fake' },
+} as const;
 
 beforeAll(async () => {
   tmpHome = mkdtempSync(join(tmpdir(), 'gbrain-degraded-cache-meta-'));
   process.env.GBRAIN_HOME = tmpHome;
 
   resetGateway();
-  configureGateway({
-    embedding_model: 'openai:text-embedding-3-large',
-    embedding_dimensions: 1536,
-    env: { OPENAI_API_KEY: 'sk-fake' },
-  });
+  configureGateway(FILE_GATEWAY_CONFIG);
 
   engine = new PGLiteEngine();
   await engine.connect({});
@@ -252,5 +262,66 @@ describe('ENG-6 — null-embedding store stays a silent no-op', () => {
       'SELECT COUNT(*)::int AS n FROM query_cache',
     );
     expect(rows[0].n).toBe(0);
+  });
+});
+
+describe('#2632 — real pipeline → dispatch degraded-empty signaling', () => {
+  // No mocking of the search stack here: the REAL search op runs through
+  // dispatchToolCall against the real engine. The gateway is taken down
+  // (no embedding provider) so hybridSearch takes the keyword-only no-embed
+  // path — the exact #2632 scenario — and the emitted recall-affecting
+  // stamps must flip the response to the error envelope. Restored in a
+  // finally so later describes keep the file's provider-keyed posture.
+  test('no-provider search over no matches → embed_unavailable + keyword_zero → error envelope', async () => {
+    configureGateway({
+      ...FILE_GATEWAY_CONFIG,
+      env: {},
+    });
+    try {
+      const out = await dispatchToolCall(
+        engine,
+        'search',
+        { query: 'zzz-query-with-no-matches-anywhere' },
+        { remote: true, transport: 'http', sourceId: 'default' },
+      );
+      expect(out.isError).toBe(true);
+      const body = JSON.parse(out.content[0].text);
+      expect(body.error).toBe('retrieval_degraded');
+      expect(body.degraded).toContain('embed_unavailable');
+      expect(body.degraded).toContain('keyword_zero');
+      const retrieval = (out._meta as Record<string, any>).retrieval;
+      const stages = (retrieval.degraded as Array<{ stage: string }>).map(d => d.stage);
+      expect(stages).toContain('embed_unavailable');
+      expect(stages).toContain('keyword_zero');
+      expect(retrieval.incomplete).toBe(true);
+      // The model-visible D8 block still names the stages.
+      expect(out.content[1].text).toContain('embed_unavailable');
+    } finally {
+      resetGateway();
+      configureGateway(FILE_GATEWAY_CONFIG);
+    }
+  });
+
+  test('keyword-only-config healthy empty → successful [] + clean-miss block (no flip)', async () => {
+    // search.mcp_keyword_only opts the op out of the hybrid contract: the
+    // retrieval meta carries NO degraded stamp, so an empty result is a
+    // legitimate clean miss and must keep the successful array shape.
+    await engine.setConfig('search.mcp_keyword_only', 'true');
+    try {
+      const out = await dispatchToolCall(
+        engine,
+        'search',
+        { query: 'zzz-query-with-no-matches-anywhere' },
+        { remote: true, transport: 'http', sourceId: 'default' },
+      );
+      expect(out.isError).toBeUndefined();
+      expect(JSON.parse(out.content[0].text)).toEqual([]);
+      expect(out.content[1].text).toContain('clean miss');
+      const retrieval = (out._meta as Record<string, any>).retrieval;
+      expect(retrieval.degraded).toBeUndefined();
+      expect(retrieval.incomplete).toBeUndefined();
+    } finally {
+      await engine.setConfig('search.mcp_keyword_only', 'false');
+    }
   });
 });
