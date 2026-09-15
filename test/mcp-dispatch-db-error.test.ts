@@ -129,7 +129,7 @@ describe('#2632 — degraded-empty retrieval envelope is its own error class', (
   it('requestLogStatusForResult classifies it as plain error (never denied_after_list, never a success class)', () => {
     const result = {
       content: [
-        { type: 'text', text: JSON.stringify(buildDegradedEmptyRetrievalEnvelope(['keyword_zero']), null, 2) },
+        { type: 'text' as const, text: JSON.stringify(buildDegradedEmptyRetrievalEnvelope(['keyword_zero']), null, 2) },
       ],
       isError: true,
     };
