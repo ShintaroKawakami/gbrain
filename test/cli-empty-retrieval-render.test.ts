@@ -50,8 +50,15 @@ describe('formatResult empty-result rendering (T15)', () => {
     expect(formatResult('search', [], {})).toBe('No results.\n');
   });
 
-  test('--json path is untouched (machine output stays a bare array)', () => {
+  test('--json degraded empty becomes the retrieval_degraded envelope', () => {
     captureRetrievalMeta('retrieval', { degraded: [{ stage: 'embed_timeout' }] });
+    const output = JSON.parse(formatResult('search', [], { json: true }));
+    expect(output.error).toBe('retrieval_degraded');
+    expect(output.degraded).toEqual(['embed_timeout']);
+  });
+
+  test('keyword_zero alone preserves --json successful []', () => {
+    captureRetrievalMeta('retrieval', { degraded: [{ stage: 'keyword_zero' }] });
     expect(formatResult('search', [], { json: true })).toBe('[]\n');
   });
 });
@@ -136,13 +143,13 @@ describe('degraded-empty error envelope on the thin-client boundary (#2632)', ()
     captureRetrievalMeta('retrieval', {
       returned_count: 0,
       retrieved_count: 2,
-      degraded: [{ stage: 'keyword_zero' }],
+      degraded: [{ stage: 'embed_unavailable' }, { stage: 'keyword_zero' }],
       incomplete: true,
     });
     const out = formatResult('search', [], {});
-    expect(out).toContain('No results.');
-    expect(out).toContain('degraded: keyword_zero');
-    // --json stays a bare array — machine output never carries the prose.
-    expect(formatResult('search', [], { json: true })).toBe('[]\n');
+    expect(out).toContain('Retrieval degraded:');
+    expect(out).toContain('embed_unavailable, keyword_zero');
+    const json = JSON.parse(formatResult('search', [], { json: true }));
+    expect(json.error).toBe('retrieval_degraded');
   });
 });

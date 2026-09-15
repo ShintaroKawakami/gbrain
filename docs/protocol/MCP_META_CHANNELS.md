@@ -48,7 +48,7 @@ dispatch layer (`src/mcp/dispatch.ts`) changes the body itself. When a
 retrieval op returns `[]` AND the `retrieval` meta's `degraded[]` carries a
 recall-affecting stage (closed set: `embed_unavailable`, `embed_timeout`,
 `expansion_failed`, `expansion_partial`, `vector_arm_failed`,
-`budget_dropped_all`, `keyword_zero` — see `RECALL_AFFECTING_STAGES`), the
+`budget_dropped_all` — see `RECALL_AFFECTING_STAGES`), the
 empty result is not evidence that no matches exist, so the dispatcher flips
 the response:
 
@@ -62,8 +62,16 @@ the response:
 
 Partial hits (degraded but non-empty) keep the successful array body and are
 marked `incomplete: true` on `_meta.retrieval`. Healthy zero hits — clean
-miss, pre-stamp meta, or ordering-only stages (`rescore_skipped`,
-`budget_truncated`, `cache_prestamp`) — keep the existing successful `[]`
-shape byte-for-byte. A future degradation stage that can empty a result set
-MUST be added to `RECALL_AFFECTING_STAGES` in the same change that adds it
-to the D6 vocabulary.
+miss, `keyword_zero` alone, pre-stamp meta, or ordering-only stages
+(`rescore_skipped`, `budget_truncated`, `cache_prestamp`) — keep the existing
+successful `[]` shape byte-for-byte. If a recall-affecting stage coexists
+with `keyword_zero`, the envelope includes both codes: the keyword miss is
+supporting evidence, not the reason for the flip.
+
+[2026-09-15][fix] CaD: `keyword_zero` alone is a normal lexical clean miss;
+an unavailable embed/vector arm, failed expansion, or dropped-all budget can
+hide a match; and the local CLI must apply the same classification before it
+renders `--json`. We rejected erroring every `keyword_zero`, because that
+would turn healthy empty searches into failures. A future degradation stage
+that can empty a result set MUST be added to `RECALL_AFFECTING_STAGES` in the
+same change that adds it to the D6 vocabulary.

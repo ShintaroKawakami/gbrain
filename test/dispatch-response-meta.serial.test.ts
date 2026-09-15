@@ -112,7 +112,7 @@ describe('dispatch response meta (WP2/D3/D8 + #2632)', () => {
     expect(retrieval.incomplete).toBe(true);
   });
 
-  test('keyword_zero-only degraded empty → error flip (the #2632 scenario shape)', async () => {
+  test('keyword_zero-only empty stays a healthy successful []', async () => {
     nextResults = [];
     nextMeta = {
       vector_enabled: false,
@@ -122,10 +122,25 @@ describe('dispatch response meta (WP2/D3/D8 + #2632)', () => {
       degraded: [{ stage: 'keyword_zero' }],
     };
     const out = await callSearch();
+    expect(out.isError).toBeUndefined();
+    expect(JSON.parse(out.content[0].text)).toEqual([]);
+    expect((out._meta as Record<string, any>).retrieval.incomplete).toBeUndefined();
+  });
+
+  test('embed_unavailable plus keyword_zero empty → error flip', async () => {
+    nextResults = [];
+    nextMeta = {
+      vector_enabled: false,
+      expansion_applied: false,
+      detail_resolved: null,
+      retrieved_count: 0,
+      degraded: [{ stage: 'embed_unavailable' }, { stage: 'keyword_zero' }],
+    };
+    const out = await callSearch();
     expect(out.isError).toBe(true);
     const body = JSON.parse(out.content[0].text);
     expect(body.error).toBe('retrieval_degraded');
-    expect(body.degraded).toEqual(['keyword_zero']);
+    expect(body.degraded).toEqual(['embed_unavailable', 'keyword_zero']);
     expect((out._meta as Record<string, any>).retrieval.incomplete).toBe(true);
   });
 
@@ -234,7 +249,13 @@ describe('recallAffectingStages + envelope (unit)', () => {
           { stage: 'budget_truncated' },
         ],
       }),
-    ).toEqual(['keyword_zero']);
+    ).toEqual([]);
+    expect(
+      recallAffectingStages({
+        degraded: [{ stage: 'embed_unavailable' }, { stage: 'keyword_zero' }],
+      }),
+    ).toEqual(['embed_unavailable', 'keyword_zero']);
+    expect(RECALL_AFFECTING_STAGES.has('keyword_zero')).toBe(false);
     // Every recall-affecting code is a real D6 vocabulary member.
     for (const stage of RECALL_AFFECTING_STAGES) {
       expect(stage).toMatch(/^[a-z_]+$/);

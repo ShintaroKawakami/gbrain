@@ -360,6 +360,14 @@ export function buildEmptyRetrievalBlock(retrieval: unknown): string | null {
  * exactly a keyword_zero + embed_unavailable miss reaching agents as a
  * confident empty success.
  *
+ * [2026-09-15][fix] CaD: (1) `keyword_zero` describes the keyword arm's
+ * ordinary clean miss, not an unavailable arm; (2) an embed/vector,
+ * expansion, or budget loss can hide a match even when that keyword arm is
+ * empty; (3) local CLI had to use this same decision before rendering JSON,
+ * or it would contradict the MCP/thin-client envelope. Rejected: treating
+ * every `keyword_zero` as recall loss, which turned healthy zero-result
+ * searches into errors and broke the established `[]` contract.
+ *
  * Additive-forever discipline (DEGRADED_STAGES): a future stage that can
  * empty a result set MUST be added here in the same change, or this
  * signaling silently stops covering it. Unknown stage codes (forward
@@ -374,12 +382,13 @@ export const RECALL_AFFECTING_STAGES: ReadonlySet<string> = new Set([
   'expansion_partial',
   'vector_arm_failed',
   'budget_dropped_all',
-  'keyword_zero',
 ]);
 
 /**
  * #2632 — the recall-affecting stages present in a `retrieval` meta payload
- * (deduped, emission order). Non-object payloads and payloads without a
+ * (deduped, emission order). `keyword_zero` is included only as supporting
+ * evidence when another recall-affecting stage is present: by itself it is a
+ * healthy clean miss. Non-object payloads and payloads without a
  * `degraded[]` stamp read as [] — the classifier is best-effort, never a
  * failure source (same posture as buildEmptyRetrievalBlock).
  */
@@ -387,12 +396,17 @@ export function recallAffectingStages(retrieval: unknown): string[] {
   if (retrieval === null || typeof retrieval !== 'object') return [];
   const degraded = (retrieval as { degraded?: unknown }).degraded;
   if (!Array.isArray(degraded)) return [];
-  const hit = new Set<string>();
+  const stages: string[] = [];
+  const seen = new Set<string>();
   for (const entry of degraded) {
     const stage = (entry as { stage?: unknown } | null | undefined)?.stage;
-    if (typeof stage === 'string' && RECALL_AFFECTING_STAGES.has(stage)) hit.add(stage);
+    if (typeof stage === 'string' && !seen.has(stage)) {
+      seen.add(stage);
+      stages.push(stage);
+    }
   }
-  return [...hit];
+  if (!stages.some(stage => RECALL_AFFECTING_STAGES.has(stage))) return [];
+  return stages.filter(stage => RECALL_AFFECTING_STAGES.has(stage) || stage === 'keyword_zero');
 }
 
 /**

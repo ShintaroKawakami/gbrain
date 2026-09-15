@@ -183,6 +183,19 @@ describe('thin-client doctor routes to runRemoteDoctor', () => {
 describe('regression — local config still passes through normally', () => {
   useFreshHome();
 
+  testRaw('local `search --json` exposes an embed-unavailable empty as retrieval_degraded', async () => {
+    // Real local-engine coverage for #2632: a fresh, keyless PGLite brain
+    // reaches the keyword-only fallback with both embed_unavailable and
+    // keyword_zero. It must not serialize that incomplete miss as `[]`.
+    seedLocalPGLiteConfig(tmp);
+    const r = await run(['search', 'unique-local-degraded-empty-2632', '--json']);
+    expect(r.exitCode).toBe(1);
+    const body = JSON.parse(r.stdout);
+    expect(body.error).toBe('retrieval_degraded');
+    expect(body.degraded).toEqual(['embed_unavailable', 'keyword_zero']);
+    expect(r.stderr).toContain('retrieval_degraded');
+  }, 120_000);
+
   test('local PGLite config does NOT trigger thin-client guard for `sync`', async () => {
     // Seed a local PGLite config (no remote_mcp). `gbrain sync` shouldn't
     // refuse with the thin-client error. It may error for other reasons
