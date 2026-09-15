@@ -42,10 +42,10 @@ describe('T5 — gbrain search dispatch', () => {
   test('`search "<freetext>"` routes to the cheap-hybrid search op (no "Unknown subcommand")', () => {
     withHome((home) => {
       const { stdout, stderr, status } = run(['search', 'zzz-no-such-page-xyz'], home);
-      // Empty brain → "No results." (the search op's formatter), exit 0.
-      expect(status).toBe(0);
+      // Embeddings unavailable → degraded retrieval, exit 1.
+      expect(status).toBe(1);
       expect(stderr).not.toContain('Unknown subcommand');
-      expect(stdout.toLowerCase()).toContain('no results');
+      expect(stdout).toContain('Retrieval degraded');
     });
   });
 
