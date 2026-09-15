@@ -207,6 +207,13 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gbrain_test
         run: bun run src/cli.ts init --url "$DATABASE_URL" --no-embedding --non-interactive
+      # [2026-09-15][fix] CaD: The selected lane can run a standalone E2E file
+      # against a fresh database, so seed fixture data explicitly. --no-embed
+      # keeps CI key-free.
+      - name: Seed E2E fixtures (no embedding)
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gbrain_test
+        run: bun run src/cli.ts import test/e2e/fixtures --no-embed --workers 1
       - name: Select and run diff-relevant E2E files
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gbrain_test
