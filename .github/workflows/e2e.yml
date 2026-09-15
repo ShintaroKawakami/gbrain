@@ -200,6 +200,9 @@ jobs:
             test/fixtures/pglite-snapshot.version
           key: pglite-snapshot-${{ runner.os }}-${{ hashFiles('src/core/migrate.ts', 'src/core/pglite-schema.ts', 'test/helpers/legacy-embedding-config.ts', 'scripts/build-pglite-snapshot.ts') }}
       - run: bun install --frozen-lockfile
+      # [2026-09-15][fix] CaD: A fresh Postgres service has no GBrain schema, so
+      # bootstrap it explicitly. --no-embedding keeps this CI preflight key-free;
+      # one init step avoids coupling schema setup to an arbitrary test file.
       - name: Bootstrap Postgres schema (no embedding)
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gbrain_test
