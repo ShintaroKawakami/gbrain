@@ -45,6 +45,13 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
   beforeAll(async () => {
     const { execSync, spawn } = await import('child_process');
 
+    // [2026-09-15][fix] CaD: This file may run standalone or after another E2E
+    // file truncates shared Postgres, so seed deterministic read-control fixtures.
+    execSync(
+      'bun run src/cli.ts import test/e2e/fixtures --no-embed --workers 1',
+      { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env } }
+    );
+
     // Register a test OAuth client via CLI.
     // env: { ...process.env } is required: bun's execSync does NOT inherit
     // env mutations done via `process.env.X = ...` (only OS-level env from
@@ -1288,7 +1295,7 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
     // Allowed control (anti-vacuity): same token, read op succeeds.
     const allowed = await mcpToolResult(readToken, 'tools/call', {
       name: 'search',
-      arguments: { query: 'e2e-c4-control', limit: 1 },
+      arguments: { query: 'gbrain', limit: 1 },
     });
     expect(allowed.isError).not.toBe(true);
 
@@ -1379,7 +1386,7 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
     // row to 'success_with_warnings'.
     const warned = await mcpToolResult(token, 'tools/call', {
       name: 'search',
-      arguments: { query: 'e2e-c5-warn', limit: 1, bogus_unknown_param: 'x' },
+      arguments: { query: 'gbrain', limit: 1, bogus_unknown_param: 'x' },
     });
     expect(warned.isError).not.toBe(true);
     const warnings = warned._meta?.warnings;
@@ -1392,7 +1399,7 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
     // Control (anti-vacuity): same op with only declared params.
     const clean = await mcpToolResult(token, 'tools/call', {
       name: 'search',
-      arguments: { query: 'e2e-c5-clean', limit: 1 },
+      arguments: { query: 'gbrain', limit: 1 },
     });
     expect(clean.isError).not.toBe(true);
 
