@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # v0.41.13.0 — Privacy guard for test/fixtures/conversation-formats/.
 #
-# Per CLAUDE.md privacy rule: "Never reference real people, companies,
+# Per AGENTS.md privacy rule: "Never reference real people, companies,
 # funds, or private agent names in any public-facing artifact."
 # Test fixtures ship in the repo; they ARE public.
 #
@@ -63,7 +63,7 @@ if [ "$errors" -gt 0 ]; then
   echo ""
   echo "[check-fixture-privacy] FAIL: $errors banned token(s) found in fixtures."
   echo "[check-fixture-privacy] Fixtures must use placeholder names (alice-example, widget-co, fund-a, ...)."
-  echo "[check-fixture-privacy] See CLAUDE.md \"Privacy rule\" section."
+  echo "[check-fixture-privacy] See AGENTS.md \"Privacy rule\" section."
   exit 1
 fi
 

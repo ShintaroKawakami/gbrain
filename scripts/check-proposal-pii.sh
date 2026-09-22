@@ -82,7 +82,7 @@ USAGE:
 Flags personal-context vocabulary (e.g. "trial separation", "couples
 session", private repo references) inside docs/proposals/*.md. Use
 generic placeholders (alice-example, acme-corp, fund-a) in proposals.
-See CLAUDE.md "Privacy rule: scrub real names from public docs" for
+See AGENTS.md "Privacy rule: scrub real names from public docs" for
 the canonical name-mapping table.
 
 Sibling to scripts/check-privacy.sh which enforces the "Wintermute"
@@ -158,7 +158,7 @@ done <<< "$PATTERNS"
 if [ "$FOUND" -gt 0 ]; then
   echo "" >&2
   echo "[check-proposal-pii] $FOUND PII pattern hit(s) in docs/proposals/*.md." >&2
-  echo "[check-proposal-pii] See CLAUDE.md 'Privacy rule: scrub real names from public docs'." >&2
+  echo "[check-proposal-pii] See AGENTS.md 'Privacy rule: scrub real names from public docs'." >&2
   echo "[check-proposal-pii] Use generic placeholders: alice-example, acme-corp, fund-a, etc." >&2
   exit 1
 fi

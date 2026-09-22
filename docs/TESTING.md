@@ -1,6 +1,6 @@
 # Testing (gbrain repo)
 
-On-demand reference (see CLAUDE.md Reference map). Current behavior + invariants
+On-demand reference (see AGENTS.md Reference map). Current behavior + invariants
 only.
 
 `test/e2e/serve-http-oauth.test.ts` additionally pins confidential POST/Basic revocation, public-client SDK fallthrough, malformed/mixed authentication rejection, cross-client isolation, unknown-token opacity, metadata auth methods, no-store responses, strict post-revoke `401`, and retryable backend `503` semantics.

@@ -1,6 +1,6 @@
 # Releasing & contributing (gbrain)
 
-The full release + contributor process. CLAUDE.md keeps the ship-critical IRON RULES
+The full release + contributor process. AGENTS.md keeps the ship-critical IRON RULES
 inline (the Version-locations table, branch=workspace, post-ship `/document-release`,
 the Privacy + Responsible-disclosure rules, PR-title-version-first, never-hand-roll-ship)
 and points here for everything else. **Before any ship, read this in full. Use `/ship` —

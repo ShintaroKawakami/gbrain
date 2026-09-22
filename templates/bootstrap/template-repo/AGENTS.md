@@ -116,6 +116,19 @@ Trust runtime-provided context first — it usually already includes this file,
 2. Check `HEARTBEAT.md`'s due-job list; run what is due (session-triggered schedules
    run at turn boundaries — nothing fires while the harness is closed).
 
+## Harness notes
+
+- If hooks are installed, they inject brain context each turn and persist the
+  session at the end. Do not duplicate what they inject. If hooks report
+  degradation ("brain context unavailable"), relay it and suggest `gbrain doctor`.
+- The brain is reachable through the gbrain MCP tools (`recall`, `query`,
+  `get_page`, `put_page`, `add_timeline_entry`, `extract_facts`, …). Prefer them
+  over file greps for anything about people, projects, or the past.
+- Cloud sandbox sessions (fresh clones): if the gbrain MCP tools or hooks are
+  missing, print the setup script with `gbrain bootstrap cloud-setup-script`, then
+  run `gbrain bootstrap hooks --repair`. Committed hooks go live on the next
+  session (startup snapshot).
+
 ## Memory architecture
 
 | Layer | Where | Loaded | Written by |

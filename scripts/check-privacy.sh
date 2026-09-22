@@ -1,8 +1,8 @@
 #!/bin/bash
 #
-# check-privacy.sh — CLAUDE.md:550 enforcement.
+# check-privacy.sh — AGENTS.md Privacy rule enforcement.
 #
-# CLAUDE.md forbids the private OpenClaw fork name in public artifacts:
+# AGENTS.md forbids the private OpenClaw fork name in public artifacts:
 # CHANGELOG.md, README.md, docs/, skills/, PR titles + bodies, commit
 # messages, and comments in checked-in code. This script greps for the
 # banned name in either the staged index (for pre-commit hooks) or the
@@ -101,7 +101,7 @@ ALLOW_LIST=(
   # itself — the script's BANNED_TOKENS array literally names the
   # tokens it forbids.
   'scripts/check-fixture-privacy.sh'
-  'CLAUDE.md'
+  'AGENTS.md'
   'llms-full.txt'
   'docs/UPGRADING_DOWNSTREAM_AGENTS.md'
   'test/integrations.test.ts'
@@ -119,7 +119,7 @@ ALLOW_LIST=(
   'test/storage-status.test.ts'
   # CHANGELOG.md documents the rule (the v0.25.1 entry references the
   # banned literals in describing what's banned). Same exception status
-  # as CLAUDE.md and this script itself: meta-documentation needs to
+  # as AGENTS.md and this script itself: meta-documentation needs to
   # name the patterns it forbids.
   'CHANGELOG.md'
   # skills/migrations/v0.25.1.md is the agent-readable upgrade
@@ -130,7 +130,7 @@ ALLOW_LIST=(
   # DEFAULT_RECENCY_DECAY's keys do NOT include fork-specific path
   # prefixes. The test must name the banned tokens to assert their
   # absence — same exception status as scripts/check-privacy.sh,
-  # CHANGELOG.md, and CLAUDE.md (meta-rule enforcement requires
+  # CHANGELOG.md, and AGENTS.md (meta-rule enforcement requires
   # mentioning what the rule forbids).
   'test/recency-decay.test.ts'
   # v0.32.5: the sibling check-test-real-names.sh enforces the same
@@ -210,7 +210,7 @@ done <<< "$FILES"
 if [ "$FOUND" -eq 1 ]; then
   echo "" >&2
   echo "The private OpenClaw fork name is banned in public artifacts." >&2
-  echo "CLAUDE.md:550. Replace with 'your OpenClaw', 'OpenClaw reference deployment', or 'openclaw-reference'." >&2
+  echo "AGENTS.md Privacy rule. Replace with 'your OpenClaw', 'OpenClaw reference deployment', or 'openclaw-reference'." >&2
   exit 1
 fi
 

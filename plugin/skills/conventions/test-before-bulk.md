@@ -92,7 +92,7 @@ loops or stop/continue scripts rebuilds worse versions of these:
   `--pace` = balanced; or `--pace=gentle|balanced|aggressive`), plus
   `--pace-max-concurrency=N`. The config key is `pace.mode`, and `GBRAIN_PACE_*`
   env vars override config as the incident escape hatch. `gbrain sync` reads
-  the same env/config. Details in the Pace Mode section of `CLAUDE.md` and
+  the same env/config. Details in the Pace Mode section of `AGENTS.md` and
   `src/core/pace-mode.ts`.
 - **Progress reporting:** the global flags `--progress-json`,
   `--progress-interval=<ms>`, and `--quiet` work on every bulk command

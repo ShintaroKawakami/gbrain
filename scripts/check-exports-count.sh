@@ -6,7 +6,7 @@
 # counts the entries in package.json "exports" and fails when the count
 # drops below the v0.21.0 baseline (17 entries).
 #
-# Policy (from CLAUDE.md):
+# Policy (from AGENTS.md):
 #   "Removing any of these is a breaking change going forward."
 #
 # If you're legitimately removing a public export: bump gbrain's minor
@@ -30,7 +30,7 @@ ACTUAL=$(node -e "
 
 if [ "$ACTUAL" -lt "$EXPECTED_COUNT" ]; then
   echo "❌ public-exports guard: package.json exports shrank from $EXPECTED_COUNT to $ACTUAL"
-  echo "   Removing a public export is a breaking change (see CLAUDE.md)."
+  echo "   Removing a public export is a breaking change (see AGENTS.md)."
   echo "   If intentional: bump gbrain minor version + update EXPECTED_COUNT in"
   echo "   scripts/check-exports-count.sh and EXPECTED_EXPORTS in"
   echo "   test/public-exports.test.ts, AND add a CHANGELOG 'Breaking changes' bullet."

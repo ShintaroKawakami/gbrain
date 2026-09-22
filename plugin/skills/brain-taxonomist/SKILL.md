@@ -187,7 +187,7 @@ When the active pack has NO matching type, signal to EIIRP Phase 3
 
 ### v1.0.0 — gbrain v0.39.0.0
 - Initial port from upstream OpenClaw. Genericized — no references to
-  private fork names per CLAUDE.md privacy rules.
+  private fork names per AGENTS.md privacy rules.
 - Hardcoded directory table REMOVED. Every decision now reads the active
   schema pack via `gbrain schema show --json`. Single source of truth.
 - Book taxonomy moved from skill-text to the `gbrain-recommended` pack's

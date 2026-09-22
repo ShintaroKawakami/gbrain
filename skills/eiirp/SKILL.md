@@ -514,13 +514,13 @@ reads it; doctor cross-references the pack version).
   `gbrain capture` instead of the donor's git-commit mechanics; the
   donor's direct GitHub-API link check was dropped in favor of the
   brain-link-discipline skill's link format + verify step.
-- Donor examples and origin story genericized per CLAUDE.md privacy
+- Donor examples and origin story genericized per AGENTS.md privacy
   rules; added dedicated-pipeline exemptions and the per-user
   storage-policy off switch.
 
 ### v1.0.0 — gbrain v0.39.0.0
 - Initial port from upstream OpenClaw. Genericized — no references to
-  private fork names per CLAUDE.md privacy rules.
+  private fork names per AGENTS.md privacy rules.
 - Phase 3 SCHEMA CHECK rewritten to consume the v0.39 cathedral CLI
   (`detect | suggest | review-candidates`) instead of a private
   `brain/schema.md`.

@@ -61,7 +61,7 @@ Why these columns:
 
 This follows the canonical `applyForwardReferenceBootstrap` pattern in
 `src/core/pglite-engine.ts` (and `postgres-engine.ts`) — the new column /
-table additions go into the bootstrap probe set per CLAUDE.md so old brains
+table additions go into the bootstrap probe set per AGENTS.md so old brains
 walking forward through the schema chain don't wedge on the table not
 existing.
 

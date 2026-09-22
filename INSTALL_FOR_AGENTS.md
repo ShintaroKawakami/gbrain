@@ -8,16 +8,15 @@ Target: ~30 minutes to a fully working brain.
 > asked you to become their persistent personal agent — identity + memory + private
 > repo — follow `BOOTSTRAP_FOR_AGENTS.md` instead.
 
-## Step 0: If you are not Claude Code
+## Step 0: Read the shared agent instructions
 
-Read `AGENTS.md` at the repo root first. It's the non-Claude-agent operating
-protocol (install, read order, trust boundary, common tasks). Claude Code reads
-`CLAUDE.md` automatically and can skip ahead.
+Read `AGENTS.md` at the repo root first. All agents use the same install,
+operating, and development instructions. Continue here after reading them.
 
 If you fetched this file by URL without cloning yet, the companion files live at:
-- `https://raw.githubusercontent.com/garrytan/gbrain/master/AGENTS.md` — start here
-- `https://raw.githubusercontent.com/garrytan/gbrain/master/llms.txt` — full doc map
-- `https://raw.githubusercontent.com/garrytan/gbrain/master/llms-full.txt` — same map, inlined
+- `https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/AGENTS.md` — start here
+- `https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/llms.txt` — full doc map
+- `https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/llms-full.txt` — same map, inlined
 
 ## Step 1: Install GBrain
 
@@ -177,7 +176,7 @@ operator.
 
 **Present this matrix verbatim:**
 
-<!-- Cost matrix: three verbatim homes — CLAUDE.md "Search Mode", src/commands/init-mode-picker.ts, and this block. Sync all three when refreshing. -->
+<!-- Cost matrix: three verbatim homes — AGENTS.md "Search Mode", src/commands/init-mode-picker.ts, and this block. Sync all three when refreshing. -->
 ```
 Per-query cost @ 10K queries/mo (typical single-user volume):
 

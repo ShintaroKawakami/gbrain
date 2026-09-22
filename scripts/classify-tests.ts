@@ -11,7 +11,7 @@
  * false-positive on `*audit*`):
  *   1. Per test file, find repo-anchored source-read DETECTORS:
  *      - readFileSync / Bun.file whose argument window names a repo path
- *        (src/, scripts/, docs/, .github/, llms*, CLAUDE.md and friends) and
+ *        (src/, scripts/, docs/, .github/, llms*, AGENTS.md and friends) and
  *        not a tmpdir
  *      - execSync/spawnSync windows that grep/scan repo sources or invoke
  *        scripts/check-*.sh

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # CI guard: fail if any test fixture references a real person's name.
 #
-# CLAUDE.md's "Privacy rule" section is unambiguous: never reference real
+# AGENTS.md's "Privacy rule" section is unambiguous: never reference real
 # people, companies, funds, or private agent names in any public-facing
 # artifact. Tests are checked-in code distributed with every release and
 # indexed by GitHub search. This guard catches the patterns the rule names.
 #
 # Design (post-Codex F4 review):
 #   - Banned names: exact-string allowlist of known real identifiers. Adding
-#     a name when CLAUDE.md flags one is a one-line edit.
+#     a name when AGENTS.md flags one is a one-line edit.
 #   - Banned emails: specific addresses that identify real contacts. NOT a
 #     broad corporate-email regex — those would catch legitimate fixture
 #     domains in billing/auth tests (`customer@stripe.com` etc.).
@@ -28,10 +28,10 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$ROOT"
 
 # Banned real-name strings (matched as whole words, case-insensitive).
-# Add an entry when CLAUDE.md flags a new real-person name.
+# Add an entry when AGENTS.md flags a new real-person name.
 BANNED_NAMES=(
-  'Diana'           # Diana Hu, named in CLAUDE.md privacy example
-  'Wintermute'      # private OpenClaw fork name (CLAUDE.md rule)
+  'Diana'           # Diana Hu, named in AGENTS.md privacy example
+  'Wintermute'      # private OpenClaw fork name (AGENTS.md rule)
   # 'Hermes' removed (hermes-harness wave): here it names NousResearch/hermes-agent,
   # a PUBLIC platform gbrain documents (README hero, INSTALL_FOR_AGENTS.md) and now
   # tests against (claw-test hermes runner, install door e2e).
@@ -57,7 +57,7 @@ BANNED_EMAILS=(
 # NOT appear in production code — the name MUST be in the test file as a
 # literal).
 ALLOWLIST=(
-  "test/writer.test.ts:garry@ycombinator.com"          # user's own email — CLAUDE.md rule does not apply
+  "test/writer.test.ts:garry@ycombinator.com"          # user's own email — AGENTS.md rule does not apply
   "test/integrations.test.ts:Wintermute"               # regex pattern in personal-info filter test (structural)
   "test/recency-decay.test.ts:Wintermute"              # regression-prevention test asserting wintermute is absent (structural)
   "test/scripts/check-proposal-pii.test.ts:Wintermute" # privacy-guard test asserting docs/proposals/ rejects wintermute (structural; same meta-rule exception as check-privacy.sh)
@@ -158,7 +158,7 @@ echo "check-test-real-names: banned real-name references found in test/ fixtures
 echo "" >&2
 echo "$filtered" >&2
 echo "" >&2
-echo "Fix: replace with canonical placeholders per CLAUDE.md 'Name mapping' table." >&2
+echo "Fix: replace with canonical placeholders per AGENTS.md 'Name mapping' table." >&2
 echo "  alice-example / @alice-example      for people" >&2
 echo "  bob-example / charlie-example       for additional people" >&2
 echo "  alice@example.com                   for emails (example.com is RFC 6761 reserved)" >&2
