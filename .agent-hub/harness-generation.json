@@ -1,0 +1,438 @@
+{
+  "absent_surfaces": [
+    ".agent/workflows",
+    ".agents/rules/AGENTS.md",
+    ".augment",
+    ".cursor/agents",
+    ".cursor/environment.json",
+    ".cursor/hooks",
+    ".cursor/hooks.json",
+    ".cursor/mcp.json",
+    ".cursor/rules",
+    ".cursor/skills",
+    ".cursor/sync-state.json",
+    ".devin/skills",
+    ".gemini/agents",
+    ".gemini/hooks",
+    ".gemini/settings.json",
+    ".gemini/sync-state.json",
+    ".kimi-code/AGENTS.md",
+    ".kimi-code/hooks",
+    ".kimi-code/mcp.json",
+    ".kimi-code/skills",
+    ".kimi-code/sync-state.json",
+    ".opencode/agents",
+    ".opencode/plugins",
+    ".opencode/sync-state.json",
+    "CLAUDE.md",
+    "GEMINI.md",
+    "opencode.json",
+    "tui.json"
+  ],
+  "canonical_project": "gbrain-mcp",
+  "effective_hashes": {
+    "claude": "06c1d1b4401da80b051a76b04ce673323d7f647a112bf4623de9c879d818d6ca",
+    "codex": "06c1d1b4401da80b051a76b04ce673323d7f647a112bf4623de9c879d818d6ca",
+    "warp": "06c1d1b4401da80b051a76b04ce673323d7f647a112bf4623de9c879d818d6ca"
+  },
+  "harness_type": "mcp-server",
+  "ledger_writer": {
+    "writer_id": "sync-agents",
+    "writer_version": "sha256:b44e6b37b6d7f11c4f39bd80c3881d6071e6351f8f61e53b9e2850f8d03652e3"
+  },
+  "resolver_version": "1.1.0",
+  "schema_version": 2,
+  "source_fingerprint": "sha256:56f781df07c540a37ce7891bc4d34cce36d665017d57c7533efeab4addf8f169",
+  "surfaces": [
+    {
+      "asset_revisions": [],
+      "client": "claude",
+      "content_digest": "sha256:6cf1b09aecc34f1c3d1f37f9e2765f3d9b5dd8a4804f75f10491867aad8767c8",
+      "kind": "ai_client",
+      "materialization_digest": "sha256:71434888dfc5e9ff81fbd3b70e062ee945a15f3ddd50dc2f25b3018700796348",
+      "probe": "generated-surface-ignore",
+      "source_revision": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "symlink_policy": "forbidden",
+      "target": ".gitignore",
+      "writer_id": "sync-harness-gitignore",
+      "writer_version": "sha256:30db24c99593013df5263394bcdc934bb6e447a03e427e0171f0618d517dd256"
+    },
+    {
+      "asset_revisions": [
+        {
+          "asset_id": "agents-md",
+          "source_revision": "b34dcbfd8009e82958f6f34e02b3903d623224f64ca048f78f444b69fec84312"
+        },
+        {
+          "asset_id": "gbrain-md",
+          "source_revision": "b9f5f8daf703c82fcbc43b6387280c2994d16e6fbd0b0c0d96c765fab243d060"
+        }
+      ],
+      "client": "claude",
+      "content_digest": "sha256:fd0eacbfbce9d35bf029f2fd9538bb95107db9d946580f92c6ecf9b436b15f1a",
+      "kind": "constitution",
+      "materialization_digest": "sha256:f073c25c30e1a251766a673b257537459263601ee2559ec78ea6d7a71618575b",
+      "probe": "fresh-instruction-discovery",
+      "source_revision": "sha256:f9b06233cc7616a96cb892f9a213bfbca922821e457707535f1e41ab9b9fe456",
+      "symlink_policy": "forbidden",
+      "target": "AGENTS.md",
+      "writer_id": "generate-agents-md",
+      "writer_version": "sha256:27a77fc8521cde93a2743c19ee3da64c1e2fce147793f20df459cd928e4d7f83"
+    },
+    {
+      "asset_revisions": [
+        {
+          "asset_id": "ai-model-selection",
+          "source_revision": "abcb22aba43996d15f0de4fef87a70214ca7838607eb7ffe440d68b9b9e8821e"
+        },
+        {
+          "asset_id": "ai-worker-watch",
+          "source_revision": "9a8ccbed7abadaaf494ea614fcbfccdb84b32e6b15899b12b5dfb44a568ea48e"
+        },
+        {
+          "asset_id": "branch-rule",
+          "source_revision": "4c085b18bd1fd88c3a256084a5c82ed622650990740827b3cdc96336645d5760"
+        },
+        {
+          "asset_id": "claude-auto-worktree-lifecycle",
+          "source_revision": "5eea12c9b2c3198506f306b5f92424832e7adb77b56588fedd548986f16e7c42"
+        },
+        {
+          "asset_id": "constructive-dissent",
+          "source_revision": "052787a500b3af3d5d974a4ba5db650fa4a7e94a2701ee1292320a78d0a2c605"
+        },
+        {
+          "asset_id": "gbrain-recall",
+          "source_revision": "12941cfa4b29be3edcc7bf991501186ca695d038ab3b7d9c3664cdd6631f8b79"
+        },
+        {
+          "asset_id": "hooks-structure-rule",
+          "source_revision": "70c1e952afbd4f5baba7852700be7700b6903edda579b71dd443bd90fac17dd2"
+        },
+        {
+          "asset_id": "latest-stack-context7",
+          "source_revision": "4832808009de0fe9b7866ad4916ebeebe60969b2a88bd097cc6df477f0ee3c74"
+        },
+        {
+          "asset_id": "mandate-registry",
+          "source_revision": "dbc10c53b87abe9b6389e7266634b6865ff2591c134164f2513322fe9be0e6d2"
+        },
+        {
+          "asset_id": "mcp-key-management",
+          "source_revision": "17c7464d36eab9b569979f952721727ea9aab5ecdbcdc4d6b338c7e94d79bdab"
+        },
+        {
+          "asset_id": "memory-lookups",
+          "source_revision": "3f1ba8557809badabadebd0fcffc342876f772f43eeaeeb0a2cc03ec4c299696"
+        },
+        {
+          "asset_id": "plan-approval-gate",
+          "source_revision": "24df14010844d76f8a668bd320dd76bad1410e9cb7acdfbfce903f2d768532d4"
+        },
+        {
+          "asset_id": "plan-commitment-tracking",
+          "source_revision": "8314bec843fb2d30239407609d204b71058f425cdd6b41cc086f05822906ceb5"
+        },
+        {
+          "asset_id": "reference-over-hardcode",
+          "source_revision": "27b19f77c56c43ab240fe8dfe75fc0da3ff870cebb0cce62b4777fd7135bb3ee"
+        },
+        {
+          "asset_id": "response-style",
+          "source_revision": "54bad2c808c78241b4791876db7a1a6562b8940fef11be61c890bb17194f3f27"
+        },
+        {
+          "asset_id": "responsive-both-viewports",
+          "source_revision": "c7be824deb9960711360bafb24e1d868f3c5d698e3dfd985c1c32b248594c357"
+        },
+        {
+          "asset_id": "settings-protection-coexistence",
+          "source_revision": "125465ad3abc97fdd1ab513274ff4b72b20be2888afe5ebe3f9df64178378cfd"
+        },
+        {
+          "asset_id": "sub-agent-scope-contract",
+          "source_revision": "c22ec9247052fb82fea12ca8d5bccff7050e3e9d7ea4eba7592deabe8811b9b1"
+        },
+        {
+          "asset_id": "tool-availability-resolution",
+          "source_revision": "61e0f84395366a8cc2cdfc886b4ace028f88ca79de23927a118cfb5eea94ff4d"
+        },
+        {
+          "asset_id": "ui-stitch-mandatory",
+          "source_revision": "82a6463ca35b07cdf7636256a6bff9644dd20bc23427c3d5ec9594797cfc3667"
+        },
+        {
+          "asset_id": "visual-progress-map",
+          "source_revision": "79d5eca509a287d7ca1797e4983b8a80535b9844bb975c5a923fe3b4ab4a5bc3"
+        },
+        {
+          "asset_id": "worktree-rule",
+          "source_revision": "08c047d1537731459f06f8afb391e4d93c7ee8d64219e6f193408615fbfe0517"
+        }
+      ],
+      "client": "claude",
+      "content_digest": "sha256:9c6e0e9b2260da4b936f1bdeffbe98f53b32d01fda159e840207bfff9d66fba1",
+      "kind": "rule",
+      "materialization_digest": "sha256:f8de09403248b7de4da3daedaa083ca56f666a0d155e60e71a5b0ccd275ab5f7",
+      "probe": "fresh-rule-discovery",
+      "source_revision": "sha256:d9b33502167b8959a5ab5d60243434c661c69011c1b7201a45a6324fda9135e8",
+      "symlink_policy": "forbidden",
+      "target": ".claude/rules",
+      "writer_id": "deploy-rules",
+      "writer_version": "sha256:ac36008bc140ef0e5604e4f88a27961da8f7983c1a6a9647144946436b69379e"
+    },
+    {
+      "asset_revisions": [],
+      "client": "codex",
+      "content_digest": "sha256:7db2099669e090616a827f9b1b25feed6fef1c9f3e2cf035bc1ea16fc9dd5ca5",
+      "kind": "ai_client",
+      "materialization_digest": "sha256:68586861bd3a800402d78c37d89f7ff689729cfa68aabe95ccae30a154b2a05e",
+      "probe": "stable-sync-state",
+      "source_revision": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "symlink_policy": "forbidden",
+      "target": ".codex/sync-state.json",
+      "writer_id": "sync-codex-mcp-configs",
+      "writer_version": "sha256:03066899e421637f59278722a811fdc135fc433313451d5671731726f48790a4"
+    },
+    {
+      "asset_revisions": [
+        {
+          "asset_id": "agents-md",
+          "source_revision": "b34dcbfd8009e82958f6f34e02b3903d623224f64ca048f78f444b69fec84312"
+        },
+        {
+          "asset_id": "gbrain-md",
+          "source_revision": "b9f5f8daf703c82fcbc43b6387280c2994d16e6fbd0b0c0d96c765fab243d060"
+        }
+      ],
+      "client": "codex",
+      "content_digest": "sha256:fd0eacbfbce9d35bf029f2fd9538bb95107db9d946580f92c6ecf9b436b15f1a",
+      "kind": "constitution",
+      "materialization_digest": "sha256:80221f7293a4094d66f1564039c2b1c3841272bbadb9f66b368d730d4b98c92d",
+      "probe": "fresh-instruction-discovery",
+      "source_revision": "sha256:f9b06233cc7616a96cb892f9a213bfbca922821e457707535f1e41ab9b9fe456",
+      "symlink_policy": "forbidden",
+      "target": "AGENTS.md",
+      "writer_id": "generate-agents-md",
+      "writer_version": "sha256:27a77fc8521cde93a2743c19ee3da64c1e2fce147793f20df459cd928e4d7f83"
+    },
+    {
+      "asset_revisions": [
+        {
+          "asset_id": "ai-model-selection",
+          "source_revision": "abcb22aba43996d15f0de4fef87a70214ca7838607eb7ffe440d68b9b9e8821e"
+        },
+        {
+          "asset_id": "ai-worker-watch",
+          "source_revision": "9a8ccbed7abadaaf494ea614fcbfccdb84b32e6b15899b12b5dfb44a568ea48e"
+        },
+        {
+          "asset_id": "branch-rule",
+          "source_revision": "4c085b18bd1fd88c3a256084a5c82ed622650990740827b3cdc96336645d5760"
+        },
+        {
+          "asset_id": "constructive-dissent",
+          "source_revision": "052787a500b3af3d5d974a4ba5db650fa4a7e94a2701ee1292320a78d0a2c605"
+        },
+        {
+          "asset_id": "gbrain-recall",
+          "source_revision": "12941cfa4b29be3edcc7bf991501186ca695d038ab3b7d9c3664cdd6631f8b79"
+        },
+        {
+          "asset_id": "hooks-structure-rule",
+          "source_revision": "70c1e952afbd4f5baba7852700be7700b6903edda579b71dd443bd90fac17dd2"
+        },
+        {
+          "asset_id": "latest-stack-context7",
+          "source_revision": "4832808009de0fe9b7866ad4916ebeebe60969b2a88bd097cc6df477f0ee3c74"
+        },
+        {
+          "asset_id": "mandate-registry",
+          "source_revision": "dbc10c53b87abe9b6389e7266634b6865ff2591c134164f2513322fe9be0e6d2"
+        },
+        {
+          "asset_id": "mcp-key-management",
+          "source_revision": "17c7464d36eab9b569979f952721727ea9aab5ecdbcdc4d6b338c7e94d79bdab"
+        },
+        {
+          "asset_id": "memory-lookups",
+          "source_revision": "3f1ba8557809badabadebd0fcffc342876f772f43eeaeeb0a2cc03ec4c299696"
+        },
+        {
+          "asset_id": "plan-approval-gate",
+          "source_revision": "24df14010844d76f8a668bd320dd76bad1410e9cb7acdfbfce903f2d768532d4"
+        },
+        {
+          "asset_id": "plan-commitment-tracking",
+          "source_revision": "8314bec843fb2d30239407609d204b71058f425cdd6b41cc086f05822906ceb5"
+        },
+        {
+          "asset_id": "reference-over-hardcode",
+          "source_revision": "27b19f77c56c43ab240fe8dfe75fc0da3ff870cebb0cce62b4777fd7135bb3ee"
+        },
+        {
+          "asset_id": "response-style",
+          "source_revision": "54bad2c808c78241b4791876db7a1a6562b8940fef11be61c890bb17194f3f27"
+        },
+        {
+          "asset_id": "responsive-both-viewports",
+          "source_revision": "c7be824deb9960711360bafb24e1d868f3c5d698e3dfd985c1c32b248594c357"
+        },
+        {
+          "asset_id": "settings-protection-coexistence",
+          "source_revision": "125465ad3abc97fdd1ab513274ff4b72b20be2888afe5ebe3f9df64178378cfd"
+        },
+        {
+          "asset_id": "sub-agent-scope-contract",
+          "source_revision": "c22ec9247052fb82fea12ca8d5bccff7050e3e9d7ea4eba7592deabe8811b9b1"
+        },
+        {
+          "asset_id": "tool-availability-resolution",
+          "source_revision": "61e0f84395366a8cc2cdfc886b4ace028f88ca79de23927a118cfb5eea94ff4d"
+        },
+        {
+          "asset_id": "ui-stitch-mandatory",
+          "source_revision": "82a6463ca35b07cdf7636256a6bff9644dd20bc23427c3d5ec9594797cfc3667"
+        },
+        {
+          "asset_id": "visual-progress-map",
+          "source_revision": "79d5eca509a287d7ca1797e4983b8a80535b9844bb975c5a923fe3b4ab4a5bc3"
+        },
+        {
+          "asset_id": "worktree-rule",
+          "source_revision": "08c047d1537731459f06f8afb391e4d93c7ee8d64219e6f193408615fbfe0517"
+        }
+      ],
+      "client": "codex",
+      "content_digest": "sha256:fd0eacbfbce9d35bf029f2fd9538bb95107db9d946580f92c6ecf9b436b15f1a",
+      "kind": "rule",
+      "materialization_digest": "sha256:2f4453c86ed8f8d956ae7407df664cdcd04e139048b752dc99d787963afa2fec",
+      "probe": "fresh-rule-discovery",
+      "source_revision": "sha256:cbfb9ff2113026b163c1de9b8f01f1c10ba4e2f431f6170c81d379c882af06cf",
+      "symlink_policy": "forbidden",
+      "target": "AGENTS.md",
+      "writer_id": "generate-agents-md",
+      "writer_version": "sha256:27a77fc8521cde93a2743c19ee3da64c1e2fce147793f20df459cd928e4d7f83"
+    },
+    {
+      "asset_revisions": [
+        {
+          "asset_id": "agents-md",
+          "source_revision": "b34dcbfd8009e82958f6f34e02b3903d623224f64ca048f78f444b69fec84312"
+        },
+        {
+          "asset_id": "gbrain-md",
+          "source_revision": "b9f5f8daf703c82fcbc43b6387280c2994d16e6fbd0b0c0d96c765fab243d060"
+        }
+      ],
+      "client": "warp",
+      "content_digest": "sha256:fd0eacbfbce9d35bf029f2fd9538bb95107db9d946580f92c6ecf9b436b15f1a",
+      "kind": "constitution",
+      "materialization_digest": "sha256:b3b40ed8dde40de22649bfe9b8d34171bd43c5e9c85ad6ab1337649a151df5f7",
+      "probe": "fresh-instruction-discovery",
+      "source_revision": "sha256:f9b06233cc7616a96cb892f9a213bfbca922821e457707535f1e41ab9b9fe456",
+      "symlink_policy": "forbidden",
+      "target": "AGENTS.md",
+      "writer_id": "generate-agents-md",
+      "writer_version": "sha256:27a77fc8521cde93a2743c19ee3da64c1e2fce147793f20df459cd928e4d7f83"
+    },
+    {
+      "asset_revisions": [
+        {
+          "asset_id": "ai-model-selection",
+          "source_revision": "abcb22aba43996d15f0de4fef87a70214ca7838607eb7ffe440d68b9b9e8821e"
+        },
+        {
+          "asset_id": "ai-worker-watch",
+          "source_revision": "9a8ccbed7abadaaf494ea614fcbfccdb84b32e6b15899b12b5dfb44a568ea48e"
+        },
+        {
+          "asset_id": "branch-rule",
+          "source_revision": "4c085b18bd1fd88c3a256084a5c82ed622650990740827b3cdc96336645d5760"
+        },
+        {
+          "asset_id": "constructive-dissent",
+          "source_revision": "052787a500b3af3d5d974a4ba5db650fa4a7e94a2701ee1292320a78d0a2c605"
+        },
+        {
+          "asset_id": "gbrain-recall",
+          "source_revision": "12941cfa4b29be3edcc7bf991501186ca695d038ab3b7d9c3664cdd6631f8b79"
+        },
+        {
+          "asset_id": "hooks-structure-rule",
+          "source_revision": "70c1e952afbd4f5baba7852700be7700b6903edda579b71dd443bd90fac17dd2"
+        },
+        {
+          "asset_id": "latest-stack-context7",
+          "source_revision": "4832808009de0fe9b7866ad4916ebeebe60969b2a88bd097cc6df477f0ee3c74"
+        },
+        {
+          "asset_id": "mandate-registry",
+          "source_revision": "dbc10c53b87abe9b6389e7266634b6865ff2591c134164f2513322fe9be0e6d2"
+        },
+        {
+          "asset_id": "mcp-key-management",
+          "source_revision": "17c7464d36eab9b569979f952721727ea9aab5ecdbcdc4d6b338c7e94d79bdab"
+        },
+        {
+          "asset_id": "memory-lookups",
+          "source_revision": "3f1ba8557809badabadebd0fcffc342876f772f43eeaeeb0a2cc03ec4c299696"
+        },
+        {
+          "asset_id": "plan-approval-gate",
+          "source_revision": "24df14010844d76f8a668bd320dd76bad1410e9cb7acdfbfce903f2d768532d4"
+        },
+        {
+          "asset_id": "plan-commitment-tracking",
+          "source_revision": "8314bec843fb2d30239407609d204b71058f425cdd6b41cc086f05822906ceb5"
+        },
+        {
+          "asset_id": "reference-over-hardcode",
+          "source_revision": "27b19f77c56c43ab240fe8dfe75fc0da3ff870cebb0cce62b4777fd7135bb3ee"
+        },
+        {
+          "asset_id": "response-style",
+          "source_revision": "54bad2c808c78241b4791876db7a1a6562b8940fef11be61c890bb17194f3f27"
+        },
+        {
+          "asset_id": "responsive-both-viewports",
+          "source_revision": "c7be824deb9960711360bafb24e1d868f3c5d698e3dfd985c1c32b248594c357"
+        },
+        {
+          "asset_id": "settings-protection-coexistence",
+          "source_revision": "125465ad3abc97fdd1ab513274ff4b72b20be2888afe5ebe3f9df64178378cfd"
+        },
+        {
+          "asset_id": "sub-agent-scope-contract",
+          "source_revision": "c22ec9247052fb82fea12ca8d5bccff7050e3e9d7ea4eba7592deabe8811b9b1"
+        },
+        {
+          "asset_id": "tool-availability-resolution",
+          "source_revision": "61e0f84395366a8cc2cdfc886b4ace028f88ca79de23927a118cfb5eea94ff4d"
+        },
+        {
+          "asset_id": "ui-stitch-mandatory",
+          "source_revision": "82a6463ca35b07cdf7636256a6bff9644dd20bc23427c3d5ec9594797cfc3667"
+        },
+        {
+          "asset_id": "visual-progress-map",
+          "source_revision": "79d5eca509a287d7ca1797e4983b8a80535b9844bb975c5a923fe3b4ab4a5bc3"
+        },
+        {
+          "asset_id": "worktree-rule",
+          "source_revision": "08c047d1537731459f06f8afb391e4d93c7ee8d64219e6f193408615fbfe0517"
+        }
+      ],
+      "client": "warp",
+      "content_digest": "sha256:fd0eacbfbce9d35bf029f2fd9538bb95107db9d946580f92c6ecf9b436b15f1a",
+      "kind": "rule",
+      "materialization_digest": "sha256:c004f9909abe91d63a8ab7d25785a5f28f5db2094f3c6f43bc019fee0dc11c4f",
+      "probe": "fresh-rule-discovery",
+      "source_revision": "sha256:cbfb9ff2113026b163c1de9b8f01f1c10ba4e2f431f6170c81d379c882af06cf",
+      "symlink_policy": "forbidden",
+      "target": "AGENTS.md",
+      "writer_id": "generate-agents-md",
+      "writer_version": "sha256:27a77fc8521cde93a2743c19ee3da64c1e2fce147793f20df459cd928e4d7f83"
+    }
+  ]
+}

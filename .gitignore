@@ -54,3 +54,31 @@ graphify-out/
 # Coverage lane output (COVERAGE_DIR opt-in in test-shard.sh /
 # run-serial-tests.sh / run-e2e.sh; merged by scripts/merge-lcov.ts)
 .coverage/
+
+# AGENT-HUB MANAGED: harness-generated-surfaces START
+.agent/workflows/*
+.agents/skills/*
+.claude/agents/*
+.claude/commands/*
+.claude/hooks/.delegation-reminder-cache/
+.claude/parallel-run-state/
+.claude/skills/*
+.codex/agents/*
+.codex/hooks/.delegation-reminder-cache/
+.cursor/agents/*
+.cursor/hooks/.delegation-reminder-cache/
+.cursor/skills/*
+.devin/skills/*
+.gemini/agents/*
+.gemini/hooks/.delegation-reminder-cache/
+.kimi-code/hooks/.delegation-reminder-cache/
+.kimi-code/skills/*
+.kimi/hooks/.delegation-reminder-cache/
+.opencode/agents/*
+/.claude/settings.local.json
+/.cursor/mcp.json
+/.mcp.json
+# AGENT-HUB MANAGED: harness-generated-surfaces END
+
+# Codex runtime sync state is machine-local generated output.
+.codex/sync-state.json
