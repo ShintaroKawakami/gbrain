@@ -14,7 +14,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { TEMPLATE_PLACEHOLDER_MANIFEST } from '../src/core/bootstrap/format.ts';
@@ -100,6 +100,10 @@ describe('generateTemplateTree', () => {
         // marked un-initialized; render flips it true on the adopter machine.
         expect(manifest).toEqual(TEMPLATE_PLACEHOLDER_MANIFEST as unknown as Record<string, unknown>);
         expect(manifest.initialized).toBe(false);
+
+        expect(existsSync(join(out, 'AGENTS.md'))).toBe(true);
+        expect(existsSync(join(out, 'CLAUDE.md'))).toBe(false);
+        expect(existsSync(join(out, 'GEMINI.md'))).toBe(false);
 
         const readme = readFileSync(join(out, 'README.md'), 'utf8');
         expect(readme).toContain(`<!-- gbrain-template-stamp: ${VERSION} -->`);

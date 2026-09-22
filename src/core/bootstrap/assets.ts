@@ -25,8 +25,6 @@ import T_USER from '../../../templates/bootstrap/USER.md.template' with { type: 
 // @ts-ignore
 import T_MEMORY from '../../../templates/bootstrap/MEMORY.md.template' with { type: 'file' };
 // @ts-ignore
-import T_CLAUDE from '../../../templates/bootstrap/CLAUDE.md.template' with { type: 'file' };
-// @ts-ignore
 import T_GITHUB from '../../../templates/bootstrap/GITHUB.md.template' with { type: 'file' };
 // @ts-ignore
 import T_HEARTBEAT from '../../../templates/bootstrap/HEARTBEAT.md.template' with { type: 'file' };
@@ -59,7 +57,6 @@ export function loadCloudSetupScript(): string {
 
 export const BOOTSTRAP_TEMPLATES: BootstrapTemplate[] = [
   { assetPath: T_AGENTS as unknown as string, dest: 'AGENTS.md', group: 'contract' },
-  { assetPath: T_CLAUDE as unknown as string, dest: 'CLAUDE.md', group: 'contract' },
   { assetPath: T_SOUL as unknown as string, dest: 'SOUL.md', group: 'identity' },
   { assetPath: T_USER as unknown as string, dest: 'USER.md', group: 'identity' },
   { assetPath: T_MEMORY as unknown as string, dest: 'MEMORY.md', group: 'identity' },
