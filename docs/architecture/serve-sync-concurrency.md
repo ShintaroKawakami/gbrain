@@ -94,5 +94,5 @@ progress, not the lock heartbeat), the run aborts with
 `reason: 'stall_timeout'` and releases the per-source lock so the next
 `gbrain sync` resumes from the checkpoint. It fires BETWEEN files — a hang
 inside one file's import runs until the wall-clock hard deadline. `0`
-disables it. The full sync-resumability knob table lives in CLAUDE.md
+disables it. The full sync-resumability knob table lives in AGENTS.md
 ("Sync resumability + lock tuning").

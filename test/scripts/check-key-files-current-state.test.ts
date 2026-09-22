@@ -1,9 +1,9 @@
 /**
  * check-key-files-current-state.test.ts — coverage of the anti-disease guard.
  *
- * The guard is the structural backstop that keeps CLAUDE.md from re-bloating:
+ * The guard is the structural backstop that keeps AGENTS.md from re-bloating:
  * it bans bolded `**v0.<digit>` release markers in the reference docs and caps
- * CLAUDE.md size. If the guard is broken, the append-only-history disease can
+ * AGENTS.md size. If the guard is broken, the append-only-history disease can
  * silently return. This suite pins its contract against fixtures.
  */
 
@@ -40,7 +40,7 @@ function run(extraEnv: Record<string, string> = {}) {
 
 // A minimal clean repo shape the guard is happy with.
 function seedClean() {
-  writeDoc("CLAUDE.md", "# CLAUDE.md\n\norientation only\n");
+  writeDoc("AGENTS.md", "# AGENTS.md\n\norientation only\n");
   writeDoc(
     "docs/architecture/KEY_FILES.md",
     "# Key files\n\n- `src/core/db.ts` — connection management. Pinned by `test/db.test.ts`.\n",
@@ -55,6 +55,25 @@ describe("check-key-files-current-state.sh", () => {
     const r = run();
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("ok");
+  });
+
+  it("FAILS when an upstream update restores a retired root instruction", () => {
+    seedClean();
+    for (const name of ["CLAUDE.md", "GEMINI.md"]) {
+      writeDoc(name, "# legacy instructions\n");
+      const r = run();
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain(name);
+      rmSync(join(root, name));
+    }
+  });
+
+  it("FAILS when the canonical instructions are missing", () => {
+    seedClean();
+    rmSync(join(root, "AGENTS.md"));
+    const r = run();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("AGENTS.md is missing");
   });
 
   it("FAILS when a reference doc carries a bolded release-clause marker", () => {
@@ -79,19 +98,19 @@ describe("check-key-files-current-state.sh", () => {
     expect(r.status).toBe(0);
   });
 
-  it("FAILS when CLAUDE.md exceeds the size cap", () => {
+  it("FAILS when AGENTS.md exceeds the size cap", () => {
     seedClean();
-    writeDoc("CLAUDE.md", "x".repeat(200_000));
-    const r = run({ GBRAIN_CLAUDE_MD_MAX_BYTES: "90000" });
+    writeDoc("AGENTS.md", "x".repeat(200_000));
+    const r = run({ GBRAIN_AGENTS_MD_MAX_BYTES: "90000" });
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("over the");
   });
 
   it("size cap is configurable via env", () => {
     seedClean();
-    writeDoc("CLAUDE.md", "x".repeat(5_000));
-    expect(run({ GBRAIN_CLAUDE_MD_MAX_BYTES: "1000" }).status).toBe(1);
-    expect(run({ GBRAIN_CLAUDE_MD_MAX_BYTES: "10000" }).status).toBe(0);
+    writeDoc("AGENTS.md", "x".repeat(5_000));
+    expect(run({ GBRAIN_AGENTS_MD_MAX_BYTES: "1000" }).status).toBe(1);
+    expect(run({ GBRAIN_AGENTS_MD_MAX_BYTES: "10000" }).status).toBe(0);
   });
 
   it("soft-warns (non-fatal) on prose history markers", () => {

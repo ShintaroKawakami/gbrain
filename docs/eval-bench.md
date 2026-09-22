@@ -508,7 +508,7 @@ real-query version.
 
 How it works:
 - Hand-curated qrels fixture at `test/fixtures/eval-baselines/qrels-search.json`
-  with PLACEHOLDER names only (no real people / companies per CLAUDE.md privacy
+  with PLACEHOLDER names only (no real people / companies per AGENTS.md privacy
   rule).
 - The test seeds a PGLite engine with synthetic pages whose embeddings are
   basis vectors (the same `basisEmbedding(idx)` pattern as

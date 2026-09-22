@@ -74,12 +74,13 @@ describe("build-llms generator", () => {
     expect(llmsTxt).toContain("skills/RESOLVER.md");
     expect(llmsTxt).toContain("INSTALL_FOR_AGENTS.md");
     expect(llmsTxt).toContain("AGENTS.md");
-    expect(llmsTxt).toContain("CLAUDE.md");
+    expect(existsSync(join(repoRoot, "CLAUDE.md"))).toBe(false);
+    expect(existsSync(join(repoRoot, "GEMINI.md"))).toBe(false);
   });
 
   test("content contract: AGENTS.md mirrors README + INSTALL_FOR_AGENTS install path", () => {
     const agents = readFileSync(join(repoRoot, "AGENTS.md"), "utf8");
-    expect(agents).toContain("CLAUDE.md");
+    expect(agents).toContain("# Development orientation");
     expect(agents).toContain("skills/RESOLVER.md");
     expect(agents).toContain("INSTALL_FOR_AGENTS.md");
     expect(agents).toContain("llms.txt");
@@ -97,16 +98,16 @@ describe("build-llms generator", () => {
   });
 });
 
-// Content contracts for the CLAUDE.md resolver restructure. The restructure moved
+// Content contracts for the AGENTS.md resolver restructure. The restructure moved
 // the per-file index + testing discipline into on-demand docs and (per codex
 // outside-voice) keeps the ship-critical IRON RULES inline. These pin that the
-// safety-relevant content did NOT silently move out of CLAUDE.md, and that the
+// safety-relevant content did NOT silently move out of AGENTS.md, and that the
 // new docs are wired into the bundle the way intended (KEY_FILES link-only,
 // not inlined).
-describe("CLAUDE.md restructure content contracts", () => {
-  const claude = () => readFileSync(join(repoRoot, "CLAUDE.md"), "utf8");
+describe("AGENTS.md restructure content contracts", () => {
+  const claude = () => readFileSync(join(repoRoot, "AGENTS.md"), "utf8");
 
-  test("CLAUDE.md keeps the inline ship IRON RULES (must NOT move to a doc)", () => {
+  test("AGENTS.md keeps the inline ship IRON RULES (must NOT move to a doc)", () => {
     const c = claude();
     // Version format — the table stays inline (CI version-gate depends on it).
     expect(c).toContain("MAJOR.MINOR.PATCH.MICRO");
@@ -116,7 +117,7 @@ describe("CLAUDE.md restructure content contracts", () => {
     expect(c.toLowerCase()).toMatch(/hand-roll ship/);
   });
 
-  test("CLAUDE.md carries the resolver + cross-cutting invariants (orientation survived)", () => {
+  test("AGENTS.md carries the resolver + cross-cutting invariants (orientation survived)", () => {
     const c = claude();
     expect(c).toContain("## Reference map");
     expect(c).toContain("docs/architecture/KEY_FILES.md");

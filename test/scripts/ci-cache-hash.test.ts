@@ -12,7 +12,6 @@
  * asserts hash behavior.
  *
  * Critical invariants (the false-pass guards):
- *   - CLAUDE.md edit → DIFFERENT hash
  *   - AGENTS.md edit → DIFFERENT hash
  *   - skills/foo/SKILL.md edit → DIFFERENT hash
  *   - src/core/db.ts edit → DIFFERENT hash
@@ -107,7 +106,6 @@ const BASELINE_FILES: Record<string, string> = {
   "TODOS.md": "- [ ] thing\n",
   "README.md": "# Project\n",
   "LICENSE": "MIT\n",
-  "CLAUDE.md": "# CLAUDE.md\n\nproject instructions\n",
   "AGENTS.md": "# AGENTS.md\n\nopenclaw entry\n",
   "package.json": '{"name":"test","version":"0.0.0"}\n',
   "bun.lock": "lockfile-v1\n",
@@ -156,15 +154,6 @@ describe("ci-cache-hash.sh — CRITICAL false-pass guards (must invalidate)", ()
       rmSync(sb.dir, { recursive: true, force: true });
     }
   }
-
-  it("CLAUDE.md edit MUST change hash (8+ test files reference it)", () => {
-    withSandbox((sb) => {
-      const before = hash(sb);
-      modify(sb, "CLAUDE.md", "# CLAUDE.md\n\nNEW INSTRUCTIONS\n");
-      const after = hash(sb);
-      expect(after).not.toBe(before);
-    });
-  });
 
   it("AGENTS.md edit MUST change hash (resolver tests read it)", () => {
     withSandbox((sb) => {

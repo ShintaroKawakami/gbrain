@@ -1,6 +1,6 @@
 # Thin-client routing (remote MCP)
 
-On-demand reference (see CLAUDE.md Reference map). Current behavior + invariants
+On-demand reference (see AGENTS.md Reference map). Current behavior + invariants
 only; release history lives in `CHANGELOG.md` + git.
 
 `gbrain init --mcp-only` sets up a thin-client install: no local brain content,

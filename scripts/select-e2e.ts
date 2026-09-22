@@ -41,7 +41,6 @@ import { E2E_TEST_MAP } from "./e2e-test-map.ts";
 // doc-only. skills/ is intentionally NOT here — skills are product input.
 const DOC_ROOT_FILES = new Set([
   "README.md",
-  "CLAUDE.md",
   "AGENTS.md",
   "CHANGELOG.md",
   "TODOS.md",

@@ -3,19 +3,18 @@
 > GBrain is a personal knowledge brain and GStack mod for agent platforms. Pluggable engines (PGLite default, Postgres+pgvector for scale), contract-first operations, 26 fat-markdown skills. Teaches agents brain ops, ingestion, enrichment, scheduling, identity, and access control.
 
 This file concatenates core GBrain documentation for single-fetch ingestion.
-For the link-only index, see `llms.txt`. Source of truth: https://github.com/garrytan/gbrain.
+For the link-only index, see `llms.txt`. Source of truth: https://github.com/ShintaroKawakami/gbrain.
 
 # Core entry points
 
 ## AGENTS.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/AGENTS.md
+Source: https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/AGENTS.md
 
 # Agents working on GBrain
 
-This is your install + operating protocol. Claude Code reads `./CLAUDE.md` automatically.
-Everyone else (Codex, Cursor, OpenClaw, Aider, Continue, or an LLM fetching via URL):
-start here.
+This is the shared entry point for all coding agents. It contains the install +
+operating protocol followed by the development orientation and repository rules.
 
 > **Becoming someone's persistent personal agent** (identity + memory + private repo)?
 > Follow [`BOOTSTRAP_FOR_AGENTS.md`](./BOOTSTRAP_FOR_AGENTS.md) — the `gbrain bootstrap`
@@ -52,8 +51,8 @@ start here.
 
 ## Read this order
 
-1. `./AGENTS.md` (this file) — install + operating protocol.
-2. [`./CLAUDE.md`](./CLAUDE.md) — orientation + resolver: architecture, cross-cutting
+1. The install + operating protocol above.
+2. The [development orientation](#development-orientation) below: architecture, cross-cutting
    invariants, the reference map, inline ship rules. It routes to on-demand detail docs:
    [`./docs/architecture/KEY_FILES.md`](./docs/architecture/KEY_FILES.md) (per-file index —
    read a file's entry before editing it), [`./docs/TESTING.md`](./docs/TESTING.md) (test
@@ -151,7 +150,7 @@ unset) and tears down. Use `bun run ci:local:diff` for the
 diff-aware subset during fast iteration on a focused branch. Requires Docker
 (Docker Desktop / OrbStack / Colima) and `gitleaks` (`brew install gitleaks`).
 
-Manual path: `bun test` plus the E2E lifecycle described in `./CLAUDE.md` (spin
+Manual path: `bun test` plus the E2E lifecycle described in `./AGENTS.md` (spin
 up the test Postgres container, run `bun run test:e2e`, tear it down).
 
 Ship via the `/ship` skill, not by hand. The full release + contributor process
@@ -161,7 +160,7 @@ Ship via the `/ship` skill, not by hand. The full release + contributor process
 ## Privacy
 
 Never commit real names of people, companies, or funds into public artifacts. See the
-Privacy rule in `./CLAUDE.md`. GBrain pages reference real contacts; public docs must
+Privacy rule in `./AGENTS.md`. GBrain pages reference real contacts; public docs must
 use generic placeholders (`alice-example`, `acme-example`, `fund-a`).
 
 ## Forks
@@ -171,11 +170,7 @@ publishing: `LLMS_REPO_BASE=https://raw.githubusercontent.com/your-org/your-fork
 
 ---
 
-## CLAUDE.md
-
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/CLAUDE.md
-
-# CLAUDE.md
+# Development orientation
 
 GBrain is a personal knowledge brain and GStack mod for agent platforms. Pluggable
 engines: PGLite (embedded Postgres via WASM, zero-config default) or Postgres + pgvector
@@ -314,7 +309,7 @@ Per-file detail is in `docs/architecture/KEY_FILES.md`.
 
 ## Reference map (load on demand)
 
-CLAUDE.md is the always-loaded orientation + dispatcher. Detailed reference loads
+AGENTS.md is the always-loaded orientation + dispatcher. Detailed reference loads
 on demand — read the linked doc before working in that area. (Same two-layer
 pattern gbrain ships for its own skills: thin router in `skills/RESOLVER.md`, fat
 detail on demand.)
@@ -351,13 +346,13 @@ stays small enough to load every session. Nothing was lost — the pre-move cont
 is in git, and the docs carry every load-bearing invariant (compressed to
 current-state).
 
-## Maintaining CLAUDE.md and the reference docs
+## Maintaining AGENTS.md and the reference docs
 
-CLAUDE.md grew to ~592KB / ~147k tokens once the per-file index became append-only
+AGENTS.md grew to ~592KB / ~147k tokens once the per-file index became append-only
 (one `**vX.Y.Z:**` clause per release per file). That is the exact anti-pattern
 gbrain exists to fix. The rules that keep it from recurring:
 
-- **CLAUDE.md is orientation, not the implementation spec.** It carries the North
+- **AGENTS.md is orientation, not the implementation spec.** It carries the North
   Star, the two axes, architecture + cross-cutting invariants, the resolver, and
   the inline IRON RULES. Per-file/per-command/per-test detail lives in the
   reference docs and loads on demand.
@@ -367,9 +362,9 @@ gbrain exists to fix. The rules that keep it from recurring:
   narration. When a file's behavior changes, UPDATE its entry to the new truth.
 - **CI is the enforcement, not this prose.** `scripts/check-key-files-current-state.sh`
   (in `bun run verify`) fails on the bolded-release-clause marker in the reference
-  docs AND on a CLAUDE.md size cap. A written rule caused this disease; a guard
+  docs AND on a AGENTS.md size cap. A written rule caused this disease; a guard
   cures it.
-- **After any CLAUDE.md or reference-doc edit, run `bun run build:llms`** — the
+- **After any AGENTS.md or reference-doc edit, run `bun run build:llms`** — the
   llms bundle inlines/links these (config in `scripts/llms-config.ts`); the
   freshness + budget test (`bun test test/build-llms.test.ts`) fails CI otherwise.
 
@@ -722,7 +717,7 @@ four numeric segments are required first. Historical 3-segment versions
 | `package.json` | Bun/npm package version. `gbrain --version` reads it via the compiled binary's bundled package metadata. CI version-gate cross-checks this against `VERSION` and fails if they drift. | `"version": "0.31.4.1"` |
 | `CHANGELOG.md` | Top entry header `## [0.31.4.1] - YYYY-MM-DD` plus the "To take advantage of v0.31.4.1" block. | Standard Keep-a-Changelog header. |
 | `TODOS.md` | Any TODO entries that mention "follow-up from vX.Y.Z.W" use the version of the release that filed them. Update only when filing NEW follow-up TODOs. | Inline `vX.Y.Z.W` references in TODO bodies. |
-| `CLAUDE.md` | The Key Files section's per-file annotations carry `vX.Y.Z.W (#NNN)` tags noting which release introduced a behavior. Update whenever a wave's annotations get folded in. | Inline `vX.Y.Z.W (#NNN, contributed by @user)` references. |
+| `AGENTS.md` | The Key Files section's per-file annotations carry `vX.Y.Z.W (#NNN)` tags noting which release introduced a behavior. Update whenever a wave's annotations get folded in. | Inline `vX.Y.Z.W (#NNN, contributed by @user)` references. |
 | `openclaw.plugin.json` | OpenClaw plugin manifest (v0.45.6.0, #4033). Hand-maintained; `test/openclaw-plugin-manifest.test.ts` fails the suite if it drifts from `package.json`. Merges from master auto-resolve it to master's version — re-bump it with the trio. | `"version": "0.45.12.0"` |
 | `.codex-plugin/plugin.json` + `.claude-plugin/plugin.json` | Codex + Claude Code plugin manifests. Hand-maintained; `test/codex-plugin-manifest.test.ts` fails the suite when either drifts from `package.json` (the bump is now a FIVE-file lockstep: VERSION, package.json, openclaw.plugin.json, and both plugin manifests). Merges from master auto-resolve them to master's version — re-bump with the version set. | `"version": "0.46.7.0"` |
 | `BOOTSTRAP_FOR_AGENTS.md` | Runbook stamp on line 1. `scripts/check-bootstrap-tag.sh` (in `bun run verify` + CI) fails when it drifts from `VERSION`; refresh it in the same commit as the bump. | `<!-- gbrain-runbook-stamp: X.Y.Z.W -->` |
@@ -741,14 +736,14 @@ four numeric segments are required first. Historical 3-segment versions
 - `bun.lock` — root-package version is auto-pinned from `package.json`. After
   bumping `package.json`, run `bun install` to refresh the lockfile.
 - `llms-full.txt` / `llms.txt` — auto-generated documentation bundles. **Any
-  CLAUDE.md edit MUST be followed by `bun run build:llms` in the same commit
+  AGENTS.md edit MUST be followed by `bun run build:llms` in the same commit
   (or a follow-up commit before push).** The committed bundles are checked
   against fresh generator output by `test/build-llms.test.ts`, which runs in
-  CI shard 1. If you edited CLAUDE.md and didn't regenerate, CI will fail.
-  This has bitten the wave 3 times — every CLAUDE.md edit gets a `bun run
+  CI shard 1. If you edited AGENTS.md and didn't regenerate, CI will fail.
+  This has bitten the wave 3 times — every AGENTS.md edit gets a `bun run
   build:llms` chaser, no exceptions. (The `verify` gate doesn't run this
   test; only the full unit suite does. So `bun run typecheck` clean is NOT
-  enough to know you can push after a CLAUDE.md edit.)
+  enough to know you can push after a AGENTS.md edit.)
 
 **Historical (DO NOT bump on release):**
 
@@ -927,8 +922,8 @@ Files that MUST be checked on every ship:
 - `docs/architecture/KEY_FILES.md` — new or changed files in `src/`, and their
   invariants, are recorded HERE. This is the on-demand layer behind the Reference
   map, and it is where per-file and per-version detail belongs.
-- CLAUDE.md — only if an always-loaded rule, the Reference map, or the dispatcher
-  changed. **CLAUDE.md is a map, not a log**: it is read in full at the start of every
+- AGENTS.md — only if an always-loaded rule, the Reference map, or the dispatcher
+  changed. **AGENTS.md is a map, not a log**: it is read in full at the start of every
   session, so entries are condensed or deleted as they go stale, never appended to.
   If an update adds a file inventory, a test inventory, or an "as of vX.Y.Z" note,
   it belongs in the on-demand layer above instead.
@@ -1134,7 +1129,7 @@ Key routing rules:
 
 ## INSTALL_FOR_AGENTS.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/INSTALL_FOR_AGENTS.md
+Source: https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/INSTALL_FOR_AGENTS.md
 
 # GBrain Installation Guide for AI Agents
 
@@ -1146,16 +1141,15 @@ Target: ~30 minutes to a fully working brain.
 > asked you to become their persistent personal agent — identity + memory + private
 > repo — follow `BOOTSTRAP_FOR_AGENTS.md` instead.
 
-## Step 0: If you are not Claude Code
+## Step 0: Read the shared agent instructions
 
-Read `AGENTS.md` at the repo root first. It's the non-Claude-agent operating
-protocol (install, read order, trust boundary, common tasks). Claude Code reads
-`CLAUDE.md` automatically and can skip ahead.
+Read `AGENTS.md` at the repo root first. All agents use the same install,
+operating, and development instructions. Continue here after reading them.
 
 If you fetched this file by URL without cloning yet, the companion files live at:
-- `https://raw.githubusercontent.com/garrytan/gbrain/master/AGENTS.md` — start here
-- `https://raw.githubusercontent.com/garrytan/gbrain/master/llms.txt` — full doc map
-- `https://raw.githubusercontent.com/garrytan/gbrain/master/llms-full.txt` — same map, inlined
+- `https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/AGENTS.md` — start here
+- `https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/llms.txt` — full doc map
+- `https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/llms-full.txt` — same map, inlined
 
 ## Step 1: Install GBrain
 
@@ -1315,7 +1309,7 @@ operator.
 
 **Present this matrix verbatim:**
 
-<!-- Cost matrix: three verbatim homes — CLAUDE.md "Search Mode", src/commands/init-mode-picker.ts, and this block. Sync all three when refreshing. -->
+<!-- Cost matrix: three verbatim homes — AGENTS.md "Search Mode", src/commands/init-mode-picker.ts, and this block. Sync all three when refreshing. -->
 ```
 Per-query cost @ 10K queries/mo (typical single-user volume):
 
@@ -1656,7 +1650,7 @@ Init + upgrade banners auto-skip in non-TTY too.
 
 ## skills/RESOLVER.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/skills/RESOLVER.md
+Source: https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/skills/RESOLVER.md
 
 # GBrain Skill Resolver
 
@@ -1835,7 +1829,7 @@ These apply to ALL brain-writing skills:
 
 ## README.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/README.md
+Source: https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/README.md
 
 # GBrain
 
@@ -1856,7 +1850,7 @@ It's easier to ship a daemon that runs 24/7 to ingest, enrich, and consolidate t
 
 > **~15 minutes to a working personal agent** on the recommended Codex / Claude Code path (mostly a short interview); ~30 minutes for the always-on OpenClaw / Hermes setup. Database ready in 2 seconds either way (PGLite, no server).
 
-> **LLMs:** fetch [`llms.txt`](llms.txt) for the documentation map, or [`llms-full.txt`](llms-full.txt) for the same map with core docs inlined in one fetch. **Agents:** start with [`AGENTS.md`](AGENTS.md) (or [`CLAUDE.md`](CLAUDE.md) if you're Claude Code).
+> **LLMs:** fetch [`llms.txt`](llms.txt) for the documentation map, or [`llms-full.txt`](llms-full.txt) for the same map with core docs inlined in one fetch. **Agents:** start with [`AGENTS.md`](AGENTS.md).
 
 ## What this looks like
 
@@ -2444,7 +2438,7 @@ the page PK, soft-delete-filtered, source-safe) and completes in seconds.
 - [`docs/eval/`](docs/eval/) — eval framework, metric glossary, methodology
 - [`docs/ethos/`](docs/ethos/) — philosophy (thin harness, fat skills, markdown as recipes, origin story)
 - [`AGENTS.md`](AGENTS.md) — entry point for non-Claude agents
-- [`CLAUDE.md`](CLAUDE.md) — entry point for Claude Code (deep operating context)
+- [`AGENTS.md`](AGENTS.md) — shared install, operating, and development instructions
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — contributor guide, test discipline, eval-capture mode
 - [`SECURITY.md`](SECURITY.md) — install-path trust model, self-update integrity, automated scanning, OAuth threat model, hardening defaults
 
@@ -2452,7 +2446,7 @@ the page PK, soft-delete-filtered, source-safe) and completes in seconds.
 
 Run `bun run test` for the fast loop, `bun run verify` for the pre-push gate, `bun run ci:local` to run the full Docker-backed CI stack locally. Detailed test discipline in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-Community PRs are batched into release waves rather than merged one-by-one — see the "PR wave workflow" section in [`CLAUDE.md`](CLAUDE.md). Contributor attribution stays attached via `Co-Authored-By:` trailers. We credit every accepted contribution in [`CHANGELOG.md`](CHANGELOG.md).
+Community PRs are batched into release waves rather than merged one-by-one — see the "PR wave workflow" section in [`AGENTS.md`](AGENTS.md). Contributor attribution stays attached via `Co-Authored-By:` trailers. We credit every accepted contribution in [`CHANGELOG.md`](CHANGELOG.md).
 
 If you find a bug or want a feature: open an issue first. Quick fixes (typo, doc bug, obvious regression) can go straight to a PR. Anything touching schema, retrieval ranking, MCP protocol, or the security boundary needs a design discussion in the issue first.
 
@@ -2470,7 +2464,7 @@ Community PR contributors are credited in `CHANGELOG.md` per release. ZeroEntrop
 
 ## docs/ENGINES.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/ENGINES.md
+Source: https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/docs/ENGINES.md
 
 # Pluggable Engine Architecture
 
@@ -2986,7 +2980,7 @@ Note: The original SQLite engine plan (`docs/SQLITE_ENGINE.md`) was superseded b
 
 ## docs/what-schemas-unlock.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/what-schemas-unlock.md
+Source: https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/docs/what-schemas-unlock.md
 
 # What schemas unlock
 
@@ -3170,7 +3164,7 @@ That's what we built. Try it on a corpus you actually have and the numbers go up
 
 ## docs/schema-author-tutorial.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/schema-author-tutorial.md
+Source: https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/docs/schema-author-tutorial.md
 
 # Tutorial: Build your first schema pack
 
@@ -3399,7 +3393,7 @@ gbrain schema lint --with-db
 
 ## docs/guides/live-sync.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/live-sync.md
+Source: https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/docs/guides/live-sync.md
 
 # Live Sync: Keep the Index Current
 
@@ -3640,7 +3634,7 @@ vars — incident-time escape hatches, not everyday knobs.
 
 ## docs/guides/cron-schedule.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/cron-schedule.md
+Source: https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/docs/guides/cron-schedule.md
 
 # Reference Cron Schedule
 
@@ -3988,7 +3982,7 @@ echo "Dream cycle complete at $(date)"
 
 ## docs/guides/quiet-hours.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/quiet-hours.md
+Source: https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/docs/guides/quiet-hours.md
 
 # Quiet Hours and Timezone-Aware Delivery
 
@@ -4191,7 +4185,7 @@ Set `enabled: false` to disable quiet hours entirely (e.g., for 24/7 monitoring)
 
 ## docs/guides/scaling-skills.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/scaling-skills.md
+Source: https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/docs/guides/scaling-skills.md
 
 # Scaling skills past 300 without drowning the context window
 
@@ -4541,7 +4535,7 @@ the bundled resolver lives at [`skills/RESOLVER.md`](../../skills/RESOLVER.md).
 
 ## docs/guides/push-context.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/push-context.md
+Source: https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/docs/guides/push-context.md
 
 # Push-based context (#2095, v0.42.43.0)
 
@@ -4671,7 +4665,7 @@ never reach a prompt regardless of caller trust.
 
 ## docs/guides/github-source.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/github-source.md
+Source: https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/docs/guides/github-source.md
 
 # GitHub source kind: issues and PRs live in the brain
 
@@ -4837,7 +4831,7 @@ gbrain sources remove gh --confirm-destructive
 
 ## docs/mcp/DEPLOY.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/mcp/DEPLOY.md
+Source: https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/docs/mcp/DEPLOY.md
 
 # Deploy GBrain Remote MCP Server
 
@@ -5240,7 +5234,7 @@ built-in server is the recommended path.
 
 ## docs/protocol/MEMORY_VERBS_v1.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/protocol/MEMORY_VERBS_v1.md
+Source: https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/docs/protocol/MEMORY_VERBS_v1.md
 
 # MEMORY_VERBS v1 — the memory wire protocol
 
@@ -5666,7 +5660,7 @@ dominates (~minutes); the measured calls report p50/p99 + the ratio guard.
 
 ## docs/GBRAIN_VERIFY.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/GBRAIN_VERIFY.md
+Source: https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/docs/GBRAIN_VERIFY.md
 
 # GBrain Installation Verification Runbook
 
@@ -6020,7 +6014,7 @@ end-to-end sync test (4c), push a real change and verify it appears in search.
 
 ## docs/guides/minions-fix.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/minions-fix.md
+Source: https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/docs/guides/minions-fix.md
 
 # Minions fix — repairing a half-migrated install
 
@@ -6192,7 +6186,7 @@ Each phase is idempotent. Re-running is safe. Common failure modes:
 
 ## docs/integrations/reliability-repair.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/integrations/reliability-repair.md
+Source: https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master/docs/integrations/reliability-repair.md
 
 # Reliability repair (v0.12.2)
 

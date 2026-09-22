@@ -29,10 +29,10 @@ export const PROJECT = {
   name: "GBrain",
   summary:
     "GBrain is a personal knowledge brain and GStack mod for agent platforms. Pluggable engines (PGLite default, Postgres+pgvector for scale), contract-first operations, 26 fat-markdown skills. Teaches agents brain ops, ingestion, enrichment, scheduling, identity, and access control.",
-  repoUrl: "https://github.com/garrytan/gbrain",
+  repoUrl: "https://github.com/ShintaroKawakami/gbrain",
   rawBaseUrl:
     process.env.LLMS_REPO_BASE ??
-    "https://raw.githubusercontent.com/garrytan/gbrain/master",
+    "https://raw.githubusercontent.com/ShintaroKawakami/gbrain/master",
 };
 
 export const SECTIONS: DocSection[] = [
@@ -42,19 +42,13 @@ export const SECTIONS: DocSection[] = [
       {
         title: "AGENTS.md",
         description:
-          "Start here if you are not Claude Code. Install order, trust boundary, skill resolver, config/debug/migration pointers.",
+          "Shared agent entry point: install + operating protocol, development orientation, cross-cutting invariants, reference map, and inline ship rules.",
         path: "AGENTS.md",
-      },
-      {
-        title: "CLAUDE.md",
-        description:
-          "Orientation + resolver. North Star, two axes, architecture + cross-cutting invariants, the reference map pointing at on-demand docs, and the inline ship IRON RULES.",
-        path: "CLAUDE.md",
       },
       {
         title: "docs/architecture/KEY_FILES.md",
         description:
-          "Per-file index for the gbrain repo: what each src/ file does + its load-bearing invariants. The on-demand detail CLAUDE.md's reference map routes to.",
+          "Per-file index for the gbrain repo: what each src/ file does + its load-bearing invariants. The on-demand detail AGENTS.md's reference map routes to.",
         path: "docs/architecture/KEY_FILES.md",
         // Link-only until compressed to current-state (still large pre-compression).
         // Flip to inlined once the doc-history compression lands and the bundle
@@ -100,11 +94,11 @@ export const SECTIONS: DocSection[] = [
         path: "docs/GBRAIN_RECOMMENDED_SCHEMA.md",
         // v0.40.6.0: 64KB reference doc. Web index entry stays; the single-fetch
         // bundle gets the README + setup guides instead. Keeps llms-full.txt
-        // under the 600KB budget as CLAUDE.md grows with each release.
+        // under the 600KB budget as AGENTS.md grows with each release.
         includeInFull: false,
       },
       {
-        // Re-inlined: the CLAUDE.md resolver restructure (per-file index moved to
+        // Re-inlined: the AGENTS.md resolver restructure (per-file index moved to
         // docs/architecture/KEY_FILES.md, link-only) freed ~530KB of bundle
         // headroom, so this value-explainer rides the single-fetch bundle again.
         title: "docs/what-schemas-unlock.md",
@@ -135,7 +129,7 @@ export const SECTIONS: DocSection[] = [
         path: "docs/guides/minions-deployment.md",
         // v0.41.8.0: 13KB deployment runbook. Web index entry stays;
         // single-fetch bundle drops it to keep under FULL_SIZE_BUDGET
-        // (CLAUDE.md grew past 600KB once master's v0.41.2-v0.41.6 +
+        // (AGENTS.md grew past 600KB once master's v0.41.2-v0.41.6 +
         // this wave's annotations landed). Operators read this once;
         // agents rarely need it in context.
         includeInFull: false,
@@ -262,7 +256,7 @@ export const SECTIONS: DocSection[] = [
       {
         title: "docs/RELEASING.md",
         description:
-          "Full release + contributor process: pre-ship test requirements, the CHANGELOG voice + release-summary template, the 'To take advantage of vX' block, version migrations, GitHub Actions SHA refresh, PR conventions, community-PR-wave. (Ship IRON RULES stay inline in CLAUDE.md.)",
+          "Full release + contributor process: pre-ship test requirements, the CHANGELOG voice + release-summary template, the 'To take advantage of vX' block, version migrations, GitHub Actions SHA refresh, PR conventions, community-PR-wave. (Ship IRON RULES stay inline in AGENTS.md.)",
         path: "docs/RELEASING.md",
         includeInFull: false,
       },
@@ -321,11 +315,11 @@ export const INLINE_TIPS = [
 ];
 
 // Target ~800KB so llms-full.txt fits in ~200k-token contexts with room to spare.
-// Bumped 600KB→700KB in v0.41.9.0, then 700KB→750KB once CLAUDE.md crossed 700KB,
+// Bumped 600KB→700KB in v0.41.9.0, then 700KB→750KB once AGENTS.md crossed 700KB,
 // then 750KB→800KB in v0.42.10.0 when the #972 global-basename Key Files annotation
-// (landing alongside master's #1696/#1699 waves) crossed the 750KB line. CLAUDE.md
+// (landing alongside master's #1696/#1699 waves) crossed the 750KB line. AGENTS.md
 // is ~540KB+ (the bulk of the bundle) and grows ~5-15KB per release with each
-// feature's Key Files annotation. CLAUDE.md is the whole point of the one-fetch
+// feature's Key Files annotation. AGENTS.md is the whole point of the one-fetch
 // bundle, so it stays inlined; the budget tracks its legitimate growth. Still fits
 // comfortably in 200k+ context models.
 // Generator prints a WARN if exceeded; ship with includeInFull=false exclusions.

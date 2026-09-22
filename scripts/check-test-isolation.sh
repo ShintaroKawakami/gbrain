@@ -152,7 +152,7 @@ if [ $violations -gt 0 ]; then
   echo "  - For env mutations, use withEnv() from test/helpers/with-env.ts"
   echo "  - For mock.module(), rename to *.serial.test.ts (quarantine)"
   echo "  - For PGLiteEngine, follow the canonical pattern in"
-  echo "    test/helpers/reset-pglite.ts JSDoc and CLAUDE.md."
+  echo "    test/helpers/reset-pglite.ts JSDoc and AGENTS.md."
   echo
   echo "Or, if this is a baseline file from before the lint shipped,"
   echo "add it to scripts/check-test-isolation.allowlist (with a TODO"

@@ -141,7 +141,7 @@ timeouts, not code bugs).
 - Disk / memory / CPU
 - gbrain: `gbrain doctor --fast --json`
 - Database connection (if applicable)
-- Critical files exist (CLAUDE.md, AGENTS.md, etc.)
+- Critical files exist (AGENTS.md, etc.)
 
 #### 4. Git diff analysis (CRITICAL — regression intelligence)
 

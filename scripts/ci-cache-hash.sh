@@ -25,10 +25,8 @@
 #   - docs/**/*.md, *.txt       all docs/ subtree is doc-only
 #
 # WHAT'S DELIBERATELY NOT DENY-LISTED (affects test outcomes):
-#   - CLAUDE.md     8+ test files reference it (resolver-merge, schema-cli,
-#                   public-exports, eval-cross-modal-batch, etc.)
-#   - AGENTS.md     same — referenced by resolver tests; counterpart to
-#                   CLAUDE.md for OpenClaw hosts
+#   - AGENTS.md     shared instruction source; content-contract and resolver
+#                   tests reference its operating and development rules
 #   - skills/**     SKILL.md files are read by skill conformance tests
 #   - everything else under src/, test/, scripts/, .github/, package.json,
 #     bun.lock, tsconfig*.json, the schema files — obviously test-affecting

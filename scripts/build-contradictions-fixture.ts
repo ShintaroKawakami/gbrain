@@ -6,7 +6,7 @@
  * by running the probe against the user's REAL brain and hand-labeling
  * the candidate pairs. Output: test/fixtures/contradictions-eval-gold.jsonl.
  *
- * Privacy posture (CLAUDE.md rule): the operator MUST inspect the
+ * Privacy posture (AGENTS.md rule): the operator MUST inspect the
  * generated file before commit. The redactor (fixture-redact.ts) is
  * best-effort; the pre-commit review is the safety net. Fail-closed if
  * any pair fails the isCleanForCommit check after redaction.
