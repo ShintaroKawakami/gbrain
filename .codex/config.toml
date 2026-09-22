@@ -1,0 +1,3 @@
+# Keep the complete install and development instructions in AGENTS.md available.
+# Scope this native Codex limit to GBrain; retain the existing 75,000-byte docs cap.
+project_doc_max_bytes = 98304
