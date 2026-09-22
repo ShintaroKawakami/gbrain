@@ -47,7 +47,7 @@
     {
       "asset_revisions": [],
       "client": "claude",
-      "content_digest": "sha256:6cf1b09aecc34f1c3d1f37f9e2765f3d9b5dd8a4804f75f10491867aad8767c8",
+      "content_digest": "sha256:e3f85f7e6066aa345d50ce64af43decf77daf1373979910ec44dcae2df86e864",
       "kind": "ai_client",
       "materialization_digest": "sha256:71434888dfc5e9ff81fbd3b70e062ee945a15f3ddd50dc2f25b3018700796348",
       "probe": "generated-surface-ignore",
