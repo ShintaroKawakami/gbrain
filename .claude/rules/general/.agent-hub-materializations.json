@@ -1,0 +1,117 @@
+{
+  "project": "gbrain-mcp",
+  "rules": {
+    "ai-model-selection.md": {
+      "asset_id": "ai-model-selection",
+      "sha256": "ac46283fb7449622a7fc78591b696c41b0af6cbf018b5dc2405711d157e4a397",
+      "source": ".claude/rules/general/ai-model-selection.md"
+    },
+    "ai-worker-watch.md": {
+      "asset_id": "ai-worker-watch",
+      "sha256": "e3f9734e0856093d1f750aa5628e3ce4c603828cf3811d5ab0a351be1b573159",
+      "source": ".claude/rules/general/ai-worker-watch.md"
+    },
+    "branch-rule.md": {
+      "asset_id": "branch-rule",
+      "sha256": "08fa36ab772c8853bfd93bc5e4231c6129ae479e2d48da57699b7bfabfea69a4",
+      "source": ".claude/rules/general/branch-rule.md"
+    },
+    "claude-auto-worktree-lifecycle.md": {
+      "asset_id": "claude-auto-worktree-lifecycle",
+      "sha256": "1864585278c0839b86993468d2cca0098b2206eac349aa79b9ba2875d748d85e",
+      "source": ".claude/rules/general/claude-auto-worktree-lifecycle.md"
+    },
+    "constructive-dissent.md": {
+      "asset_id": "constructive-dissent",
+      "sha256": "4b693754ae8757db82059a883c28647b1f9e9eb3c0f9b95c90c01f98d772099e",
+      "source": ".claude/rules/general/constructive-dissent.md"
+    },
+    "gbrain-recall.md": {
+      "asset_id": "gbrain-recall",
+      "sha256": "4ca112bd2654c640c3af49d0a285070f4e797f462f8bf6e14313cf99890a0f4f",
+      "source": ".claude/rules/general/gbrain-recall.md"
+    },
+    "hooks-structure-rule.md": {
+      "asset_id": "hooks-structure-rule",
+      "sha256": "271c86c3aead4e05d27dbe773ce5e6e3490d2467494b2112250f95675e233e48",
+      "source": ".claude/rules/general/hooks-structure-rule.md"
+    },
+    "latest-stack-context7.md": {
+      "asset_id": "latest-stack-context7",
+      "sha256": "501cd24a32cad2fe5bbb89c3c7b0d6229dd5d023c21a35f8e13497adf031b30e",
+      "source": ".claude/rules/general/latest-stack-context7.md"
+    },
+    "mandate-registry.md": {
+      "asset_id": "mandate-registry",
+      "sha256": "e7fae323b4e925cf59b89dfef8253e4f406f22c4b75d489cf6c0ced672ff93c5",
+      "source": ".claude/rules/general/mandate-registry.md"
+    },
+    "mcp-key-management.md": {
+      "asset_id": "mcp-key-management",
+      "sha256": "01a6bb8dc59beec947992e487abe273328795c221fdd67be024fedacc2b07891",
+      "source": ".claude/rules/general/mcp-key-management.md"
+    },
+    "memory-lookups.md": {
+      "asset_id": "memory-lookups",
+      "sha256": "80e103a870ed76aebe69ff5d37cb57d9c7a076825a39093b8092b2097d86f00b",
+      "source": ".claude/rules/general/memory-lookups.md"
+    },
+    "plan-approval-gate.md": {
+      "asset_id": "plan-approval-gate",
+      "sha256": "94303e98c59e01dfb82de1c5467987ba1d34952a7b17f0ff49e905274a7041b0",
+      "source": ".claude/rules/general/plan-approval-gate.md"
+    },
+    "plan-commitment-tracking.md": {
+      "asset_id": "plan-commitment-tracking",
+      "sha256": "775ea7d31b73d98d8e05a30f93c5bbc1375ea333d1ba076124c28ef4345cc997",
+      "source": ".claude/rules/general/plan-commitment-tracking.md"
+    },
+    "reference-over-hardcode.md": {
+      "asset_id": "reference-over-hardcode",
+      "sha256": "6c352ccec9a3a51cd06267e8a9d2550ad33195c86aee9519635e009c733e2ca5",
+      "source": ".claude/rules/general/reference-over-hardcode.md"
+    },
+    "response-style.md": {
+      "asset_id": "response-style",
+      "sha256": "86aabe15ced1eef3085ec36b48a82e13b8726efe9e5f153070f6ce8f9c7770e4",
+      "source": ".claude/rules/general/response-style.md"
+    },
+    "responsive-both-viewports.md": {
+      "asset_id": "responsive-both-viewports",
+      "sha256": "a98414941642aced0443fe9d7b81a0e71cacf4f1acb4f8be078c0b5bc3385607",
+      "source": ".claude/rules/general/responsive-both-viewports.md"
+    },
+    "settings-protection-coexistence.md": {
+      "asset_id": "settings-protection-coexistence",
+      "sha256": "c85dae4a20be558cce354b5b7f846d2a156c69f49ec3f5830ffc31acf35cf036",
+      "source": ".claude/rules/general/settings-protection-coexistence.md"
+    },
+    "sub-agent-scope-contract.md": {
+      "asset_id": "sub-agent-scope-contract",
+      "sha256": "9e6dbe7c10c450f0ec802f52d48d8f57a42f01e3ac3ef2292d3dd6b052d97542",
+      "source": ".claude/rules/general/sub-agent-scope-contract.md"
+    },
+    "tool-availability-resolution.md": {
+      "asset_id": "tool-availability-resolution",
+      "sha256": "dd2331f7fa84f3f6d1dd8f4be7d4c802c1cd588ebd9d612a0dddd12b12bf8ab1",
+      "source": ".claude/rules/general/tool-availability-resolution.md"
+    },
+    "ui-stitch-mandatory.md": {
+      "asset_id": "ui-stitch-mandatory",
+      "sha256": "958eaf2dca033a0a7bb0cdf51158e7125b5c505c5a509491ddf0ca908b1f846c",
+      "source": ".claude/rules/general/ui-stitch-mandatory.md"
+    },
+    "visual-progress-map.md": {
+      "asset_id": "visual-progress-map",
+      "sha256": "4cae2b43900917f7dd4c4a7c49918448ba95b0944107e5c77aef0a39eeecfac5",
+      "source": ".claude/rules/general/visual-progress-map.md"
+    },
+    "worktree-rule.md": {
+      "asset_id": "worktree-rule",
+      "sha256": "3ceba939380d8fd7d6142543709f6ce803e0c583a1e7dca6a1644e00645a72ad",
+      "source": ".claude/rules/general/worktree-rule.md"
+    }
+  },
+  "version": 1,
+  "writer": "deploy-rules"
+}
