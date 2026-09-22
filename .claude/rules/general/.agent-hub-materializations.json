@@ -103,7 +103,7 @@
     },
     "visual-progress-map.md": {
       "asset_id": "visual-progress-map",
-      "sha256": "4cae2b43900917f7dd4c4a7c49918448ba95b0944107e5c77aef0a39eeecfac5",
+      "sha256": "49292a13b35ca999efb2683779c1a50bb435fb0bf8363eff53abd8f57c3dbe20",
       "source": ".claude/rules/general/visual-progress-map.md"
     },
     "worktree-rule.md": {
