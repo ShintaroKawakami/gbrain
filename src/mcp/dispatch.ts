@@ -336,7 +336,7 @@ export function buildEmptyRetrievalBlock(retrieval: unknown): string | null {
   if (retrieval === null || typeof retrieval !== 'object') return null;
   const r = retrieval as {
     retrieved_count?: number;
-    degraded?: Array<{ stage?: string }>;
+    degraded?: Array<{ stage?: string; reason?: string }>;
     hint?: string;
   };
   const parts: string[] = ['0 results.'];

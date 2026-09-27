@@ -62,9 +62,9 @@ describe('dispatch response meta (WP2/D3/D8)', () => {
     nextResults = [];
     nextMeta = DEGRADED_META;
     const out = await callSearch();
-    expect(out.isError).toBeUndefined();
-    // Body block 0 stays the bare array (deployed thin-clients parse only this).
-    expect(JSON.parse(out.content[0].text)).toEqual([]);
+    // jtt #2632: a recall-affecting degraded empty flips to the error envelope.
+    expect(out.isError).toBe(true);
+    expect(JSON.parse(out.content[0].text).error).toBe('retrieval_degraded');
     // D8: the model-visible diagnosis block.
     expect(out.content.length).toBe(2);
     expect(out.content[1].text).toContain('0 results');
