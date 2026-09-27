@@ -301,8 +301,13 @@ async function runScripted(
     phases.push({ name: 'import', argv: ['import', brainDir, '--no-embed', '--progress-json'] });
   }
 
-  // Phase 4: query (best-effort sanity)
-  phases.push({ name: 'query', argv: ['query', 'the'] });
+  // Phase 4: query (best-effort sanity). #2632 degraded-empty exit contract:
+  // a keyword search that comes back empty exits non-zero, so the query term
+  // must exist in the fixture. Use the scenario's declared oracle.query (the
+  // same term the live-mode oracle enforces); the fallback stays a real
+  // fixture token, never an all-stopword query like "the" that search strips
+  // to an empty query.
+  phases.push({ name: 'query', argv: ['query', scenario.oracle?.query ?? 'alice'] });
 
   // Phase 5: extract (positional argument is required: 'all' covers links + timeline).
   // Pass --dir explicitly because the install_brain phase doesn't register

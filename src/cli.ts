@@ -43,6 +43,7 @@ import { conceptNudge } from './core/search/query-intent.ts';
 import { redactRetrievalOutput } from './core/search/output-redaction.ts';
 import type { CliOptions } from './core/cli-options.ts';
 import { callRemoteTool, RemoteMcpError, unpackToolResult, extractResponseMeta } from './core/mcp-client.ts';
+import { buildDegradedEmptyRetrievalEnvelope, recallAffectingStages } from './mcp/dispatch.ts';
 import { maybePromptForUpgrade } from './core/thin-client-upgrade-prompt.ts';
 import { CLI_FLAG_REGISTRY } from './core/cli-flag-registry.generated.ts';
 import { migrationCliArgumentError } from './core/embedding-migration-cli.ts';
@@ -667,11 +668,19 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
     // routed path. Date → ISO string; bigint → string (postgres.js shape);
     // Buffer → object. Microsecond-cost; eliminates a whole drift bug class.
     const result = normalizeLocalResult(rawResult);
+    const degradedEmptyStages = emptyRetrievalDegradationStages(result);
     const output = formatResult(op.name, result, params);
     // Awaited delivery (#3423): queued stdout writes past 64KiB lose their
     // tail to a slow pipe reader when the exit grace lapses — see
     // writeStdoutFinal.
     if (output) await writeStdoutFinal(output);
+    if (degradedEmptyStages.length > 0) {
+      // #2632: stdout is the retrieval_degraded JSON envelope for --json;
+      // stderr + verdict make the same incomplete retrieval non-successful
+      // for every local CLI caller, matching MCP/thin-client behavior.
+      console.error(`gbrain ${command}: retrieval_degraded (${degradedEmptyStages.join(', ')}).`);
+      setCliExitVerdict(1);
+    }
     // #4488: an op that reports failure IN-BAND (`{status: 'error'}` — e.g.
     // put_page over unparseable frontmatter) used to print the envelope and
     // exit 0, so scripts read a never-written page as success. Echo the error
@@ -1564,6 +1573,18 @@ function describeEmptyRetrieval(): string {
   return ` (${parts.join('; ')})`;
 }
 
+/**
+ * #2632 local twin of dispatch's degraded-empty decision. Keep the closed
+ * stage classifier in dispatch so local and MCP cannot drift: a standalone
+ * keyword_zero remains a healthy miss, while keyword_zero accompanying a
+ * lost embed/vector/expansion/budget arm is evidence on the error envelope.
+ */
+export function emptyRetrievalDegradationStages(result: unknown): string[] {
+  return Array.isArray(result) && result.length === 0
+    ? recallAffectingStages(lastRetrievalMeta)
+    : [];
+}
+
 // Exported for tests (same import-safety contract as cliAliases/printOpHelp).
 /**
  * #2416: hint-only steering — a concept-shaped `search` gets a one-line
@@ -1638,6 +1659,12 @@ export function formatResult(
       const incompleteNotice = incompleteStages.length > 0
         ? `Retrieval incomplete: ${incompleteStages.join(', ')}.\n`
         : '';
+      const degradedEmptyStages = emptyRetrievalDegradationStages(results);
+      if (degradedEmptyStages.length > 0) {
+        const envelope = buildDegradedEmptyRetrievalEnvelope(degradedEmptyStages);
+        if (params.json === true) return JSON.stringify(envelope, null, 2) + '\n';
+        return `Retrieval degraded: ${String(envelope.message)}\n`;
+      }
       if (params.json === true) {
         if (incompleteNotice) process.stderr.write(incompleteNotice);
         return JSON.stringify(results, null, 2) + '\n';
