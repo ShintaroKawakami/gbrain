@@ -130,6 +130,9 @@ export async function produceEntitylessFactProposals(
   let afterValidFrom: string | null = null;
   let afterId = 0;
   let scanned = 0;
+  const byVisibility: Record<'world' | 'private', FactRow[]> = { world: [], private: [] };
+  // The keyset page size bounds each read. Cluster only after the full eligible
+  // uncovered set is loaded so page boundaries cannot split a candidate group.
   for (;;) {
     const rows: Array<RawEntitylessFact & { scan_cursor: string }> = await engine.executeRaw<RawEntitylessFact & { scan_cursor: string }>(`SELECT id,source_id,entity_slug,fact,kind,visibility,notability,context,
         valid_from,valid_from::text AS scan_cursor,valid_until,expired_at,superseded_by,consolidated_at,consolidated_into,source,source_session,confidence,
@@ -149,26 +152,26 @@ export async function produceEntitylessFactProposals(
     afterValidFrom = last.scan_cursor;
     afterId = Number(last.id);
 
-    const byVisibility: Record<'world' | 'private', FactRow[]> = { world: [], private: [] };
     for (const row of rows) {
       const fact = normalizeRawFact(row);
       byVisibility[fact.visibility].push(fact);
     }
+    if (rows.length < ENTITYLESS_PROPOSAL_MAX_FACTS) break;
+  }
 
-    let foundCluster = false;
-    for (const visibility of ['world', 'private'] as const) {
-      const group = byVisibility[visibility];
-      if (group.length < MIN_FACTS) continue;
-      const oldest = group.reduce((min, fact) => Math.min(min, fact.valid_from.getTime()), Number.POSITIVE_INFINITY);
-      if (now - oldest < MIN_OLDEST_AGE_MS) continue;
+  for (const visibility of ['world', 'private'] as const) {
+    const group = byVisibility[visibility];
+    if (group.length < MIN_FACTS) continue;
+    const oldest = group.reduce((min, fact) => Math.min(min, fact.valid_from.getTime()), Number.POSITIVE_INFINITY);
+    if (now - oldest < MIN_OLDEST_AGE_MS) continue;
 
-      for (const cluster of clusterEntitylessFacts(group)) {
-        if (cluster.length < 2) continue;
-        foundCluster = true;
+    for (const cluster of clusterEntitylessFacts(group)) {
+      if (cluster.length < 2) continue;
+      for (const evidenceGroup of splitCandidateCluster(cluster)) {
         clusters += 1;
-        const best = [...cluster].sort((a, b) => b.confidence - a.confidence || a.id - b.id)[0]!;
-        const weight = clamp01(cluster.reduce((sum, fact) => sum + fact.confidence, 0) / cluster.length);
-        const since = new Date(Math.min(...cluster.map(fact => fact.valid_from.getTime()))).toISOString().slice(0, 10);
+        const best = [...evidenceGroup].sort((a, b) => b.confidence - a.confidence || a.id - b.id)[0]!;
+        const weight = clamp01(evidenceGroup.reduce((sum, fact) => sum + fact.confidence, 0) / evidenceGroup.length);
+        const since = new Date(Math.min(...evidenceGroup.map(fact => fact.valid_from.getTime()))).toISOString().slice(0, 10);
         const evidence: EntitylessProposalEvidenceV1 = {
           version: 1,
           reason: 'subject_unknown',
@@ -178,7 +181,7 @@ export async function produceEntitylessFactProposals(
           target,
           visibility,
           candidate: { claim_text: best.fact, kind: 'fact', holder: 'self', weight, since },
-          facts: cluster.map(snapshotFact).sort((a, b) => a.id - b.id),
+          facts: evidenceGroup.map(snapshotFact).sort((a, b) => a.id - b.id),
         };
         const contentHash = sha256(stableJson(evidence));
         const runId = `entityless-${contentHash.slice(0, 40)}`;
@@ -192,11 +195,6 @@ export async function produceEntitylessFactProposals(
         if (result.length) inserted += 1;
       }
     }
-    // Keep each clustering window (and therefore every proposal's evidence)
-    // within the existing 100-fact bound. Advance by a stable keyset until a
-    // window yields a reviewable cluster, so old singleton rows cannot starve
-    // later embedded facts forever.
-    if (foundCluster || rows.length < ENTITYLESS_PROPOSAL_MAX_FACTS) break;
   }
   return { scanned, inserted, clusters };
 }
@@ -381,6 +379,21 @@ function clusterEntitylessFacts(facts: FactRow[], threshold = CLUSTER_THRESHOLD)
     if (!placed) clusters.push([fact]);
   }
   return clusters;
+}
+
+function splitCandidateCluster(cluster: FactRow[]): FactRow[][] {
+  // Keep groups balanced while preserving the existing per-evidence cap.
+  const groupCount = Math.ceil(cluster.length / ENTITYLESS_PROPOSAL_MAX_FACTS);
+  const baseSize = Math.floor(cluster.length / groupCount);
+  const largerGroups = cluster.length % groupCount;
+  const groups: FactRow[][] = [];
+  let offset = 0;
+  for (let index = 0; index < groupCount; index++) {
+    const size = baseSize + (index < largerGroups ? 1 : 0);
+    groups.push(cluster.slice(offset, offset + size));
+    offset += size;
+  }
+  return groups;
 }
 
 function parseEmbedding(value: RawEntitylessFact['embedding']): Float32Array | null {

@@ -14,7 +14,7 @@
   停止は `gbrain config unset 'dream.consolidate.entityless.<source-id>'`。値は JSON object で、許可する key は `source_incarnation` と `target_slug` の2つだけ。両方 nonblank とし、incarnation が現行 source と一致しない場合は cycle の開始前に失敗する。
 - `--entityless-proposal-target <slug>` は source config より優先する。この flag は単独の `--phase consolidate --source <id>` に限る。config opt-in は既存の全体 nightly cycle にも適用される。
 - schedule、config writer、service、通知、proposal の自動 accept は追加しない。private evidence はローカル CLI のみで扱い、公開 accept を拒否する。提案は `evidence_*` status のまま保持し、legacy `pending` / `accepted` に変換しない。
-- producer は指定 source の active incarnation と visibility ごとに候補を分ける。keyset scan は古い singleton / embedding 欠落の100件を越えて reviewable cluster を探す。各 scan window は最大100 fact で、各 proposal evidence も最大100 fact。target と fact の source-scoped revision / snapshot を固定する。
+- producer は指定 source の active incarnation と visibility ごとに候補を分ける。既存の keyset pagination は100 factずつ読みながら、未カバーの eligible facts を最後まで集めてから clustering する。100は探索上限ではなく evidence ごとの上限であり、100を超える候補 cluster は2〜100 factの均等な evidence groups に分ける（101 fact は51+50）。target と fact の source-scoped revision / snapshot を固定する。
 
 ## 進捗、retry、再レビュー
 
@@ -29,11 +29,11 @@
 - v184 は upstream commit `109b992172e1f49107f9de9841758c1d043a2668` の `ai/decide/schema.ts` にある RLS helper と `DECIDE_RECEIPTS_SCHEMA_SQL` をそのまま含む。calibration / proposal DDL と AI behavior は含めない。constant の SHA-256 は **`52fbd2953179f3124604362c4c2cd200349d5e45a14bc5866a41fafe537fd9bb`**（upstream full file ではなく、この migration 内の評価済み `DECIDE_RECEIPTS_SCHEMA_SQL` template value の hash）。
 - 同じ v184 transaction で entityless 用 `take_proposals.evidence` 列と `evidence_*` status を追加する。receipt schema は `decision_receipts` / `decide_spend` / `decide_state` の3 table と4 index。元 fact や既存 proposal status は書き換えない。
 - production rollout には v184 の combined DDL（receipt tables / indexes と entityless evidence column / statuses）への明示承認が必要。per-source config opt-in は別の判断で、migration だけでは producer は動かない。production migration、activation、accept、private evidence の publication はこの準備では行わない。
-- rollback は旧 code に戻し、対象 source の config key を unset して新規 producer を停止する。down migration や proposal status の書き換えはしない。旧 binary が新 status / maintenance intent を認識しない可能性があり、既存 evidence は保持する。
-- PostgreSQL test は v184 ledger からの replay と代表的な後続185/186 DDL を確認する。実 upstream 185/186 source はこの worktree に含まれないため、その exact SQL の互換性は別途確認が必要。upstream 187–196 の import DDL 確認も別 review scope。
+- rollback は対象 source の config key を先に unset して新規 producer を止め、その後に旧 code へ戻す。旧 v0.60.25.0 acceptance case の fixture では `evidence_*` status が fail closed することを個別に確認するが、旧 binary / daemon 全体の rollback は保証しない。down migration、schema downgrade、proposal status の書き換えはしない。既存 evidence は保持する。
+- migration compatibility test は simulated v183 から repository の v184 migration を適用し、pinned upstream source `109b992172e1f49107f9de9841758c1d043a2668` の実際の185 `DECIDE_CALIBRATIONS_SCHEMA_SQL` と186 `DECIDE_PROPOSALS_SCHEMA_SQL` を順に実行する。fixture は `ai/decide/schema.ts` から抽出し、full source SHA-256 `377b8c17a2baebb5bef5ce289826ead5045af776c634994a1539157eeb75e09b` を記録する。テスト ledger は engine methods で183→184→185→186を確認し、entityless evidence が残ることを検証する。187–196 の execution は主張しない。
 
 ## 検証と limitation
 
 - 合成 tests は PGLite、acceptance / migration tests は `testBackends()` によって isolated PGLite と明示された test-named PostgreSQL DB を対象にする。fixtures は synthetic fact と source/page のみ。
 - `oldBinaryAcceptFixture` / `oldBinaryMaintenanceFixture` は v0.60.25.0 の分岐から手動抽出した predicate fixture であり、旧 binary の実 module を呼び出す証拠ではない。
-- top-level CLI validator の生成済み flag registry はこの変更範囲外。nightly path は汎用 `config set` を使い、`runDream` parser では explicit flag precedence を確認するが、flag が top-level validator に登録済みかはこの worktree の変更で保証しない。
+- `--entityless-proposal-target` は generated CLI flag registry に登録し、top-level validator で明示 source とともに受理され、未知の近似 flag は拒否されることを確認する。
