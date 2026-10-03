@@ -73,6 +73,9 @@ ${rls('decide_spend')}
 ${rls('decide_state')}
 `;
 
+// [2026-10-04][feat] CaD: The migration ledger stores integer versions only,
+// so a custom-only v184 would skip upstream's v184 receipt DDL. Include that
+// original DDL here so the later upstream migrations still find its schema.
 export const v184: Migration = {
   version: 184,
   name: 'take_proposal_evidence',
