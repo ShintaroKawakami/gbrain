@@ -177,7 +177,7 @@ test('interrupted entityless acceptance stays listed and retries once with the s
   expect(display).not.toContain('--reject');
 
   const localQueue = await listPendingProposals(engine, { sourceId: proposal.source_id });
-  expect(localQueue.map(row => row.id)).toContain(proposal.id);
+  expect(localQueue.map(row => row.id)).toContain(Number(proposal.id));
   expect(await listPendingProposals(engine, { sourceId: 'another-source' })).toHaveLength(0);
 
   const retried = await acceptProposal(proposalTarget(proposal), proposal.id);

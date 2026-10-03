@@ -67,7 +67,11 @@ export function parseEntitylessProposalEvidence(value: unknown): EntitylessPropo
   return evidence as EntitylessProposalEvidenceV1;
 }
 
-/** Recheck the current source, public target revision and semantic fact rows. */
+/**
+ * [2026-10-04][feat] Review entityless memories without rewriting or exposing their original facts.
+ * Private evidence stays local; takes do not enforce fact TTL, so finite-TTL evidence cannot be promoted.
+ * Recheck at admission and publication; dedicated evidence statuses and the maintenance kind keep old consumers from bypassing this guard.
+ */
 export async function assertEntitylessProposalCurrent(
   engine: BrainEngine,
   proposal: EntitylessProposalRecord,
