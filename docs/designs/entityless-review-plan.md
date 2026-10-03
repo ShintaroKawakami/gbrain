@@ -114,3 +114,18 @@ Studio の PostgreSQL 15 は vector extension がなく、default Docker daemon 
 既存 CI と同じ `pgvector/pgvector:pg16` の専用一時 container を CPU 1・メモリ 1 GiB・localhost のみで作成した。
 本番 DSN は未使用。既存 base の `managed-maintenance.test.ts` はこの実 Postgres で21件成功、0件失敗。
 変更後の row-lock/publication race の結果とは区別し、検証終了時にはこの一時 container を削除する。
+
+## 途中版の独立検証（完成判定ではない）
+
+統合 commit `43e55c816` で、新規2ファイルと既存4ファイルを同一 Bun process で実行した。
+隔離した HOME / GBRAIN_HOME と TMPDIR=/tmp では49件中48件成功、1件失敗（345 assertions、40.17秒）。
+失敗は合成 fixture が `fact_withdrawals` に存在しない `id` をSELECTしたもの。追補で修正する。
+MCP実行時にあった19件のEPERMはこの条件では再現しなかったが、ambient HOMEとの違いの原因は未確定。
+最終 commit で新旧まとめ試験をやり直すまで完成とはしない。
+
+旧版互換は手書きの条件式fixtureと分けて確認した。実際の v0.60.25.0
+(`a4c5ea3c99d41fa601f48c0cc5d73b4adea3b873`) の `acceptProposal`、`listPendingProposals`、
+`prepareMaintenanceMutation` を新schema184の合成PGLiteへ直接接続した。
+world/private × 新status4種 × receipt有無の16ケースで旧acceptは全件拒否し、旧一覧には0件、
+新intentは `Unsupported maintenance request` で拒否した。takes と persistence_requests の新規行は0件。
+これは旧版の実関数を使った証明であり、旧consumer daemon全体の再起動試験とは区別する。
