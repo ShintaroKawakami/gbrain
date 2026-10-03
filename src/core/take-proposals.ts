@@ -322,11 +322,18 @@ function proposalActionError(error: unknown): TakeProposalError {
 
 async function restoreEntitylessProposalIfSettled(engine: BrainEngine, id: number, sourceId: string,
   principalKind?: string, principalId?: string): Promise<void> {
-  const requestRows = await engine.executeRaw<{ state: string }>(`SELECT state FROM persistence_requests
-    WHERE source_id=$1 AND operation='submit_job' AND intent->>'kind'='managed_maintenance_entityless_proposal_accept'
-      AND intent->>'proposal_id'=$2
-      AND ($3::text IS NULL OR principal_kind=$3) AND ($4::text IS NULL OR principal_id=$4)`,
-  [sourceId, String(id), principalKind ?? null, principalId ?? null]).catch(() => []);
+  let requestRows: Array<{ state: string }>;
+  try {
+    requestRows = await engine.executeRaw<{ state: string }>(`SELECT state FROM persistence_requests
+      WHERE source_id=$1 AND operation='submit_job' AND intent->>'kind'='managed_maintenance_entityless_proposal_accept'
+        AND intent->>'proposal_id'=$2
+        AND ($3::text IS NULL OR principal_kind=$3) AND ($4::text IS NULL OR principal_id=$4)`,
+    [sourceId, String(id), principalKind ?? null, principalId ?? null]);
+  } catch {
+    // A failed lookup is unknown state, not proof that the durable request has
+    // settled. Retain the claim until a later call can inspect its receipt.
+    return;
+  }
   const stillRunning = requestRows.some(row => !['failed', 'cancelled', 'conflict'].includes(row.state));
   if (!stillRunning) {
     await engine.executeRaw(`UPDATE take_proposals SET status='evidence_pending',acted_at=NULL,acted_by=NULL,promoted_row_num=NULL
