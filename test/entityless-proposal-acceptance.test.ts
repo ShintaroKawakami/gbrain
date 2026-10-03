@@ -401,7 +401,7 @@ test('old-binary extracted predicates refuse evidence states while the new inten
   expect(authority).toBeTruthy();
   const evidence = evidenceOf(proposal);
   const intent = {
-    kind: 'managed_maintenance_entityless_proposal_accept', proposal_id: proposal.id,
+    kind: 'managed_maintenance_entityless_proposal_accept', proposal_id: Number(proposal.id),
     evidence_hash: digest(evidence), expected_revision: (evidence.target as Record<string, unknown>).revision,
   };
   const acceptedReceipt = await admitWrite(engine, {
