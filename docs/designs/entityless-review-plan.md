@@ -129,3 +129,33 @@ MCP実行時にあった19件のEPERMはこの条件では再現しなかった�
 world/private × 新status4種 × receipt有無の16ケースで旧acceptは全件拒否し、旧一覧には0件、
 新intentは `Unsupported maintenance request` で拒否した。takes と persistence_requests の新規行は0件。
 これは旧版の実関数を使った証明であり、旧consumer daemon全体の再起動試験とは区別する。
+
+同じ旧版の実関数を隔離 PostgreSQL 16 にも接続し、上記16ケースの拒否、旧一覧0件、
+未知intent拒否、takes/persistence_requests追加0件を確認した。最終変更後には再確認する。
+
+追補 worker `875545e8-d81c-49a6-b6eb-cf3581c59bc6` は一時ディレクトリ作成のエラー文字列を
+パスとして扱い、worktree 内に Bun cache 100ファイルを作ったため、binary_changed_file gate で失敗した。
+その cache は repo 外へ証拠として移し、コード9ファイルだけを WIP `5281cdec7` に保全した。
+統合 `db344b8e9` の隔離 HOME での新3＋既存4ファイル同時試験は55件成功、1件失敗、432 assertions。
+残る失敗は source incarnation を直接変更する合成fixtureの外部キー制約違反であり、試験成功とは扱わない。
+
+## 本番反映案の具体化（まだ未実行）
+
+対象は `shintaro-gbrain`、専用の整理先案は `notes/memory-review`。
+既存の人物ページへ割り当てず、承認後に専用ページを作成する。
+既存 DB config の `dream.consolidate.entityless.shintaro-gbrain` に
+`{"source_incarnation":"<現在のsource incarnation>","target_slug":"notes/memory-review"}` を設定する案。
+未設定なら無効。設定を unset すれば翌回以降の候補生成を止められる。
+既存の夜間処理から候補だけを作り、採用は別の明示的な local 操作とする。自動採用はしない。
+
+上流の migration は `config.version` の整数で管理され、名前・checksum の適用台帳はない。
+今回の184だけを適用すると、上流184 `decision_receipts` の処理が将来skipされるため、そのまま配備しない。
+最小案は上流184の原文DDLを同じ184に含め、その後で evidence列とstatus制約を追加すること。
+本番承認の範囲には、空の `decision_receipts` / `decide_spend` / `decide_state` の3テーブル、
+4 index、上流と同じ条件付きRLS有効化も含める。番号を大きく進める独自台帳は追加しない。
+
+出典は upstream commit `109b992172e1f49107f9de9841758c1d043a2668`。
+`v184-decision-receipts.ts` のSHA-256は `b1c8efd66c0b8e7a2032d39a27f3bd4d9912d0df6f011a9230c3f6569f22210e`、
+`src/core/ai/decide/schema.ts` 全文のSHA-256は `377b8c17a2baebb5bef5ce289826ead5045af776c634994a1539157eeb75e09b`。
+上流185〜196と相対import先のDDLを静的に確認し、take_proposalsのevidence列・status制約を書き換える経路は見つからなかった。
+これは連続migration実行の成功証拠とは区別する。183→今回184→後続migrationの合成試験は最終実装で記録する。
