@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -8,13 +8,15 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
 import { loadConfig } from '../src/core/config.ts';
 import { runPhaseConsolidate } from '../src/core/cycle/phases/consolidate.ts';
-import { acceptProposal, rejectProposal, type TakeProposalRow } from '../src/core/take-proposals.ts';
+import { acceptProposal, listPendingProposals, rejectProposal, type TakeProposalRow } from '../src/core/take-proposals.ts';
 import { parseTakesFence } from '../src/core/takes-fence.ts';
 import { digest, stableJson } from '../src/core/persistence/digest.ts';
 import { maintenancePreflight } from '../src/core/persistence/prepared-maintenance.ts';
 import { admitWrite } from '../src/core/persistence/journal.ts';
 import { recordFactWithdrawal } from '../src/core/facts/withdrawal.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
+import { dispatchToolCall } from '../src/mcp/dispatch.ts';
+import { runTakes } from '../src/commands/takes.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
@@ -146,6 +148,52 @@ test('world acceptance publishes through the guarded durable intent and leaves s
   expect(await factBytes()).toBe(beforeFacts);
 }));
 
+/**
+ * Protects local discovery and retry of an interrupted publication by proposal ID.
+ * Regression: evidence_accepting was omitted from the list despite acceptProposal supporting resume.
+ * Existing coverage retried by known ID but did not prove the normal list/CLI could reveal it.
+ * No production test seam is needed.
+ */
+test('interrupted entityless acceptance stays listed and retries once with the same proposal ID', async () => isolated(async () => {
+  await engine.setConfig('sync.write_through', 'false');
+  await seedTarget();
+  const proposal = await seedProposal();
+  const beforeFacts = await factBytes();
+  await engine.executeRaw(`UPDATE take_proposals
+    SET status='evidence_accepting',acted_at=now(),acted_by='synthetic-interruption' WHERE id=$1`, [proposal.id]);
+  expect(await engine.executeRaw(`SELECT id FROM persistence_requests
+    WHERE intent->>'kind'='managed_maintenance_entityless_proposal_accept'`)).toHaveLength(0);
+
+  const output: string[] = [];
+  const log = spyOn(console, 'log').mockImplementation((...args) => { output.push(args.join(' ')); });
+  try {
+    await runTakes(engine, ['propose']);
+  } finally {
+    log.mockRestore();
+  }
+  const display = output.join('\n');
+  expect(display).toContain('Publication is in progress.');
+  expect(display).toContain(`retry with the same proposal ID: \`gbrain takes propose --accept ${proposal.id}\``);
+  expect(display).not.toContain('--reject');
+
+  const localQueue = await listPendingProposals(engine, { sourceId: proposal.source_id });
+  expect(localQueue.map(row => row.id)).toContain(proposal.id);
+  expect(await listPendingProposals(engine, { sourceId: 'another-source' })).toHaveLength(0);
+
+  const retried = await acceptProposal(proposalTarget(proposal), proposal.id);
+  expect(retried.rowNum).toBeGreaterThan(0);
+  expect(await proposalState(proposal.id)).toEqual({ status: 'evidence_accepted', promoted_row_num: retried.rowNum });
+  expect(await engine.listTakes({ page_slug: proposal.page_slug })).toHaveLength(1);
+  expect(await factBytes()).toBe(beforeFacts);
+
+  const replay = await acceptProposal(proposalTarget(proposal), proposal.id);
+  expect(replay.rowNum).toBe(retried.rowNum);
+  expect(await engine.listTakes({ page_slug: proposal.page_slug })).toHaveLength(1);
+  expect(await engine.executeRaw<{ state: string }>(`SELECT state FROM persistence_requests
+    WHERE intent->>'kind'='managed_maintenance_entityless_proposal_accept'`)).toEqual([{ state: 'committed' }]);
+  expect(await factBytes()).toBe(beforeFacts);
+}));
+
 test('producer weights round-trip at REAL precision for 0.8 and mixed confidence averages', async () => isolated(async () => {
   const confidenceSets = [[0.8, 0.8, 0.8], [0.7, 0.8, 0.8]];
   for (const [caseIndex, confidences] of confidenceSets.entries()) {
@@ -254,6 +302,16 @@ test('private evidence cannot be published even when remote private-page filteri
   expect(await engine.executeRaw('SELECT id FROM persistence_requests')).toHaveLength(0);
   expect(await engine.executeRaw('SELECT id FROM persistence_local_writers')).toHaveLength(0);
   expect(await factBytes()).toBe(beforeFacts);
+  const localRecall = await dispatchToolCall(engine, 'recall', { grep: 'private accepted claim' }, {
+    remote: false, sourceId: proposal.source_id, config: config(),
+  });
+  const remoteRecall = await dispatchToolCall(engine, 'recall', { grep: 'private accepted claim' }, {
+    remote: true, sourceId: proposal.source_id, config: config(),
+  });
+  expect(localRecall.isError).toBeFalsy();
+  expect(JSON.stringify(localRecall)).toContain('private accepted claim');
+  expect(remoteRecall.isError).toBeFalsy();
+  expect(JSON.stringify(remoteRecall)).not.toContain('private accepted claim');
   await rejectProposal({ engine, sourceId: proposal.source_id, actedBy: 'local-reviewer' }, proposal.id);
   expect(await proposalState(proposal.id)).toEqual({ status: 'evidence_rejected', promoted_row_num: null });
 }));

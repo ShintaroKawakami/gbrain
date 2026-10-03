@@ -109,7 +109,7 @@ export async function listPendingProposals(
   opts: ListPendingOpts = {},
 ): Promise<TakeProposalRow[]> {
   const limit = Math.max(1, Math.min(500, opts.limit ?? 20));
-  const where = [`status IN ('pending','evidence_pending')`];
+  const where = [`status IN ('pending','evidence_pending','evidence_accepting')`];
   const params: unknown[] = [];
   if (opts.sourceId) {
     params.push(opts.sourceId);

@@ -28,6 +28,7 @@
 ## Migration と production approval
 
 - v184 は upstream commit `109b992172e1f49107f9de9841758c1d043a2668` の `ai/decide/schema.ts` にある RLS helper と `DECIDE_RECEIPTS_SCHEMA_SQL` をそのまま含む。calibration / proposal DDL と AI behavior は含めない。constant の SHA-256 は **`52fbd2953179f3124604362c4c2cd200349d5e45a14bc5866a41fafe537fd9bb`**（upstream full file ではなく、この migration 内の評価済み `DECIDE_RECEIPTS_SCHEMA_SQL` template value の hash）。
+- migration ledger は整数の version だけを記録するため、独自 migration だけで v184 を使うと upstream の v184 receipt DDL が適用済みと判定されて飛ばされる。後続 upstream migration との互換性を保つため、元の receipt DDL を変更せず v184 に含める。
 - 同じ v184 transaction で entityless 用 `take_proposals.evidence` 列と `evidence_*` status を追加する。receipt schema は `decision_receipts` / `decide_spend` / `decide_state` の3 table と4 index。元 fact や既存 proposal status は書き換えない。
 - production rollout には v184 の combined DDL（receipt tables / indexes と entityless evidence column / statuses）への明示承認が必要。per-source config opt-in は別の判断で、migration だけでは producer は動かない。production migration、activation、accept、private evidence の publication はこの準備では行わない。
 - rollback は対象 source の config key を先に unset して新規 producer を止め、その後に旧 code へ戻す。旧 v0.60.25.0 acceptance case の fixture では `evidence_*` status が fail closed することを個別に確認するが、旧 binary / daemon 全体の rollback は保証しない。down migration、schema downgrade、proposal status の書き換えはしない。既存 evidence は保持する。
