@@ -92,3 +92,22 @@ evidence 列・status CHECK を勝手に削除せず、未確認候補を旧 pen
 - 自動 take 化の旧試作は未採用。専用 branch の WIP `8b9e087cc` に隔離し、この案へ混ぜない。
 - pending 案のコード・migration は専用 worker worktree で準備中。本番には未適用。
 - この文書は要件と承認境界の正本となるレビュー用資料。実装完了や本番改善を意味しない。
+
+## 保管先と稼働版の照合（2026-10-04）
+
+本人所有 fork `ShintaroKawakami/gbrain` の既存 `deploy/v0.60.25.0-jtt` を PR の base とする。
+base は `7cb8d4e6de3bc61a0f08722bc1c8073f1be87a26`。upstream v0.60.25.0 に既存の5修正を重ねた版であり、
+古い v0.47.9.0 の default `master` へアップグレードを混ぜない。今回の feature は既存5修正を維持する。
+
+Mac mini checkout の branch/head はこの base と一致した。稼働インストールの `src/cli.ts`、
+`src/mcp/dispatch.ts`、`src/core/engine-sql/links.ts`、`src/core/link-extraction.ts`、
+`src/core/pglite-engine.ts`、`src/core/postgres-engine.ts` の SHA-256 も base と6件とも一致した。
+
+stable Hub と Mac mini の `mac-mini-mcp-autodeploy.sh` は現時点で `GBRAIN_REPO_BRANCH="master"` を固定し、
+配備時に `apply-migrations --yes --non-interactive` を実行する。webhook の対象 branch も master。
+この経路で deploy branch の merge が直接配備を起こす証拠はないが、他の自動更新経路まで否定できていないため、
+本番移行の承認前は fork 内の draft PR までとし、deploy branch への merge は保留する。
+
+実 Postgres の既存隔離 fixture は `test/helpers/persistence-postgres.ts`。
+Studio の既存 PostgreSQL 15 は vector extension がなく、Docker daemon も停止していた。
+本番 DSN は使わず、依存・常駐サービスも追加しない。実 Postgres の row-lock/publication race 試験は未実施と区別する。
