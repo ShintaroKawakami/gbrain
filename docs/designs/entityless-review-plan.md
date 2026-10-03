@@ -1,6 +1,6 @@
 # 名前を割り当てず、記憶を確認待ちへ整理する
 
-2026-10-04 / 実装・本番適用前の確定要件
+2026-10-04 / 本番適用前のレビュー用資料
 
 ## 推奨
 
@@ -11,6 +11,10 @@ private の候補は local CLI の確認用にとどめ、採用して take に�
 
 この案で実現するのは「夜間の候補整理と、根拠を見た採否」であり、無人で事実を確定することではない。
 private facts を ChatGPT から読めるようにする変更は含まない。
+
+本番反映では、evidence 列・4状態の追加に加え、将来の上流更新を壊さないため
+上流184の3空テーブル・4 index・条件付きRLSも同時に適用する。
+対象は `shintaro-gbrain`、新しい整理先案は `notes/memory-review`。本番移行・ページ作成・有効化は未実行。
 
 ## なぜ自動確定しないか
 
@@ -30,7 +34,9 @@ private facts を ChatGPT から読めるようにする変更は含まない。
    新版だけが根拠を再検証して既存の take 書込へ渡す。旧 consumer は未知 kind として拒否する。
    普通の `takes_add` に無視される追加 field を付けるだけの実装にはしない。
 
-schema の正本と登録・両 engine 用生成物は既存 generator で揃える。本番 migration は別承認。
+schema の正本と登録・両 engine 用生成物は既存 generator で揃える。
+同じ184 migrationに上流の `decision_receipts` / `decide_spend` / `decide_state` を含める。
+3空テーブル・4 index・条件付きRLSの追加も本番承認の範囲とする。詳しい理由と出典は後述。
 
 ## 起動と候補の扱い
 
@@ -77,21 +83,21 @@ take.visibility の新設や既存 page の opt-out 変更は、今回の推奨�
 
 ## 本人に承認いただく最後の変更
 
-コード・合成試験・レビューを完了した後に、(1) evidence 列と新 status の本番 migration、(2) 対象 source と明示整理先、(3) default-off 機能の有効化を提示する。
+コード・合成試験・レビューを完了した後に、次の3点をまとめて提示する。
+
+1. evidence 列・4状態と、上流184互換の3空テーブル・4 index・条件付きRLSを含む本番 migration。
+2. `shintaro-gbrain` の専用整理先 `notes/memory-review` の作成。同名ページがlocalに存在すれば上書きしない。
+3. source incarnationを指定した既存configの設定による夜間候補生成の有効化。自動採用はしない。
+
 既存 facts の一括分類、公開範囲の変更、owner claim は含めない。
 
 ## 止め方と戻し方
 
-入口を無効にして新候補作成を止める。進行中の publication を確認し、既存の処理手順で安全に収束させる。
-旧版へ戻しても新 status と新 intent kind を拒否することを fixture で証明してから戻す。
+最初に対象sourceのconfig keyをunsetし、新候補作成を止める。進行中の publication を確認し、既存の処理手順で安全に収束させる。
+旧版の実関数は新 status と新 intent kind を拒否することを確認する。
+これは旧consumer daemon全体の再起動や全面rollbackの保証とは区別する。
 evidence 列・status CHECK を勝手に削除せず、未確認候補を旧 pending に変換しない。
 元 facts は不変なので復元移行は不要。採用済み take を戻す必要がある場合は、その個別の採否として扱い、元の記憶を削除しない。
-
-## 現在の成果の扱い
-
-- 自動 take 化の旧試作は未採用。専用 branch の WIP `8b9e087cc` に隔離し、この案へ混ぜない。
-- pending 案のコード・migration は専用 worker worktree で準備中。本番には未適用。
-- この文書は要件と承認境界の正本となるレビュー用資料。実装完了や本番改善を意味しない。
 
 ## 保管先と稼働版の照合（2026-10-04）
 
@@ -115,29 +121,16 @@ Studio の PostgreSQL 15 は vector extension がなく、default Docker daemon 
 本番 DSN は未使用。既存 base の `managed-maintenance.test.ts` はこの実 Postgres で21件成功、0件失敗。
 変更後の row-lock/publication race の結果とは区別し、検証終了時にはこの一時 container を削除する。
 
-## 途中版の独立検証（完成判定ではない）
+## 検証結果と残っている確認
 
-統合 commit `43e55c816` で、新規2ファイルと既存4ファイルを同一 Bun process で実行した。
-隔離した HOME / GBRAIN_HOME と TMPDIR=/tmp では49件中48件成功、1件失敗（345 assertions、40.17秒）。
-失敗は合成 fixture が `fact_withdrawals` に存在しない `id` をSELECTしたもの。追補で修正する。
-MCP実行時にあった19件のEPERMはこの条件では再現しなかったが、ambient HOMEとの違いの原因は未確定。
-最終 commit で新旧まとめ試験をやり直すまで完成とはしない。
+`0c54e699d` では、隔離HOMEで新旧9ファイル99件が成功し、実PostgreSQL16では採用・migration・既存maintenanceの32件が成功した。
+型検査とschema/registry生成物の鮮度確認も成功。実際の上流185/186 DDLを適用して根拠を保持する試験を含む。
+同じheadの旧版実関数16ケースはPGLite/実PostgreSQL双方で採用拒否・旧一覧0件・新規take/request0件を確認した。
+旧版consumer daemon全体の再起動試験とは区別する。
 
-旧版互換は手書きの条件式fixtureと分けて確認した。実際の v0.60.25.0
-(`a4c5ea3c99d41fa601f48c0cc5d73b4adea3b873`) の `acceptProposal`、`listPendingProposals`、
-`prepareMaintenanceMutation` を新schema184の合成PGLiteへ直接接続した。
-world/private × 新status4種 × receipt有無の16ケースで旧acceptは全件拒否し、旧一覧には0件、
-新intentは `Unsupported maintenance request` で拒否した。takes と persistence_requests の新規行は0件。
-これは旧版の実関数を使った証明であり、旧consumer daemon全体の再起動試験とは区別する。
-
-同じ旧版の実関数を隔離 PostgreSQL 16 にも接続し、上記16ケースの拒否、旧一覧0件、
-未知intent拒否、takes/persistence_requests追加0件を確認した。最終変更後には再確認する。
-
-追補 worker `875545e8-d81c-49a6-b6eb-cf3581c59bc6` は一時ディレクトリ作成のエラー文字列を
-パスとして扱い、worktree 内に Bun cache 100ファイルを作ったため、binary_changed_file gate で失敗した。
-その cache は repo 外へ証拠として移し、コード9ファイルだけを WIP `5281cdec7` に保全した。
-統合 `db344b8e9` の隔離 HOME での新3＋既存4ファイル同時試験は55件成功、1件失敗、432 assertions。
-残る失敗は source incarnation を直接変更する合成fixtureの外部キー制約違反であり、試験成功とは扱わない。
+全体レビューでREALの丸めと既存2件候補の再生成に問題を見つけ、補修中。
+最終headで関係試験・全体レビュー・実装監査を揃えるまで完成とはしない。
+worker内の環境では既存19件がEPERMで失敗した。成功したhost隔離試験と区別し、未実施を成功扱いしない。
 
 ## 本番反映案の具体化（まだ未実行）
 
