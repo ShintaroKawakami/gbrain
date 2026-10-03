@@ -143,7 +143,7 @@ test('entityless review stays source-scoped, visibility-separated and outside no
   expect(await factBytes()).toBe(beforeFacts);
 }));
 
-test('entityless candidates enforce age and the 100-fact evidence bound without paid inference', async () => isolated(async () => {
+test('entityless candidates enforce age and balance evidence groups above the 100-fact bound', async () => isolated(async () => {
   for (let index = 0; index < 3; index++) {
     await seedFact({ text: `recent synthetic fact ${index}`, validFrom: recentTimestamp() });
   }
@@ -155,43 +155,66 @@ test('entityless candidates enforce age and the 100-fact evidence bound without 
     await seedFact({ text: `bounded synthetic fact ${index}` });
   }
   const bounded = await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/missing-target' });
-  expect(bounded.details.entityless_proposals_created).toBe(1);
+  expect(bounded.details.entityless_proposals_created).toBe(2);
   const proposals = await engine.executeRaw<{ id: number; evidence: unknown }>(
     "SELECT id,evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1' ORDER BY id");
-  expect(proposals).toHaveLength(1);
-  const evidence = readEvidence(proposals[0]!.evidence);
-  expect((evidence.facts as unknown[]).length).toBe(100);
-  expect((evidence.target as Record<string, unknown>).revision).toBeNull();
+  expect(proposals).toHaveLength(2);
+  const evidenceGroups = proposals.map(proposal => readEvidence(proposal.evidence));
+  expect(evidenceGroups.map(evidence => (evidence.facts as unknown[]).length)).toEqual([52, 51]);
+  expect(evidenceGroups.every(evidence => (evidence.target as Record<string, unknown>).revision === null)).toBe(true);
+  const proposedIds = evidenceGroups.flatMap(evidence =>
+    (evidence.facts as Array<Record<string, unknown>>).map(fact => Number(fact.id))).sort((a, b) => a - b);
+  const allFactIds = (await engine.executeRaw<{ id: number }>('SELECT id FROM facts ORDER BY id')).map(fact => Number(fact.id));
+  expect(proposedIds).toEqual(allFactIds);
   expect(await engine.executeRaw("SELECT id FROM pages WHERE source_id='default' AND slug='notes/missing-target'")).toHaveLength(0);
 
-  const remaining = await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/missing-target' });
-  expect(remaining.details.entityless_proposals_created).toBe(1);
-  const secondPass = await engine.executeRaw<{ evidence: unknown }>(
-    "SELECT evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1' ORDER BY id");
-  expect(secondPass).toHaveLength(2);
-  expect((readEvidence(secondPass[1]!.evidence).facts as unknown[]).length).toBe(3);
-  const complete = await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/missing-target' });
-  expect(complete.details.entityless_proposals_created).toBe(0);
+  const complete = await produceEntitylessFactProposals(engine, { sourceId: 'default', targetSlug: 'notes/missing-target' });
+  expect(complete).toEqual({ scanned: 0, inserted: 0, clusters: 0 });
   expect(await engine.executeRaw("SELECT id FROM take_proposals WHERE prompt_version='entityless-fact-review-v1'")).toHaveLength(2);
 }));
 
-test('keyset scan advances past the first 100 unclusterable facts to a later embedded group', async () => isolated(async () => {
-  for (let index = 0; index < 100; index++) {
-    await seedFact({ text: `unembedded singleton ${index}`, embedding: null });
-  }
-  for (let index = 0; index < 3; index++) {
-    await seedFact({ text: `later embedded cluster ${index}` });
-  }
+test('keyset batches keep 99 singleton plus 3 similar facts together across the boundary', async () => isolated(async () => {
+  for (const singletonCount of [99, 100]) {
+    if (singletonCount > 99) await resetPgliteState(engine);
+    const singletonIds: number[] = [];
+    for (let index = 0; index < singletonCount; index++) {
+      singletonIds.push(await seedFact({ text: `unembedded singleton ${singletonCount}-${index}`, embedding: null }));
+    }
+    const clusterIds: number[] = [];
+    for (let index = 0; index < 3; index++) {
+      clusterIds.push(await seedFact({ text: `later embedded cluster ${singletonCount}-${index}` }));
+    }
 
-  const result = await produceEntitylessFactProposals(engine, { sourceId: 'default', targetSlug: 'notes/later-group' });
-  expect(result.scanned).toBe(103);
-  expect(result.inserted).toBe(1);
-  const [proposal] = await engine.executeRaw<{ evidence: unknown }>(
-    "SELECT evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1'");
-  const evidence = readEvidence(proposal!.evidence);
-  expect((evidence.facts as Array<Record<string, unknown>>).map(fact => fact.fact))
-    .toEqual(['later embedded cluster 0', 'later embedded cluster 1', 'later embedded cluster 2']);
-  expect(await engine.executeRaw("SELECT id FROM take_proposals WHERE prompt_version='entityless-fact-review-v1'")).toHaveLength(1);
+    const result = await produceEntitylessFactProposals(engine, {
+      sourceId: 'default', targetSlug: `notes/later-group-${singletonCount}`,
+    });
+    expect(result).toEqual({ scanned: singletonCount + 3, inserted: 1, clusters: 1 });
+    const [proposal] = await engine.executeRaw<{ evidence: unknown }>(
+      "SELECT evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1'");
+    const evidence = readEvidence(proposal!.evidence);
+    const proposedIds = (evidence.facts as Array<Record<string, unknown>>).map(fact => Number(fact.id));
+    expect(proposedIds).toEqual(clusterIds);
+    expect(proposedIds.some(id => singletonIds.includes(id))).toBe(false);
+  }
+}));
+
+test('a 101-fact candidate cluster is fully covered by balanced evidence groups', async () => isolated(async () => {
+  for (let index = 0; index < 101; index++) await seedFact({ text: `101-fact synthetic claim ${index}` });
+
+  const result = await produceEntitylessFactProposals(engine, { sourceId: 'default', targetSlug: 'notes/101-facts' });
+  expect(result).toEqual({ scanned: 101, inserted: 2, clusters: 2 });
+  const proposals = await engine.executeRaw<{ evidence: unknown }>(
+    "SELECT evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1' ORDER BY id");
+  expect(proposals).toHaveLength(2);
+  const evidenceGroups = proposals.map(proposal => readEvidence(proposal.evidence));
+  expect(evidenceGroups.map(evidence => (evidence.facts as unknown[]).length)).toEqual([51, 50]);
+  const proposedIds = evidenceGroups.flatMap(evidence =>
+    (evidence.facts as Array<Record<string, unknown>>).map(fact => Number(fact.id))).sort((a, b) => a - b);
+  const allFactIds = (await engine.executeRaw<{ id: number }>('SELECT id FROM facts ORDER BY id')).map(fact => Number(fact.id));
+  expect(proposedIds).toEqual(allFactIds);
+
+  expect(await produceEntitylessFactProposals(engine, { sourceId: 'default', targetSlug: 'notes/101-facts' }))
+    .toEqual({ scanned: 0, inserted: 0, clusters: 0 });
 }));
 
 test('unchanged rejected and accepted evidence stays covered while a changed fact regenerates its original group', async () => isolated(async () => {

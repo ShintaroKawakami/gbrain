@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runDream } from '../src/commands/dream.ts';
+import { validateCommandFlags } from '../src/cli.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -74,6 +75,15 @@ async function expectUsageError(args: string[]): Promise<void> {
     error.mockRestore();
   }
 }
+
+test('top-level dream flag validation accepts an explicit entityless target and rejects a typo', () => {
+  expect(validateCommandFlags('dream', [
+    '--phase', 'consolidate', '--source', 'default', '--entityless-proposal-target', 'notes/cli-target',
+  ])).toBeNull();
+  expect(validateCommandFlags('dream', [
+    '--phase', 'consolidate', '--source', 'default', '--entityless-proposal-targett', 'notes/cli-target',
+  ])).toBe('--entityless-proposal-targett');
+});
 
 test('entityless proposal scope errors abort before phase writes, even with an implicit source environment', async () => isolated(async () => {
   const beforeFacts = await seedFacts();
