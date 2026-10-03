@@ -79,7 +79,7 @@ export async function assertEntitylessProposalCurrent(
   }
   if (proposal.source_id !== evidence.source_id || proposal.page_slug !== evidence.target.slug
     || proposal.claim_text !== evidence.candidate.claim_text || proposal.kind !== 'fact' || proposal.holder !== 'self'
-    || Math.abs(Number(proposal.weight) - evidence.candidate.weight) > 1e-8) throw invalidEvidence();
+    || Math.fround(Number(proposal.weight)) !== Math.fround(evidence.candidate.weight)) throw invalidEvidence();
   if (!evidence.target.revision || !evidence.target.page_id) {
     throw new OperationError('page_not_found', 'target_not_ready: create the explicit target page, then run a fresh review proposal.');
   }

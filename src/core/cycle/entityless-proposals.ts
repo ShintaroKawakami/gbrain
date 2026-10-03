@@ -98,9 +98,22 @@ export interface EntitylessProposalResult {
   clusters: number;
 }
 
+interface ExistingProposalState {
+  coveredFactIds: number[];
+  reviewedTwoFactGroups: Set<string>;
+}
+
 /**
  * Create local review rows only. Similarity forms candidate groups; it never
  * grants these facts a shared subject or authority to rewrite the fact rows.
+ *
+ * [2026-10-04][fix] CaD: Fix float4 weight comparison and refresh a previously
+ * evidenced two-fact identity at the current target revision, including after
+ * a member changes; new groups still need three facts. Source/incarnation, snapshot and revision
+ * guards remain; private/finite-TTL evidence cannot publish and original facts
+ * stay unchanged. No guessed person or automatic fact rewrite; evidence_* stays
+ * fail-closed to old binaries.
+ * Rejected: a wide epsilon or global threshold/revision-guard relaxation.
  */
 export async function produceEntitylessFactProposals(
   engine: BrainEngine,
@@ -121,7 +134,7 @@ export async function produceEntitylessFactProposals(
     page_id: Number(targetSnapshot.page.id),
     revision: targetSnapshot.revision,
   } : { slug: targetSlug, page_id: null, revision: null };
-  const coveredFactIds = await unchangedProposalFactIds(engine, sourceId, source.incarnation, target);
+  const proposalState = await readExistingProposalState(engine, sourceId, source.incarnation, target);
 
   const now = (options.now ?? new Date()).getTime();
   let inserted = 0;
@@ -145,7 +158,7 @@ export async function produceEntitylessFactProposals(
         AND id <> ALL($2::integer[])
         AND ($3::timestamptz IS NULL OR (valid_from,id)>($3::timestamptz,$4::bigint))
       ORDER BY valid_from ASC,id ASC LIMIT $5`,
-    [sourceId, coveredFactIds, afterValidFrom, afterId, ENTITYLESS_PROPOSAL_MAX_FACTS]);
+    [sourceId, proposalState.coveredFactIds, afterValidFrom, afterId, ENTITYLESS_PROPOSAL_MAX_FACTS]);
     if (rows.length === 0) break;
     scanned += rows.length;
     const last: RawEntitylessFact & { scan_cursor: string } = rows[rows.length - 1]!;
@@ -161,13 +174,15 @@ export async function produceEntitylessFactProposals(
 
   for (const visibility of ['world', 'private'] as const) {
     const group = byVisibility[visibility];
-    if (group.length < MIN_FACTS) continue;
+    if (group.length < 2) continue;
     const oldest = group.reduce((min, fact) => Math.min(min, fact.valid_from.getTime()), Number.POSITIVE_INFINITY);
     if (now - oldest < MIN_OLDEST_AGE_MS) continue;
 
     for (const cluster of clusterEntitylessFacts(group)) {
       if (cluster.length < 2) continue;
       for (const evidenceGroup of splitCandidateCluster(cluster)) {
+        if (group.length < MIN_FACTS && (evidenceGroup.length !== 2
+          || !proposalState.reviewedTwoFactGroups.has(evidenceFactsIdentity(evidenceGroup.map(snapshotFact), visibility)))) continue;
         clusters += 1;
         const best = [...evidenceGroup].sort((a, b) => b.confidence - a.confidence || a.id - b.id)[0]!;
         const weight = clamp01(evidenceGroup.reduce((sum, fact) => sum + fact.confidence, 0) / evidenceGroup.length);
@@ -205,12 +220,12 @@ export async function produceEntitylessFactProposals(
  * unchanged facts covered even after that target changes. A changed member
  * brings the full original group back into the next scan window.
  */
-async function unchangedProposalFactIds(
+async function readExistingProposalState(
   engine: BrainEngine,
   sourceId: string,
   sourceIncarnation: string,
   target: EntitylessProposalEvidenceV1['target'],
-): Promise<number[]> {
+): Promise<ExistingProposalState> {
   const priorRows = await engine.executeRaw<{ evidence: unknown; status: string }>(`SELECT evidence,status FROM take_proposals
     WHERE source_id=$1 AND page_slug=$2 AND prompt_version=$3 AND domain='entityless-review'
       AND evidence IS NOT NULL
@@ -221,12 +236,11 @@ async function unchangedProposalFactIds(
       const evidence = row.evidence;
       if (evidence === null || evidence.source_id !== sourceId || evidence.source_incarnation !== sourceIncarnation
         || evidence.target.slug !== target.slug) return false;
-      if (row.status === 'evidence_accepted' || row.status === 'evidence_rejected') return true;
-      return evidence.target.page_id === target.page_id && evidence.target.revision === target.revision;
-    }).map(row => row.evidence);
-  if (evidenceRows.length === 0) return [];
+      return true;
+    });
+  if (evidenceRows.length === 0) return { coveredFactIds: [], reviewedTwoFactGroups: new Set() };
 
-  const ids = Array.from(new Set(evidenceRows.flatMap(evidence => evidence.facts.map(fact => fact.id)))).sort((a, b) => a - b);
+  const ids = Array.from(new Set(evidenceRows.flatMap(row => row.evidence.facts.map(fact => fact.id)))).sort((a, b) => a - b);
   const current = new Map<number, FactEvidenceSnapshot>();
   for (let start = 0; start < ids.length; start += ENTITYLESS_PROPOSAL_MAX_FACTS) {
     const batch = ids.slice(start, start + ENTITYLESS_PROPOSAL_MAX_FACTS);
@@ -239,13 +253,26 @@ async function unchangedProposalFactIds(
   }
 
   const covered = new Set<number>();
-  for (const evidence of evidenceRows) {
+  const reviewedTwoFactGroups = new Set<string>();
+  for (const { status, evidence } of evidenceRows) {
     const expected = [...evidence.facts].sort((a, b) => a.id - b.id);
+    if (expected.length === 2 && (evidence.visibility === 'world' || evidence.visibility === 'private')) {
+      reviewedTwoFactGroups.add(evidenceFactsIdentity(expected, evidence.visibility));
+    }
     const actual = expected.map(fact => current.get(fact.id));
     if (actual.some(fact => fact === undefined)) continue;
-    if (stableJson(actual) === stableJson(expected)) for (const fact of expected) covered.add(fact.id);
+    if (stableJson(actual) !== stableJson(expected)) continue;
+
+    const targetCurrent = evidence.target.page_id === target.page_id && evidence.target.revision === target.revision;
+    if (status === 'evidence_accepted' || status === 'evidence_rejected' || targetCurrent) {
+      for (const fact of expected) covered.add(fact.id);
+    }
   }
-  return [...covered].sort((a, b) => a - b);
+  return { coveredFactIds: [...covered].sort((a, b) => a - b), reviewedTwoFactGroups };
+}
+
+function evidenceFactsIdentity(facts: FactEvidenceSnapshot[], visibility: EntitylessProposalEvidenceV1['visibility']): string {
+  return stableJson({ visibility, fact_ids: facts.map(fact => fact.id).sort((a, b) => a - b) });
 }
 
 function storedEvidence(value: unknown): EntitylessProposalEvidenceV1 | null {
