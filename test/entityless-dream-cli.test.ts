@@ -126,3 +126,60 @@ test('omitting the proposal flag keeps consolidate behavior unchanged', async ()
   await runDream(engine, ['--dir', brainDir, '--phase', 'consolidate', '--source', 'default', '--json']);
   expect(await proposalCount()).toBe(0);
 }));
+
+test('nightly source config opts in only for an explicit source and the CLI target takes precedence', async () => isolated(async () => {
+  await seedFacts();
+  const [source] = await engine.executeRaw<{ incarnation: string }>("SELECT incarnation FROM sources WHERE id='default'");
+  const key = 'dream.consolidate.entityless.default';
+  await engine.setConfig(key, JSON.stringify({ source_incarnation: source!.incarnation, target_slug: 'notes/nightly-target' }));
+
+  await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
+    await runDream(engine, ['--dir', brainDir, '--phase', 'consolidate', '--json']);
+    expect(await proposalCount()).toBe(0);
+  });
+
+  const configured = await runDream(engine, ['--dir', brainDir, '--phase', 'consolidate', '--source', 'default', '--json']);
+  expect(configured?.phases[0]?.details.entityless_proposals_created).toBe(1);
+  const [nightlyProposal] = await engine.executeRaw<{ page_slug: string }>(
+    "SELECT page_slug FROM take_proposals WHERE prompt_version='entityless-fact-review-v1'");
+  expect(nightlyProposal?.page_slug).toBe('notes/nightly-target');
+
+  await resetPgliteState(engine);
+  await seedFacts();
+  await engine.setConfig(key, '{"source_incarnation":"stale","target_slug":"notes/ignored-config"}');
+  const overridden = await runDream(engine, ['--dir', brainDir, '--phase', 'consolidate', '--source', 'default',
+    '--entityless-proposal-target', 'notes/cli-override', '--json']);
+  expect(overridden?.phases[0]?.details.entityless_proposals_created).toBe(1);
+  const [overrideProposal] = await engine.executeRaw<{ page_slug: string }>(
+    "SELECT page_slug FROM take_proposals WHERE prompt_version='entityless-fact-review-v1'");
+  expect(overrideProposal?.page_slug).toBe('notes/cli-override');
+}));
+
+test('malformed or stale nightly config fails before proposal or fact writes', async () => isolated(async () => {
+  const beforeFacts = await seedFacts();
+  const [source] = await engine.executeRaw<{ incarnation: string }>("SELECT incarnation FROM sources WHERE id='default'");
+  const key = 'dream.consolidate.entityless.default';
+  const invalidConfigs = [
+    JSON.stringify({ source_incarnation: source!.incarnation, target_slug: 'notes/invalid-target', extra: true }),
+    JSON.stringify({ source_incarnation: 'stale-incarnation', target_slug: 'notes/invalid-target' }),
+  ];
+  for (const value of invalidConfigs) {
+    await engine.setConfig(key, value);
+    const exit = spyOn(process, 'exit').mockImplementation((code?: string | number | null) => {
+      throw new Error(`process.exit(${String(code)})`);
+    });
+    const error = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await expect(runDream(engine, ['--dir', brainDir, '--phase', 'consolidate', '--source', 'default', '--json']))
+        .rejects.toThrow('process.exit(1)');
+      expect(exit).toHaveBeenCalledWith(1);
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+    }
+    expect(await proposalCount()).toBe(0);
+    expect(JSON.stringify(await engine.executeRaw(`SELECT id,source_id,entity_slug,fact,valid_from,valid_until,expired_at,
+        superseded_by,consolidated_at,consolidated_into,source_session,confidence,embedding_model,embedded_text_hash
+      FROM facts WHERE source_id='default' ORDER BY id`))).toBe(beforeFacts);
+  }
+}));

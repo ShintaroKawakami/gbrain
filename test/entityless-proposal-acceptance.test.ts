@@ -217,7 +217,8 @@ test('expired, withdrawn, changed or malformed evidence refuses before a take ca
   await engine.setConfig('sync.write_through', 'false');
   await seedTarget();
   const changed = await seedProposal();
-  await engine.executeRaw("UPDATE sources SET incarnation=gen_random_uuid() WHERE id='default'");
+  await engine.executeRaw(`UPDATE take_proposals
+    SET evidence=jsonb_set(evidence,'{source_incarnation}',to_jsonb(gen_random_uuid()::text)) WHERE id=$1`, [changed.id]);
   await expect(acceptProposal(proposalTarget(changed), changed.id)).rejects.toThrow('source incarnation changed');
   expect(await proposalState(changed.id)).toEqual({ status: 'evidence_pending', promoted_row_num: null });
 
@@ -257,6 +258,51 @@ test('TTL drift after durable admission is rejected by the publication preparer 
   const [receipt] = await engine.executeRaw<{ state: string; intent: Record<string, unknown> }>(
     "SELECT state,intent FROM persistence_requests WHERE intent->>'kind'='managed_maintenance_entityless_proposal_accept'");
   expect(['conflict', 'failed']).toContain(receipt?.state);
+
+  await engine.executeRaw("UPDATE facts SET valid_until=NULL WHERE source='entityless-acceptance' AND source_id='default'");
+  const retriedRowNum = await acceptProposal(proposalTarget(proposal), proposal.id);
+  expect(retriedRowNum.rowNum).toBeGreaterThan(0);
+  expect(await proposalState(proposal.id)).toEqual({ status: 'evidence_accepted', promoted_row_num: retriedRowNum.rowNum });
+  expect(await engine.listTakes({ page_slug: proposal.page_slug })).toHaveLength(1);
+  const requests = await engine.executeRaw<{ state: string }>(`SELECT state FROM persistence_requests
+    WHERE intent->>'kind'='managed_maintenance_entityless_proposal_accept' ORDER BY created_at,id`);
+  expect(requests).toHaveLength(2);
+  expect(['conflict', 'failed']).toContain(requests[0]!.state);
+  expect(requests[1]!.state).toBe('committed');
+}));
+
+test('an unreadable maintenance receipt keeps an accepting proposal claimed until its state is known', async () => isolated(async () => {
+  await engine.setConfig('sync.write_through', 'false');
+  await seedTarget();
+  const proposal = await seedProposal();
+  const evidence = evidenceOf(proposal);
+  await engine.executeRaw("UPDATE take_proposals SET status='evidence_accepting',evidence=jsonb_set(evidence,'{source_incarnation}',to_jsonb(gen_random_uuid()::text)) WHERE id=$1",
+    [proposal.id]);
+
+  const unreadableEngine = new Proxy(engine, {
+    get(target, property) {
+      if (property === 'executeRaw') {
+        return async (sql: string, params?: unknown[]) => {
+          if (sql.replace(/\s+/g, ' ').trim().startsWith('SELECT state FROM persistence_requests')) {
+            throw new Error('synthetic receipt read failure');
+          }
+          return target.executeRaw(sql, params);
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as unknown as BrainEngine;
+
+  await expect(acceptProposal({ ...proposalTarget(proposal), engine: unreadableEngine }, proposal.id))
+    .rejects.toMatchObject({ code: 'review_refused' });
+  expect(await proposalState(proposal.id)).toEqual({ status: 'evidence_accepting', promoted_row_num: null });
+
+  await engine.executeRaw('UPDATE take_proposals SET evidence=$2::text::jsonb WHERE id=$1', [proposal.id, JSON.stringify(evidence)]);
+  const retried = await acceptProposal(proposalTarget(proposal), proposal.id);
+  expect(retried.rowNum).toBeGreaterThan(0);
+  expect(await proposalState(proposal.id)).toEqual({ status: 'evidence_accepted', promoted_row_num: retried.rowNum });
+  expect(await engine.listTakes({ page_slug: proposal.page_slug })).toHaveLength(1);
 }));
 
 test('future-valid and superseded facts cannot be published even when proposal evidence matches their current rows', async () => isolated(async () => {

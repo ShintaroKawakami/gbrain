@@ -123,67 +123,89 @@ export async function produceEntitylessFactProposals(
   } : { slug: targetSlug, page_id: null, revision: null };
   const coveredFactIds = await unchangedProposalFactIds(engine, sourceId, source.incarnation, target);
 
-  const rows = await engine.executeRaw<RawEntitylessFact>(`SELECT id,source_id,entity_slug,fact,kind,visibility,notability,context,
-      valid_from,valid_until,expired_at,superseded_by,consolidated_at,consolidated_into,source,source_session,confidence,
-      embedding::text AS embedding,embedding_model,embedded_text_hash,embedded_at,created_at,source_markdown_slug,row_num,
-      claim_metric,claim_value,claim_unit,claim_period,event_type,dimension,value,dim_status
-    FROM facts
-    WHERE source_id=$1 AND entity_slug IS NULL AND expired_at IS NULL AND consolidated_at IS NULL
-      AND superseded_by IS NULL AND valid_from<=now()
-      AND (valid_until IS NULL OR valid_until>now()) AND visibility IN ('world','private')
-      AND id <> ALL($2::integer[])
-    ORDER BY valid_from ASC,id ASC LIMIT $3`, [sourceId, coveredFactIds, ENTITYLESS_PROPOSAL_MAX_FACTS]);
-  const facts = rows.map(normalizeRawFact);
-  const byVisibility: Record<'world' | 'private', FactRow[]> = { world: [], private: [] };
-  for (const fact of facts) byVisibility[fact.visibility].push(fact);
-
   const now = (options.now ?? new Date()).getTime();
   let inserted = 0;
   let clusters = 0;
 
-  for (const visibility of ['world', 'private'] as const) {
-    const group = byVisibility[visibility];
-    if (group.length < MIN_FACTS) continue;
-    const oldest = group.reduce((min, fact) => Math.min(min, fact.valid_from.getTime()), Number.POSITIVE_INFINITY);
-    if (now - oldest < MIN_OLDEST_AGE_MS) continue;
+  let afterValidFrom: string | null = null;
+  let afterId = 0;
+  let scanned = 0;
+  for (;;) {
+    const rows: Array<RawEntitylessFact & { scan_cursor: string }> = await engine.executeRaw<RawEntitylessFact & { scan_cursor: string }>(`SELECT id,source_id,entity_slug,fact,kind,visibility,notability,context,
+        valid_from,valid_from::text AS scan_cursor,valid_until,expired_at,superseded_by,consolidated_at,consolidated_into,source,source_session,confidence,
+        embedding::text AS embedding,embedding_model,embedded_text_hash,embedded_at,created_at,source_markdown_slug,row_num,
+        claim_metric,claim_value,claim_unit,claim_period,event_type,dimension,value,dim_status
+      FROM facts
+      WHERE source_id=$1 AND entity_slug IS NULL AND expired_at IS NULL AND consolidated_at IS NULL
+        AND superseded_by IS NULL AND valid_from<=now()
+        AND (valid_until IS NULL OR valid_until>now()) AND visibility IN ('world','private')
+        AND id <> ALL($2::integer[])
+        AND ($3::timestamptz IS NULL OR (valid_from,id)>($3::timestamptz,$4::bigint))
+      ORDER BY valid_from ASC,id ASC LIMIT $5`,
+    [sourceId, coveredFactIds, afterValidFrom, afterId, ENTITYLESS_PROPOSAL_MAX_FACTS]);
+    if (rows.length === 0) break;
+    scanned += rows.length;
+    const last: RawEntitylessFact & { scan_cursor: string } = rows[rows.length - 1]!;
+    afterValidFrom = last.scan_cursor;
+    afterId = Number(last.id);
 
-    for (const cluster of clusterEntitylessFacts(group)) {
-      if (cluster.length < 2) continue;
-      clusters += 1;
-      const best = [...cluster].sort((a, b) => b.confidence - a.confidence || a.id - b.id)[0]!;
-      const weight = clamp01(cluster.reduce((sum, fact) => sum + fact.confidence, 0) / cluster.length);
-      const since = new Date(Math.min(...cluster.map(fact => fact.valid_from.getTime()))).toISOString().slice(0, 10);
-      const evidence: EntitylessProposalEvidenceV1 = {
-        version: 1,
-        reason: 'subject_unknown',
-        contradictions: 'unverified',
-        source_id: sourceId,
-        source_incarnation: source.incarnation,
-        target,
-        visibility,
-        candidate: { claim_text: best.fact, kind: 'fact', holder: 'self', weight, since },
-        facts: cluster.map(snapshotFact).sort((a, b) => a.id - b.id),
-      };
-      const contentHash = sha256(stableJson(evidence));
-      const runId = `entityless-${contentHash.slice(0, 40)}`;
-      const result = await engine.executeRaw<{ id: number }>(`INSERT INTO take_proposals
-          (source_id,page_slug,content_hash,prompt_version,proposal_run_id,status,claim_text,kind,holder,weight,domain,
-           model_id,evidence)
-        VALUES ($1,$2,$3,$4,$5,'evidence_pending',$6,'fact','self',$7,'entityless-review',$8,$9::text::jsonb)
-        ON CONFLICT (source_id,page_slug,content_hash,prompt_version,md5(claim_text)) DO NOTHING
-        RETURNING id`, [sourceId, targetSlug, contentHash, ENTITYLESS_PROPOSAL_PROMPT_VERSION, runId,
-        evidence.candidate.claim_text, evidence.candidate.weight, ENTITYLESS_PROPOSAL_MODEL_ID, JSON.stringify(evidence)]);
-      if (result.length) inserted += 1;
+    const byVisibility: Record<'world' | 'private', FactRow[]> = { world: [], private: [] };
+    for (const row of rows) {
+      const fact = normalizeRawFact(row);
+      byVisibility[fact.visibility].push(fact);
     }
+
+    let foundCluster = false;
+    for (const visibility of ['world', 'private'] as const) {
+      const group = byVisibility[visibility];
+      if (group.length < MIN_FACTS) continue;
+      const oldest = group.reduce((min, fact) => Math.min(min, fact.valid_from.getTime()), Number.POSITIVE_INFINITY);
+      if (now - oldest < MIN_OLDEST_AGE_MS) continue;
+
+      for (const cluster of clusterEntitylessFacts(group)) {
+        if (cluster.length < 2) continue;
+        foundCluster = true;
+        clusters += 1;
+        const best = [...cluster].sort((a, b) => b.confidence - a.confidence || a.id - b.id)[0]!;
+        const weight = clamp01(cluster.reduce((sum, fact) => sum + fact.confidence, 0) / cluster.length);
+        const since = new Date(Math.min(...cluster.map(fact => fact.valid_from.getTime()))).toISOString().slice(0, 10);
+        const evidence: EntitylessProposalEvidenceV1 = {
+          version: 1,
+          reason: 'subject_unknown',
+          contradictions: 'unverified',
+          source_id: sourceId,
+          source_incarnation: source.incarnation,
+          target,
+          visibility,
+          candidate: { claim_text: best.fact, kind: 'fact', holder: 'self', weight, since },
+          facts: cluster.map(snapshotFact).sort((a, b) => a.id - b.id),
+        };
+        const contentHash = sha256(stableJson(evidence));
+        const runId = `entityless-${contentHash.slice(0, 40)}`;
+        const result = await engine.executeRaw<{ id: number }>(`INSERT INTO take_proposals
+            (source_id,page_slug,content_hash,prompt_version,proposal_run_id,status,claim_text,kind,holder,weight,domain,
+             model_id,evidence)
+          VALUES ($1,$2,$3,$4,$5,'evidence_pending',$6,'fact','self',$7,'entityless-review',$8,$9::text::jsonb)
+          ON CONFLICT (source_id,page_slug,content_hash,prompt_version,md5(claim_text)) DO NOTHING
+          RETURNING id`, [sourceId, targetSlug, contentHash, ENTITYLESS_PROPOSAL_PROMPT_VERSION, runId,
+          evidence.candidate.claim_text, evidence.candidate.weight, ENTITYLESS_PROPOSAL_MODEL_ID, JSON.stringify(evidence)]);
+        if (result.length) inserted += 1;
+      }
+    }
+    // Keep each clustering window (and therefore every proposal's evidence)
+    // within the existing 100-fact bound. Advance by a stable keyset until a
+    // window yields a reviewable cluster, so old singleton rows cannot starve
+    // later embedded facts forever.
+    if (foundCluster || rows.length < ENTITYLESS_PROPOSAL_MAX_FACTS) break;
   }
-  return { scanned: facts.length, inserted, clusters };
+  return { scanned, inserted, clusters };
 }
 
 /**
- * Proposal evidence is the progress record for this bounded producer. Skip a
- * prior group's fact IDs only while the entire evidence snapshot and target
- * revision still match. A changed member therefore brings its original group
- * back into the next 100-fact review window; a new target revision does too.
+ * Proposal evidence is the progress record for this bounded producer. A
+ * pending row is tied to its target revision; accepted and rejected rows keep
+ * unchanged facts covered even after that target changes. A changed member
+ * brings the full original group back into the next scan window.
  */
 async function unchangedProposalFactIds(
   engine: BrainEngine,
@@ -191,15 +213,19 @@ async function unchangedProposalFactIds(
   sourceIncarnation: string,
   target: EntitylessProposalEvidenceV1['target'],
 ): Promise<number[]> {
-  const priorRows = await engine.executeRaw<{ evidence: unknown }>(`SELECT evidence FROM take_proposals
+  const priorRows = await engine.executeRaw<{ evidence: unknown; status: string }>(`SELECT evidence,status FROM take_proposals
     WHERE source_id=$1 AND page_slug=$2 AND prompt_version=$3 AND domain='entityless-review'
       AND evidence IS NOT NULL
       AND status IN ('evidence_pending','evidence_accepting','evidence_accepted','evidence_rejected')
     ORDER BY id`, [sourceId, target.slug, ENTITYLESS_PROPOSAL_PROMPT_VERSION]);
-  const evidenceRows = priorRows.map(row => storedEvidence(row.evidence)).filter((evidence): evidence is EntitylessProposalEvidenceV1 =>
-    evidence !== null && evidence.source_id === sourceId && evidence.source_incarnation === sourceIncarnation
-      && evidence.target.slug === target.slug && evidence.target.page_id === target.page_id
-      && evidence.target.revision === target.revision);
+  const evidenceRows = priorRows.map(row => ({ status: row.status, evidence: storedEvidence(row.evidence) }))
+    .filter((row): row is { status: string; evidence: EntitylessProposalEvidenceV1 } => {
+      const evidence = row.evidence;
+      if (evidence === null || evidence.source_id !== sourceId || evidence.source_incarnation !== sourceIncarnation
+        || evidence.target.slug !== target.slug) return false;
+      if (row.status === 'evidence_accepted' || row.status === 'evidence_rejected') return true;
+      return evidence.target.page_id === target.page_id && evidence.target.revision === target.revision;
+    }).map(row => row.evidence);
   if (evidenceRows.length === 0) return [];
 
   const ids = Array.from(new Set(evidenceRows.flatMap(evidence => evidence.facts.map(fact => fact.id)))).sort((a, b) => a - b);

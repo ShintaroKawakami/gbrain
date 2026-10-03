@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runPhaseConsolidate } from '../src/core/cycle/phases/consolidate.ts';
+import { produceEntitylessFactProposals } from '../src/core/cycle/entityless-proposals.ts';
 import { dispatchToolCall } from '../src/mcp/dispatch.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { stableJson } from '../src/core/persistence/digest.ts';
@@ -56,14 +57,16 @@ async function seedTarget(slug: string, visibility: 'world' | 'private' = 'world
   return { id: Number(snapshot.page.id), revision: snapshot.revision };
 }
 
-async function seedFact(options: { sourceId?: string; text: string; visibility?: 'world' | 'private'; validFrom?: string; session?: string }): Promise<number> {
+async function seedFact(options: { sourceId?: string; text: string; visibility?: 'world' | 'private'; validFrom?: string;
+  session?: string; embedding?: string | null }): Promise<number> {
   const sourceId = options.sourceId ?? 'default';
   const rows = await engine.executeRaw<{ id: number }>(`INSERT INTO facts
       (source_id,entity_slug,fact,kind,visibility,notability,valid_from,source,source_session,confidence,
        embedding,embedded_at,embedding_model,embedded_text_hash)
     VALUES ($1,NULL,$2,'fact',$3,'medium',$4::timestamptz,'entityless-test',$5,0.8,$6::vector,$4::timestamptz,
       'openai:text-embedding-3-large',md5($2)) RETURNING id`,
-  [sourceId, options.text, options.visibility ?? 'world', options.validFrom ?? oldTimestamp(), options.session ?? `session-${options.text}`, unitVector()]);
+  [sourceId, options.text, options.visibility ?? 'world', options.validFrom ?? oldTimestamp(),
+    options.session ?? `session-${options.text}`, options.embedding === undefined ? unitVector() : options.embedding]);
   return Number(rows[0]!.id);
 }
 
@@ -172,6 +175,25 @@ test('entityless candidates enforce age and the 100-fact evidence bound without 
   expect(await engine.executeRaw("SELECT id FROM take_proposals WHERE prompt_version='entityless-fact-review-v1'")).toHaveLength(2);
 }));
 
+test('keyset scan advances past the first 100 unclusterable facts to a later embedded group', async () => isolated(async () => {
+  for (let index = 0; index < 100; index++) {
+    await seedFact({ text: `unembedded singleton ${index}`, embedding: null });
+  }
+  for (let index = 0; index < 3; index++) {
+    await seedFact({ text: `later embedded cluster ${index}` });
+  }
+
+  const result = await produceEntitylessFactProposals(engine, { sourceId: 'default', targetSlug: 'notes/later-group' });
+  expect(result.scanned).toBe(103);
+  expect(result.inserted).toBe(1);
+  const [proposal] = await engine.executeRaw<{ evidence: unknown }>(
+    "SELECT evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1'");
+  const evidence = readEvidence(proposal!.evidence);
+  expect((evidence.facts as Array<Record<string, unknown>>).map(fact => fact.fact))
+    .toEqual(['later embedded cluster 0', 'later embedded cluster 1', 'later embedded cluster 2']);
+  expect(await engine.executeRaw("SELECT id FROM take_proposals WHERE prompt_version='entityless-fact-review-v1'")).toHaveLength(1);
+}));
+
 test('unchanged rejected and accepted evidence stays covered while a changed fact regenerates its original group', async () => isolated(async () => {
   for (let index = 0; index < 3; index++) await seedFact({ text: `reviewed synthetic fact ${index}` });
   const first = await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/review-target' });
@@ -179,6 +201,9 @@ test('unchanged rejected and accepted evidence stays covered while a changed fac
   const [original] = await engine.executeRaw<{ id: number; evidence: unknown }>(
     "SELECT id,evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1'");
   await engine.executeRaw("UPDATE take_proposals SET status='evidence_rejected' WHERE id=$1", [original!.id]);
+  expect((await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/review-target' }))
+    .details.entityless_proposals_created).toBe(0);
+  await seedTarget('notes/review-target');
   expect((await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/review-target' }))
     .details.entityless_proposals_created).toBe(0);
 
@@ -194,6 +219,9 @@ test('unchanged rejected and accepted evidence stays covered while a changed fac
   expect((readEvidence(afterChange[1]!.evidence).facts as Array<Record<string, unknown>>).map(fact => Number(fact.id)))
     .toEqual(originalFacts.map(fact => Number(fact.id)));
   await engine.executeRaw("UPDATE take_proposals SET status='evidence_accepted' WHERE id=$1", [afterChange[1]!.id]);
+  await engine.putPage('notes/review-target', {
+    type: 'note', title: 'Review target', compiled_truth: 'Target page body revised.', frontmatter: {},
+  }, { sourceId: 'default' });
   expect((await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/review-target' }))
     .details.entityless_proposals_created).toBe(0);
   expect(await engine.executeRaw("SELECT id FROM take_proposals WHERE prompt_version='entityless-fact-review-v1'")).toHaveLength(2);

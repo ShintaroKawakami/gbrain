@@ -345,6 +345,41 @@ function parseArgs(args: string[]): DreamArgs {
   };
 }
 
+async function configuredEntitylessProposalTarget(engine: BrainEngine, sourceId: string): Promise<string | undefined> {
+  const key = `dream.consolidate.entityless.${sourceId}`;
+  const raw = await engine.getConfig(key);
+  if (raw === null) return undefined;
+
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    console.error(`[dream] invalid ${key}: expected JSON {"source_incarnation":"...","target_slug":"..."}`);
+    process.exit(1);
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    console.error(`[dream] invalid ${key}: expected an object with exactly source_incarnation and target_slug`);
+    process.exit(1);
+  }
+  const config = value as Record<string, unknown>;
+  const keys = Object.keys(config).sort();
+  if (keys.length !== 2 || keys[0] !== 'source_incarnation' || keys[1] !== 'target_slug'
+    || typeof config.source_incarnation !== 'string' || !config.source_incarnation.trim()
+    || typeof config.target_slug !== 'string' || !config.target_slug.trim()
+    || config.target_slug.trim() === ALL_SOURCES) {
+    console.error(`[dream] invalid ${key}: expected exactly nonblank source_incarnation and target_slug values`);
+    process.exit(1);
+  }
+
+  const [source] = await engine.executeRaw<{ incarnation: string; archived: boolean }>(
+    'SELECT incarnation,archived FROM sources WHERE id=$1', [sourceId]);
+  if (!source || source.archived || config.source_incarnation !== source.incarnation) {
+    console.error(`[dream] invalid ${key}: source incarnation does not match the active source; update or unset the config key`);
+    process.exit(1);
+  }
+  return config.target_slug.trim();
+}
+
 /**
  * Resolve the brain directory without the `findRepoRoot` footgun.
  *
@@ -473,6 +508,9 @@ Options:
   --entityless-proposal-target <slug>
                       Create bounded local review proposals during an
                       explicit --phase consolidate --source <id> run.
+                      This explicit flag overrides the source config key
+                      dream.consolidate.entityless.<source-id>. Config values
+                      require matching source incarnation and target_slug.
                       Repeated identical targets are accepted; conflicting,
                       blank and __all__ targets are rejected. --dry-run
                       performs no proposal writes.
@@ -828,6 +866,17 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     }
   }
 
+  // The source-keyed opt-in is deliberately narrower than normal source
+  // resolution: only a literal --source/--source-id may read it. An explicit
+  // target flag wins; environment, path, default and __all__ routing never
+  // turn entityless review on implicitly.
+  let entitylessProposalTargetSlug = opts.entitylessProposalTargetSlug ?? undefined;
+  const consolidateWillRun = !opts.drain && (opts.phases.length === 0 || opts.phases.includes('consolidate'));
+  if (entitylessProposalTargetSlug === undefined && engine !== null && opts.source !== null
+    && opts.source.trim() !== ALL_SOURCES && consolidateWillRun) {
+    entitylessProposalTargetSlug = await configuredEntitylessProposalTarget(engine, resolvedSourceId!);
+  }
+
   const brainDir = await resolveBrainDir(engine, opts.dir, resolvedSourceId);
   // Both-null is the only hard error: no local checkout AND no DB connection
   // means neither filesystem phases nor DB phases can run. With an engine but
@@ -894,7 +943,7 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     synthFrom: opts.from ?? undefined,
     synthTo: opts.to ?? undefined,
     synthBypassDreamGuard: opts.bypassDreamGuard,
-    entitylessProposalTargetSlug: opts.entitylessProposalTargetSlug ?? undefined,
+    entitylessProposalTargetSlug,
     // issue #2860: exactly one phase is guaranteed here when opts.once is
     // set (parseArgs enforces --once requires a single explicit --phase).
     onceForPhase: opts.once ? opts.phases[0]! : undefined,
