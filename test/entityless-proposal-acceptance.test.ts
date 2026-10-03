@@ -1,8 +1,9 @@
-import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
 import { loadConfig } from '../src/core/config.ts';
@@ -16,32 +17,46 @@ import { recordFactWithdrawal } from '../src/core/facts/withdrawal.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
+import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
 
-let engine: PGLiteEngine;
+for (const backend of testBackends()) describe(`entityless proposal acceptance (${backend})`, () => {
+  let engine: BrainEngine;
+  let closePostgres: (() => Promise<void>) | undefined;
+  const testHome = mkdtempSync(join(tmpdir(), `gbrain-entityless-acceptance-${backend}-`));
 
-beforeAll(async () => {
-  engine = new PGLiteEngine();
-  await engine.connect({});
-  await engine.initSchema();
-});
+  beforeAll(async () => {
+    const databaseUrl = backend === 'postgres' ? requirePostgresTestDatabase() : undefined;
+    await withEnv({ HOME: testHome, GBRAIN_HOME: testHome, DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, async () => {
+      if (backend === 'postgres') {
+        const isolatedPostgres = await isolatedPersistencePostgres(databaseUrl!);
+        engine = isolatedPostgres.engine;
+        closePostgres = isolatedPostgres.close;
+      } else {
+        const pglite = new PGLiteEngine();
+        await pglite.connect({});
+        await pglite.initSchema();
+        engine = pglite;
+      }
+    });
+  });
 
-afterAll(async () => {
-  await disposePersistenceConsumer(engine);
-  await engine.disconnect();
-});
+  afterAll(async () => {
+    await withEnv({ HOME: testHome, GBRAIN_HOME: testHome }, async () => {
+      await disposePersistenceConsumer(engine);
+      if (closePostgres) await closePostgres();
+      else await engine.disconnect();
+    });
+    rmSync(testHome, { recursive: true, force: true });
+  });
 
-async function isolated<T>(run: () => Promise<T>): Promise<T> {
-  const home = mkdtempSync(join(tmpdir(), 'gbrain-entityless-acceptance-'));
-  try {
-    return await withEnv({ HOME: home, GBRAIN_HOME: home, DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, async () => {
-      await resetPgliteState(engine);
+  async function isolated<T>(run: () => Promise<T>): Promise<T> {
+    return withEnv({ HOME: testHome, GBRAIN_HOME: testHome, DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, async () => {
+      await resetPgliteState(engine as PGLiteEngine);
       try { return await run(); }
       finally { await disposePersistenceConsumer(engine); }
     });
-  } finally {
-    rmSync(home, { recursive: true, force: true });
   }
-}
 
 const config = (): GBrainConfig => loadConfig() ?? { engine: 'pglite' } as GBrainConfig;
 const oldTimestamp = () => new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString();
@@ -62,18 +77,18 @@ async function seedTarget(slug = 'notes/acceptance-target', visibility: 'world' 
   return { id: Number(snapshot.page.id), revision: snapshot.revision };
 }
 
-async function seedFact(text: string, visibility: 'world' | 'private' = 'world'): Promise<number> {
+async function seedFact(text: string, visibility: 'world' | 'private' = 'world', validUntil?: string): Promise<number> {
   const rows = await engine.executeRaw<{ id: number }>(`INSERT INTO facts
-      (source_id,entity_slug,fact,kind,visibility,notability,valid_from,source,source_session,confidence,
+      (source_id,entity_slug,fact,kind,visibility,notability,valid_from,valid_until,source,source_session,confidence,
        embedding,embedded_at,embedding_model,embedded_text_hash)
-    VALUES ('default',NULL,$1,'fact',$2,'medium',$3::timestamptz,'entityless-acceptance',
-      $4,0.75,$5::vector,$3::timestamptz,'openai:text-embedding-3-large',md5($1)) RETURNING id`,
-  [text, visibility, oldTimestamp(), `accept-session-${text}`, unitVector()]);
+    VALUES ('default',NULL,$1,'fact',$2,'medium',$3::timestamptz,$4::timestamptz,'entityless-acceptance',
+      $5,0.75,$6::vector,$3::timestamptz,'openai:text-embedding-3-large',md5($1)) RETURNING id`,
+  [text, visibility, oldTimestamp(), validUntil ?? null, `accept-session-${text}`, unitVector()]);
   return Number(rows[0]!.id);
 }
 
-async function seedProposal(targetSlug = 'notes/acceptance-target', visibility: 'world' | 'private' = 'world') {
-  for (let index = 0; index < 3; index++) await seedFact(`${visibility} accepted claim ${index}`, visibility);
+async function seedProposal(targetSlug = 'notes/acceptance-target', visibility: 'world' | 'private' = 'world', validUntil?: string) {
+  for (let index = 0; index < 3; index++) await seedFact(`${visibility} accepted claim ${index}`, visibility, validUntil);
   await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: targetSlug });
   const [row] = await engine.executeRaw<TakeProposalRow>(`SELECT id,source_id,page_slug,claim_text,kind,holder,weight,domain,status,
     proposed_at,model_id,promoted_row_num,evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1' ORDER BY id LIMIT 1`);
@@ -175,7 +190,18 @@ test('expired, withdrawn, changed or malformed evidence refuses before a take ca
   expect(await proposalState(ttl.id)).toEqual({ status: 'evidence_pending', promoted_row_num: null });
   expect(await engine.listTakes({ page_slug: ttl.page_slug })).toHaveLength(0);
 
-  await resetPgliteState(engine);
+  await resetPgliteState(engine as PGLiteEngine);
+  await engine.setConfig('sync.write_through', 'false');
+  await seedTarget();
+  const futureTtl = await seedProposal('notes/acceptance-target', 'world', new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString());
+  const futureFactBytes = await factBytes();
+  expect((evidenceOf(futureTtl).facts as Array<Record<string, unknown>>).every(fact => fact.valid_until !== null)).toBe(true);
+  await expect(acceptProposal(proposalTarget(futureTtl), futureTtl.id)).rejects.toMatchObject({ code: 'review_refused' });
+  expect(await proposalState(futureTtl.id)).toEqual({ status: 'evidence_pending', promoted_row_num: null });
+  expect(await engine.listTakes({ page_slug: futureTtl.page_slug })).toHaveLength(0);
+  expect(await factBytes()).toBe(futureFactBytes);
+
+  await resetPgliteState(engine as PGLiteEngine);
   await engine.setConfig('sync.write_through', 'false');
   await seedTarget();
   const withdrawn = await seedProposal();
@@ -183,10 +209,11 @@ test('expired, withdrawn, changed or malformed evidence refuses before a take ca
   await recordFactWithdrawal(engine, Number(factRows[0]!.id), 'default');
   await expect(acceptProposal(proposalTarget(withdrawn), withdrawn.id)).rejects.toMatchObject({ code: 'review_refused' });
   expect(await proposalState(withdrawn.id)).toEqual({ status: 'evidence_pending', promoted_row_num: null });
-  expect(await engine.executeRaw('SELECT id FROM fact_withdrawals')).toHaveLength(1);
+  const [withdrawalCount] = await engine.executeRaw<{ count: number | string }>('SELECT count(*)::int AS count FROM fact_withdrawals');
+  expect(Number(withdrawalCount!.count)).toBe(1);
   expect(await engine.listTakes({ page_slug: withdrawn.page_slug })).toHaveLength(0);
 
-  await resetPgliteState(engine);
+  await resetPgliteState(engine as PGLiteEngine);
   await engine.setConfig('sync.write_through', 'false');
   await seedTarget();
   const changed = await seedProposal();
@@ -194,7 +221,7 @@ test('expired, withdrawn, changed or malformed evidence refuses before a take ca
   await expect(acceptProposal(proposalTarget(changed), changed.id)).rejects.toThrow('source incarnation changed');
   expect(await proposalState(changed.id)).toEqual({ status: 'evidence_pending', promoted_row_num: null });
 
-  await resetPgliteState(engine);
+  await resetPgliteState(engine as PGLiteEngine);
   await engine.setConfig('sync.write_through', 'false');
   await seedTarget();
   const badEvidence = await seedProposal();
@@ -211,7 +238,7 @@ test('TTL drift after durable admission is rejected by the publication preparer 
   await engine.executeRaw(`CREATE OR REPLACE FUNCTION test_entityless_expire_after_admission() RETURNS trigger LANGUAGE plpgsql AS $fn$
     BEGIN
       IF NEW.operation='submit_job' AND NEW.intent->>'kind'='managed_maintenance_entityless_proposal_accept' THEN
-        UPDATE facts SET valid_until=now()-interval '1 second'
+        UPDATE facts SET valid_until=now()+interval '1 day'
           WHERE source_id='default' AND source='entityless-acceptance' AND visibility='world';
       END IF;
       RETURN NEW;
@@ -232,6 +259,40 @@ test('TTL drift after durable admission is rejected by the publication preparer 
   expect(['conflict', 'failed']).toContain(receipt?.state);
 }));
 
+test('future-valid and superseded facts cannot be published even when proposal evidence matches their current rows', async () => isolated(async () => {
+  await engine.setConfig('sync.write_through', 'false');
+  await seedTarget();
+  const proposal = await seedProposal();
+  const evidence = evidenceOf(proposal);
+  const facts = evidence.facts as Array<Record<string, unknown>>;
+  const now = Date.now();
+  const futureFrom = new Date(now + 24 * 60 * 60 * 1000).toISOString();
+  const supersededId = Number(facts[1]!.id);
+  const futureId = Number(facts[0]!.id);
+
+  await engine.executeRaw('UPDATE facts SET valid_from=$1::timestamptz WHERE id=$2', [futureFrom, futureId]);
+  facts[0]!.valid_from = futureFrom;
+  await engine.executeRaw('UPDATE take_proposals SET evidence=$2::text::jsonb WHERE id=$1', [proposal.id, JSON.stringify(evidence)]);
+  await expect(acceptProposal(proposalTarget(proposal), proposal.id)).rejects.toMatchObject({ code: 'review_refused' });
+  expect(await proposalState(proposal.id)).toEqual({ status: 'evidence_pending', promoted_row_num: null });
+  expect(await engine.listTakes({ page_slug: proposal.page_slug })).toHaveLength(0);
+
+  await resetPgliteState(engine as PGLiteEngine);
+  await engine.setConfig('sync.write_through', 'false');
+  await seedTarget();
+  const superseded = await seedProposal();
+  const supersededEvidence = evidenceOf(superseded);
+  const supersededFacts = supersededEvidence.facts as Array<Record<string, unknown>>;
+  const oldFactId = Number(supersededFacts[0]!.id);
+  const supersedingFactId = Number(supersededFacts[1]!.id);
+  await engine.executeRaw('UPDATE facts SET superseded_by=$1 WHERE id=$2', [supersedingFactId, oldFactId]);
+  supersededFacts[0]!.superseded_by = supersedingFactId;
+  await engine.executeRaw('UPDATE take_proposals SET evidence=$2::text::jsonb WHERE id=$1', [superseded.id, JSON.stringify(supersededEvidence)]);
+  await expect(acceptProposal(proposalTarget(superseded), superseded.id)).rejects.toMatchObject({ code: 'review_refused' });
+  expect(await proposalState(superseded.id)).toEqual({ status: 'evidence_pending', promoted_row_num: null });
+  expect(await engine.listTakes({ page_slug: superseded.page_slug })).toHaveLength(0);
+}));
+
 test('target revision changes and unavailable owners refuse without claiming a review row', async () => isolated(async () => {
   await engine.setConfig('sync.write_through', 'false');
   await seedTarget();
@@ -240,7 +301,7 @@ test('target revision changes and unavailable owners refuse without claiming a r
   await expect(acceptProposal(proposalTarget(revisionChanged), revisionChanged.id)).rejects.toThrow('target page changed');
   expect(await proposalState(revisionChanged.id)).toEqual({ status: 'evidence_pending', promoted_row_num: null });
 
-  await resetPgliteState(engine);
+  await resetPgliteState(engine as PGLiteEngine);
   await seedTarget();
   const ownerUnavailable = await seedProposal();
   await engine.setConfig('sync.write_through', 'true');
@@ -282,7 +343,7 @@ function oldBinaryMaintenanceFixture(kind: string): never | 'known' {
   throw new Error('Unsupported maintenance request.');
 }
 
-test('old binary fixtures refuse every evidence status and the new durable intent after an admitted receipt', async () => isolated(async () => {
+test('old-binary extracted predicates refuse evidence states while the new intent is admitted transactionally', async () => isolated(async () => {
   await engine.setConfig('sync.write_through', 'false');
   const target = await seedTarget();
   const proposal = await seedProposal();
@@ -322,3 +383,4 @@ test('old binary fixtures refuse every evidence status and the new durable inten
   expect(await proposalState(proposal.id)).toEqual({ status: 'evidence_accepting', promoted_row_num: null });
   await disposePersistenceConsumer(engine);
 }));
+});

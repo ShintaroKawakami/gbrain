@@ -11,29 +11,30 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
+const testHome = mkdtempSync(join(tmpdir(), 'gbrain-entityless-proposals-home-'));
 
 beforeAll(async () => {
-  engine = new PGLiteEngine();
-  await engine.connect({});
-  await engine.initSchema();
+  await withEnv({ HOME: testHome, GBRAIN_HOME: testHome, DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, async () => {
+    engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
+  });
 });
 
 afterAll(async () => {
-  await disposePersistenceConsumer(engine);
-  await engine.disconnect();
+  await withEnv({ HOME: testHome, GBRAIN_HOME: testHome }, async () => {
+    await disposePersistenceConsumer(engine);
+    await engine.disconnect();
+  });
+  rmSync(testHome, { recursive: true, force: true });
 });
 
 async function isolated<T>(run: () => Promise<T>): Promise<T> {
-  const home = mkdtempSync(join(tmpdir(), 'gbrain-entityless-proposals-'));
-  try {
-    return await withEnv({ HOME: home, GBRAIN_HOME: home, DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, async () => {
-      await resetPgliteState(engine);
-      try { return await run(); }
-      finally { await disposePersistenceConsumer(engine); }
-    });
-  } finally {
-    rmSync(home, { recursive: true, force: true });
-  }
+  return withEnv({ HOME: testHome, GBRAIN_HOME: testHome, DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined }, async () => {
+    await resetPgliteState(engine);
+    try { return await run(); }
+    finally { await disposePersistenceConsumer(engine); }
+  });
 }
 
 const oldTimestamp = () => new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString();
@@ -147,17 +148,119 @@ test('entityless candidates enforce age and the 100-fact evidence bound without 
   expect(young.details.entityless_proposals_created).toBe(0);
 
   await resetPgliteState(engine);
-  for (let index = 0; index < 101; index++) {
+  for (let index = 0; index < 103; index++) {
     await seedFact({ text: `bounded synthetic fact ${index}` });
   }
   const bounded = await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/missing-target' });
   expect(bounded.details.entityless_proposals_created).toBe(1);
-  const [proposal] = await engine.executeRaw<{ evidence: unknown }>(
-    "SELECT evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1'");
-  const evidence = readEvidence(proposal!.evidence);
+  const proposals = await engine.executeRaw<{ id: number; evidence: unknown }>(
+    "SELECT id,evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1' ORDER BY id");
+  expect(proposals).toHaveLength(1);
+  const evidence = readEvidence(proposals[0]!.evidence);
   expect((evidence.facts as unknown[]).length).toBe(100);
   expect((evidence.target as Record<string, unknown>).revision).toBeNull();
   expect(await engine.executeRaw("SELECT id FROM pages WHERE source_id='default' AND slug='notes/missing-target'")).toHaveLength(0);
+
+  const remaining = await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/missing-target' });
+  expect(remaining.details.entityless_proposals_created).toBe(1);
+  const secondPass = await engine.executeRaw<{ evidence: unknown }>(
+    "SELECT evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1' ORDER BY id");
+  expect(secondPass).toHaveLength(2);
+  expect((readEvidence(secondPass[1]!.evidence).facts as unknown[]).length).toBe(3);
+  const complete = await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/missing-target' });
+  expect(complete.details.entityless_proposals_created).toBe(0);
+  expect(await engine.executeRaw("SELECT id FROM take_proposals WHERE prompt_version='entityless-fact-review-v1'")).toHaveLength(2);
+}));
+
+test('unchanged rejected and accepted evidence stays covered while a changed fact regenerates its original group', async () => isolated(async () => {
+  for (let index = 0; index < 3; index++) await seedFact({ text: `reviewed synthetic fact ${index}` });
+  const first = await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/review-target' });
+  expect(first.details.entityless_proposals_created).toBe(1);
+  const [original] = await engine.executeRaw<{ id: number; evidence: unknown }>(
+    "SELECT id,evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1'");
+  await engine.executeRaw("UPDATE take_proposals SET status='evidence_rejected' WHERE id=$1", [original!.id]);
+  expect((await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/review-target' }))
+    .details.entityless_proposals_created).toBe(0);
+
+  const originalEvidence = readEvidence(original!.evidence);
+  const originalFacts = originalEvidence.facts as Array<Record<string, unknown>>;
+  await engine.executeRaw('UPDATE facts SET confidence=confidence-0.01 WHERE id=$1', [Number(originalFacts[1]!.id)]);
+  expect((await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/review-target' }))
+    .details.entityless_proposals_created).toBe(1);
+  const afterChange = await engine.executeRaw<{ id: number; evidence: unknown; status: string }>(
+    "SELECT id,evidence,status FROM take_proposals WHERE prompt_version='entityless-fact-review-v1' ORDER BY id");
+  expect(afterChange).toHaveLength(2);
+  expect(afterChange[0]!.status).toBe('evidence_rejected');
+  expect((readEvidence(afterChange[1]!.evidence).facts as Array<Record<string, unknown>>).map(fact => Number(fact.id)))
+    .toEqual(originalFacts.map(fact => Number(fact.id)));
+  await engine.executeRaw("UPDATE take_proposals SET status='evidence_accepted' WHERE id=$1", [afterChange[1]!.id]);
+  expect((await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/review-target' }))
+    .details.entityless_proposals_created).toBe(0);
+  expect(await engine.executeRaw("SELECT id FROM take_proposals WHERE prompt_version='entityless-fact-review-v1'")).toHaveLength(2);
+}));
+
+test('target readiness and later target revisions regenerate the full changed fact group', async () => isolated(async () => {
+  for (let index = 0; index < 3; index++) await seedFact({ text: `target revision synthetic fact ${index}` });
+  await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/late-target' });
+  const [original] = await engine.executeRaw<{ evidence: unknown }>(
+    "SELECT evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1'");
+  const originalEvidence = readEvidence(original!.evidence);
+  const originalFacts = originalEvidence.facts as Array<Record<string, unknown>>;
+  await engine.executeRaw('UPDATE facts SET confidence=confidence-0.01 WHERE id=$1', [Number(originalFacts[1]!.id)]);
+  await seedTarget('notes/late-target');
+  const factsAfterEdit = await factBytes();
+
+  expect((await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/late-target' }))
+    .details.entityless_proposals_created).toBe(1);
+  let proposals = await engine.executeRaw<{ evidence: unknown }>(
+    "SELECT evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1' ORDER BY id");
+  expect(proposals).toHaveLength(2);
+  const readyEvidence = readEvidence(proposals[1]!.evidence);
+  expect((readyEvidence.target as Record<string, unknown>).revision).toBeTruthy();
+  expect((readyEvidence.facts as Array<Record<string, unknown>>).map(fact => Number(fact.id)))
+    .toEqual(originalFacts.map(fact => Number(fact.id)));
+  expect((readyEvidence.facts as Array<Record<string, unknown>>).find(fact => Number(fact.id) === Number(originalFacts[1]!.id))?.confidence)
+    .toBe(Number(originalFacts[1]!.confidence) - 0.01);
+  expect(await factBytes()).toBe(factsAfterEdit);
+
+  await engine.putPage('notes/late-target', {
+    type: 'note', title: 'Review target', compiled_truth: 'Target page body revised.', frontmatter: {},
+  }, { sourceId: 'default' });
+  const revisedTarget = await engine.readPageSnapshot('notes/late-target', { sourceId: 'default' });
+  expect(revisedTarget).toBeTruthy();
+  expect((await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/late-target' }))
+    .details.entityless_proposals_created).toBe(1);
+  proposals = await engine.executeRaw<{ evidence: unknown }>(
+    "SELECT evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1' ORDER BY id");
+  expect(proposals).toHaveLength(3);
+  const revisedEvidence = readEvidence(proposals[2]!.evidence);
+  expect((revisedEvidence.target as Record<string, unknown>).revision).toBe(revisedTarget!.revision);
+  expect((revisedEvidence.facts as Array<Record<string, unknown>>).map(fact => Number(fact.id)))
+    .toEqual(originalFacts.map(fact => Number(fact.id)));
+  expect(await factBytes()).toBe(factsAfterEdit);
+}));
+
+test('legacy producer identity keeps NULL evidence beside the versioned review evidence row', async () => isolated(async () => {
+  for (let index = 0; index < 3; index++) await seedFact({ text: `collision synthetic fact ${index}` });
+  await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/collision-target' });
+  const [review] = await engine.executeRaw<{ source_id: string; page_slug: string; content_hash: string; claim_text: string; evidence: unknown }>(
+    "SELECT source_id,page_slug,content_hash,claim_text,evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1'");
+  await engine.executeRaw(`INSERT INTO take_proposals
+      (source_id,page_slug,content_hash,prompt_version,proposal_run_id,status,claim_text,kind,holder,weight,domain,model_id)
+    VALUES ($1,$2,$3,'legacy-entityless-producer-v0','legacy-entityless-run','pending',$4,'fact','self',0.8,
+      'entityless-review','deterministic:legacy-fixture')`,
+  [review!.source_id, review!.page_slug, review!.content_hash, review!.claim_text]);
+  await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/collision-target' });
+  const rows = await engine.executeRaw<{ prompt_version: string; status: string; evidence: unknown }>(`SELECT prompt_version,status,evidence
+    FROM take_proposals WHERE source_id=$1 AND page_slug=$2 AND content_hash=$3 AND claim_text=$4 ORDER BY prompt_version`,
+  [review!.source_id, review!.page_slug, review!.content_hash, review!.claim_text]);
+  expect(rows).toHaveLength(2);
+  const legacy = rows.find(row => row.prompt_version === 'legacy-entityless-producer-v0');
+  const versioned = rows.find(row => row.prompt_version === 'entityless-fact-review-v1');
+  expect(legacy?.status).toBe('pending');
+  expect(legacy?.evidence).toBeNull();
+  expect(versioned?.status).toBe('evidence_pending');
+  expect(readEvidence(versioned!.evidence).version).toBe(1);
 }));
 
 test('the internal opt-in requires a concrete source and a nonblank explicit target', async () => isolated(async () => {

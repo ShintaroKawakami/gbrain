@@ -111,8 +111,8 @@ export async function assertEntitylessProposalCurrent(
   const now = new Date(nowRows[0]!.now).getTime();
   if (current.some(fact => fact.visibility !== 'world' || fact.entity_slug !== null || fact.expired_at !== null
     || fact.consolidated_at !== null || fact.consolidated_into !== null || fact.withdrawn
-    || fact.valid_until !== null && Date.parse(fact.valid_until) <= now)) {
-    throw new OperationError('revision_conflict', 'The source facts expired, were withdrawn or are no longer eligible.');
+    || fact.superseded_by !== null || Date.parse(fact.valid_from) > now || fact.valid_until !== null)) {
+    throw new OperationError('revision_conflict', 'The source facts are inactive, withdrawn or have a finite validity end.');
   }
   return evidence;
 }

@@ -48,7 +48,7 @@ export interface ConsolidatePhaseOpts {
   /** Minimum age (ms) of the OLDEST fact in a bucket before consolidation. Default 24h. */
   minOldestAgeMs?: number;
   sourceId?: string;
-  /** Internal, explicit opt-in. Never wired to a CLI flag or cycle schedule. */
+  /** Explicit review-only target, exposed by the narrowly scoped dream CLI flag. */
   entitylessProposalTargetSlug?: string;
 }
 
@@ -57,7 +57,6 @@ export async function runPhaseConsolidate(
   opts: ConsolidatePhaseOpts = {},
 ): Promise<PhaseResult> {
   const dryRun = opts.dryRun === true;
-  const managed = await managedPersistenceEnabled(engine);
   const threshold = opts.clusterThreshold ?? 0.85;
   const minPerBucket = opts.minFactsPerBucket ?? 3;
   const minOldestAgeMs = opts.minOldestAgeMs ?? 24 * 60 * 60 * 1000;
@@ -72,7 +71,7 @@ export async function runPhaseConsolidate(
   const entitylessSourceId = opts.sourceId?.trim();
   const entitylessTargetSlug = opts.entitylessProposalTargetSlug?.trim();
   if (opts.entitylessProposalTargetSlug !== undefined
-    && (!entitylessSourceId || entitylessSourceId === '__all__' || !entitylessTargetSlug)) {
+    && (!entitylessSourceId || entitylessSourceId === '__all__' || !entitylessTargetSlug || entitylessTargetSlug === '__all__')) {
     return {
       phase: 'consolidate', status: 'fail', duration_ms: 0,
       summary: 'entityless review requires an explicit source and target',
@@ -82,6 +81,21 @@ export async function runPhaseConsolidate(
         message: 'Entityless review requires an explicit sourceId and a nonblank target slug.' },
     };
   }
+  if (opts.entitylessProposalTargetSlug !== undefined) {
+    const [source] = await engine.executeRaw<{ archived: boolean }>(
+      'SELECT archived FROM sources WHERE id=$1', [entitylessSourceId]);
+    if (!source || source.archived) {
+      return {
+        phase: 'consolidate', status: 'fail', duration_ms: 0,
+        summary: 'entityless review requires an active explicit source',
+        details: { dryRun, facts_consolidated: 0, takes_written: 0, buckets_processed: 0, buckets_skipped: 0,
+          entityless_proposals_created: 0, entityless_review_clusters: 0 },
+        error: { class: 'EntitylessProposalScopeError', code: 'entityless_proposal_scope_required',
+          message: 'Entityless review requires an active explicit source.' },
+      };
+    }
+  }
+  const managed = await managedPersistenceEnabled(engine);
 
   // Pull every (source_id, entity_slug) bucket of unconsolidated facts.
   // Uses the partial idx_facts_unconsolidated index.
@@ -314,7 +328,7 @@ export async function runPhaseConsolidate(
     }
   }
 
-  // Entityless facts have no safe identity bucket. This isolated opt-in only
+  // Entityless facts have no safe identity bucket. This explicit opt-in only
   // creates review rows; it never takes the consolidation write path above.
   if (opts.entitylessProposalTargetSlug !== undefined && !dryRun) {
     try {
