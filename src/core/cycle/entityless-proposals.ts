@@ -33,6 +33,21 @@ interface RawEntitylessFact extends Omit<FactRow, 'embedding' | 'valid_from' | '
   dim_status: string | null;
 }
 
+interface RawEntitylessSnapshot extends Omit<FactEvidenceSnapshot,
+  'id' | 'row_num' | 'superseded_by' | 'consolidated_into' | 'claim_value' | 'confidence'
+    | 'valid_from' | 'valid_until' | 'expired_at' | 'consolidated_at'> {
+  id: number | string;
+  row_num: number | string | null;
+  superseded_by: number | string | null;
+  consolidated_into: number | string | null;
+  claim_value: number | string | null;
+  confidence: number | string;
+  valid_from: Date | string;
+  valid_until: Date | string | null;
+  expired_at: Date | string | null;
+  consolidated_at: Date | string | null;
+}
+
 export interface FactEvidenceSnapshot {
   id: number;
   source_id: string;
@@ -100,24 +115,28 @@ export async function produceEntitylessFactProposals(
     'SELECT incarnation,archived FROM sources WHERE id=$1', [sourceId]);
   if (!source || source.archived) throw new Error('Entityless fact review requires an active explicit source.');
 
-  const rows = await engine.executeRaw<RawEntitylessFact>(`SELECT id,source_id,entity_slug,fact,kind,visibility,notability,context,
-      valid_from,valid_until,expired_at,superseded_by,consolidated_at,consolidated_into,source,source_session,confidence,
-      embedding::text AS embedding,embedding_model,embedded_text_hash,embedded_at,created_at,source_markdown_slug,row_num,
-      claim_metric,claim_value,claim_unit,claim_period,event_type,dimension,value,dim_status
-    FROM facts
-    WHERE source_id=$1 AND entity_slug IS NULL AND expired_at IS NULL AND consolidated_at IS NULL
-      AND (valid_until IS NULL OR valid_until>now()) AND visibility IN ('world','private')
-    ORDER BY valid_from ASC,id ASC LIMIT $2`, [sourceId, ENTITYLESS_PROPOSAL_MAX_FACTS]);
-  const facts = rows.map(normalizeRawFact);
-  const byVisibility: Record<'world' | 'private', FactRow[]> = { world: [], private: [] };
-  for (const fact of facts) byVisibility[fact.visibility].push(fact);
-
   const targetSnapshot = await engine.readPageSnapshot(targetSlug, { sourceId, excludePrivate: true });
   const target = targetSnapshot && targetSnapshot.sourceIncarnation === source.incarnation ? {
     slug: targetSlug,
     page_id: Number(targetSnapshot.page.id),
     revision: targetSnapshot.revision,
   } : { slug: targetSlug, page_id: null, revision: null };
+  const coveredFactIds = await unchangedProposalFactIds(engine, sourceId, source.incarnation, target);
+
+  const rows = await engine.executeRaw<RawEntitylessFact>(`SELECT id,source_id,entity_slug,fact,kind,visibility,notability,context,
+      valid_from,valid_until,expired_at,superseded_by,consolidated_at,consolidated_into,source,source_session,confidence,
+      embedding::text AS embedding,embedding_model,embedded_text_hash,embedded_at,created_at,source_markdown_slug,row_num,
+      claim_metric,claim_value,claim_unit,claim_period,event_type,dimension,value,dim_status
+    FROM facts
+    WHERE source_id=$1 AND entity_slug IS NULL AND expired_at IS NULL AND consolidated_at IS NULL
+      AND superseded_by IS NULL AND valid_from<=now()
+      AND (valid_until IS NULL OR valid_until>now()) AND visibility IN ('world','private')
+      AND id <> ALL($2::integer[])
+    ORDER BY valid_from ASC,id ASC LIMIT $3`, [sourceId, coveredFactIds, ENTITYLESS_PROPOSAL_MAX_FACTS]);
+  const facts = rows.map(normalizeRawFact);
+  const byVisibility: Record<'world' | 'private', FactRow[]> = { world: [], private: [] };
+  for (const fact of facts) byVisibility[fact.visibility].push(fact);
+
   const now = (options.now ?? new Date()).getTime();
   let inserted = 0;
   let clusters = 0;
@@ -158,6 +177,100 @@ export async function produceEntitylessFactProposals(
     }
   }
   return { scanned: facts.length, inserted, clusters };
+}
+
+/**
+ * Proposal evidence is the progress record for this bounded producer. Skip a
+ * prior group's fact IDs only while the entire evidence snapshot and target
+ * revision still match. A changed member therefore brings its original group
+ * back into the next 100-fact review window; a new target revision does too.
+ */
+async function unchangedProposalFactIds(
+  engine: BrainEngine,
+  sourceId: string,
+  sourceIncarnation: string,
+  target: EntitylessProposalEvidenceV1['target'],
+): Promise<number[]> {
+  const priorRows = await engine.executeRaw<{ evidence: unknown }>(`SELECT evidence FROM take_proposals
+    WHERE source_id=$1 AND page_slug=$2 AND prompt_version=$3 AND domain='entityless-review'
+      AND evidence IS NOT NULL
+      AND status IN ('evidence_pending','evidence_accepting','evidence_accepted','evidence_rejected')
+    ORDER BY id`, [sourceId, target.slug, ENTITYLESS_PROPOSAL_PROMPT_VERSION]);
+  const evidenceRows = priorRows.map(row => storedEvidence(row.evidence)).filter((evidence): evidence is EntitylessProposalEvidenceV1 =>
+    evidence !== null && evidence.source_id === sourceId && evidence.source_incarnation === sourceIncarnation
+      && evidence.target.slug === target.slug && evidence.target.page_id === target.page_id
+      && evidence.target.revision === target.revision);
+  if (evidenceRows.length === 0) return [];
+
+  const ids = Array.from(new Set(evidenceRows.flatMap(evidence => evidence.facts.map(fact => fact.id)))).sort((a, b) => a - b);
+  const current = new Map<number, FactEvidenceSnapshot>();
+  for (let start = 0; start < ids.length; start += ENTITYLESS_PROPOSAL_MAX_FACTS) {
+    const batch = ids.slice(start, start + ENTITYLESS_PROPOSAL_MAX_FACTS);
+    const rows = await engine.executeRaw<RawEntitylessSnapshot>(`SELECT id,source_id,entity_slug,source_markdown_slug,row_num,
+        fact,kind,visibility,notability,context,valid_from,valid_until,expired_at,superseded_by,consolidated_at,
+        consolidated_into,source,source_session,confidence,claim_metric,claim_value,claim_unit,claim_period,event_type,
+        dimension,value,dim_status,embedding_model,embedded_text_hash
+      FROM facts WHERE source_id=$1 AND id=ANY($2::integer[]) ORDER BY id`, [sourceId, batch]);
+    for (const row of rows) current.set(Number(row.id), normalizeEvidenceSnapshot(row));
+  }
+
+  const covered = new Set<number>();
+  for (const evidence of evidenceRows) {
+    const expected = [...evidence.facts].sort((a, b) => a.id - b.id);
+    const actual = expected.map(fact => current.get(fact.id));
+    if (actual.some(fact => fact === undefined)) continue;
+    if (stableJson(actual) === stableJson(expected)) for (const fact of expected) covered.add(fact.id);
+  }
+  return [...covered].sort((a, b) => a - b);
+}
+
+function storedEvidence(value: unknown): EntitylessProposalEvidenceV1 | null {
+  let raw = value;
+  if (typeof raw === 'string') {
+    try { raw = JSON.parse(raw); } catch { return null; }
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const evidence = raw as Partial<EntitylessProposalEvidenceV1>;
+  if (evidence.version !== 1 || evidence.reason !== 'subject_unknown' || evidence.contradictions !== 'unverified'
+    || typeof evidence.source_id !== 'string' || typeof evidence.source_incarnation !== 'string'
+    || !evidence.target || typeof evidence.target.slug !== 'string'
+    || !Array.isArray(evidence.facts) || evidence.facts.length < 2 || evidence.facts.length > ENTITYLESS_PROPOSAL_MAX_FACTS
+    || evidence.facts.some(fact => !fact || !Number.isSafeInteger(fact.id) || fact.id < 1)) return null;
+  return evidence as EntitylessProposalEvidenceV1;
+}
+
+function normalizeEvidenceSnapshot(row: RawEntitylessSnapshot): FactEvidenceSnapshot {
+  return {
+    id: Number(row.id),
+    source_id: row.source_id,
+    entity_slug: row.entity_slug as null,
+    source_markdown_slug: row.source_markdown_slug,
+    row_num: row.row_num == null ? null : Number(row.row_num),
+    fact: row.fact,
+    kind: row.kind,
+    visibility: row.visibility,
+    notability: row.notability,
+    context: row.context,
+    valid_from: date(row.valid_from)!.toISOString(),
+    valid_until: date(row.valid_until)?.toISOString() ?? null,
+    expired_at: date(row.expired_at)?.toISOString() ?? null,
+    superseded_by: row.superseded_by == null ? null : Number(row.superseded_by),
+    consolidated_at: date(row.consolidated_at)?.toISOString() ?? null,
+    consolidated_into: row.consolidated_into == null ? null : Number(row.consolidated_into),
+    source: row.source,
+    source_session: row.source_session,
+    confidence: Number(row.confidence),
+    claim_metric: row.claim_metric,
+    claim_value: row.claim_value == null ? null : Number(row.claim_value),
+    claim_unit: row.claim_unit,
+    claim_period: row.claim_period,
+    event_type: row.event_type,
+    dimension: row.dimension,
+    value: row.value,
+    dim_status: row.dim_status,
+    embedding_model: row.embedding_model,
+    embedded_text_hash: row.embedded_text_hash,
+  };
 }
 
 function normalizeRawFact(row: RawEntitylessFact): FactRow & { source_markdown_slug: string | null; row_num: number | null;

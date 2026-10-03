@@ -74,6 +74,8 @@ interface DreamArgs {
    * until a follow-up CLI cleanup picks one. Supersedes PR #1559.
    */
   source: string | null;
+  /** Explicit, local-review-only consolidate target. Requires an explicit source. */
+  entitylessProposalTargetSlug: string | null;
   /**
    * issue #1678: bounded single-hold backlog drain. `--drain` (currently only
    * for `--phase extract_atoms`) holds the cycle lock once and loops bounded
@@ -231,6 +233,37 @@ function parseArgs(args: string[]): DreamArgs {
   }
   const source = uniqSource[0] ?? uniqSourceId[0] ?? null;
 
+  const entitylessTargetValues = collectFlagValues(args, '--entityless-proposal-target');
+  if (entitylessTargetValues === null) {
+    console.error('--entityless-proposal-target <slug>: missing value. Usage: gbrain dream --phase consolidate --source <id> --entityless-proposal-target <slug>');
+    process.exit(2);
+  }
+  const normalizedTargets = entitylessTargetValues.map(value => value.trim());
+  if (normalizedTargets.some(value => !value || value.startsWith('--'))) {
+    console.error('--entityless-proposal-target requires a nonblank explicit target slug');
+    process.exit(2);
+  }
+  const uniqueTargets = Array.from(new Set(normalizedTargets));
+  if (uniqueTargets.length > 1) {
+    console.error(`specify --entityless-proposal-target once; got [${uniqueTargets.map(value => `"${value}"`).join(', ')}]`);
+    process.exit(2);
+  }
+  const entitylessProposalTargetSlug = uniqueTargets[0] ?? null;
+  if (entitylessProposalTargetSlug !== null) {
+    if (!source?.trim() || source.trim() === ALL_SOURCES) {
+      console.error('--entityless-proposal-target requires an explicit --source <id> or --source-id <id> (not __all__)');
+      process.exit(2);
+    }
+    if (entitylessProposalTargetSlug === ALL_SOURCES) {
+      console.error('--entityless-proposal-target requires one explicit target slug (not __all__)');
+      process.exit(2);
+    }
+    if (!phaseWasExplicit || phases.length !== 1 || phases[0] !== 'consolidate') {
+      console.error('--entityless-proposal-target requires only --phase consolidate');
+      process.exit(2);
+    }
+  }
+
   // issue #1678: --drain [--window <seconds>]. Only extract_atoms is drainable
   // this wave (it has a real eligibility predicate; synthesize_concepts does
   // not — Codex #12). --drain with no --phase defaults to extract_atoms.
@@ -305,6 +338,7 @@ function parseArgs(args: string[]): DreamArgs {
     to,
     bypassDreamGuard: args.includes('--unsafe-bypass-dream-guard'),
     source,
+    entitylessProposalTargetSlug,
     drain,
     windowSeconds,
     once,
@@ -436,6 +470,13 @@ Options:
   --source-id <id>    Alias for --source. Matches the v0.37.7.0+
                       naming used by import/extract/graph-query.
 
+  --entityless-proposal-target <slug>
+                      Create bounded local review proposals during an
+                      explicit --phase consolidate --source <id> run.
+                      Repeated identical targets are accepted; conflicting,
+                      blank and __all__ targets are rejected. --dry-run
+                      performs no proposal writes.
+
   --input <file>      Synthesize a specific transcript file (implies
                       --phase synthesize). Bypasses corpus-dir scan.
   --date YYYY-MM-DD   Synthesize transcripts dated for one specific day.
@@ -464,6 +505,7 @@ Examples:
   gbrain dream
   gbrain dream --dry-run --json
   gbrain dream --phase lint
+  gbrain dream --phase consolidate --source <id> --entityless-proposal-target <slug>
   gbrain dream --phase patterns --once   # run once, ignore dream.patterns.enabled=false
   gbrain dream --phase synthesize --input ~/transcripts/2026-04-25.txt
   gbrain dream --phase synthesize --from 2026-04-01 --to 2026-04-25
@@ -852,6 +894,7 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     synthFrom: opts.from ?? undefined,
     synthTo: opts.to ?? undefined,
     synthBypassDreamGuard: opts.bypassDreamGuard,
+    entitylessProposalTargetSlug: opts.entitylessProposalTargetSlug ?? undefined,
     // issue #2860: exactly one phase is guaranteed here when opts.once is
     // set (parseArgs enforces --once requires a single explicit --phase).
     onceForPhase: opts.once ? opts.phases[0]! : undefined,
