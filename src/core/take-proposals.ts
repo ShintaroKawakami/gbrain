@@ -1,21 +1,22 @@
 /**
  * #2411 / #4102 — drain surface for the `take_proposals` queue.
  *
- * The propose_takes cycle phase (src/core/cycle/propose-takes.ts) WRITES
- * proposals; the D17 auto-resolve posture says the ONLY path from queue to
- * canonical fence is explicit operator accept. This module is that path:
+ * The propose_takes phase writes legacy pending rows; the internal
+ * entityless-review phase writes evidence_pending rows. The D17 auto-resolve
+ * posture says the ONLY path from either queue status to a canonical take is
+ * explicit operator action. This module owns that path:
  *
  *   - listPendingProposals — source-scoped pending queue (newest first).
- *   - acceptProposal       — promote via a coordinated `takes_add` mutation
- *                            (submitPageMutation, the same path `gbrain
- *                            takes add` uses), then stamp status='accepted' +
- *                            promoted_row_num + acted_at/acted_by.
- *   - rejectProposal       — stamp status='rejected' + acted_at/acted_by.
+ *   - acceptProposal       — legacy rows use coordinated `takes_add`; evidence
+ *                            rows use a distinct durable maintenance intent
+ *                            and evidence status. Both require explicit accept.
+ *   - rejectProposal       — legacy rows become rejected; evidence rows become
+ *                            evidence_rejected.
  *
  * All reads/writes are parameterized and scoped to the caller's source when
  * one is provided (the CLI always resolves one via resolveSourceId).
  *
- * The promote write goes through submitPageMutation (the SAME coordinated
+ * Legacy promote writes go through submitPageMutation (the SAME coordinated
  * pipeline `takes add`/`takes update`/`takes supersede`/`takes resolve` use),
  * not the uncoordinated addTakeToPage — a managed brain (persistence_brain
  * enabled: Postgres/Supabase with a coordinator-owned worktree) refuses any
@@ -33,6 +34,15 @@ import type { OperationContext } from './ops/contract.ts';
 import { submitPageMutation } from './persistence/page-mutations.ts';
 import { waitForWrite } from './persistence/service.ts';
 import type { WriteRequest } from './persistence/model.ts';
+import { OperationError } from './ops/contract.ts';
+import { digest } from './persistence/digest.ts';
+import { maintenancePreflight, submitMaintenanceIntent } from './persistence/prepared-maintenance.ts';
+import type { MaintenanceAuthority } from './persistence/prepared-maintenance.ts';
+import {
+  assertEntitylessProposalCurrent,
+  parseEntitylessProposalEvidence,
+  type EntitylessProposalRecord,
+} from './persistence/entityless-proposal-evidence.ts';
 
 export interface TakeProposalRow {
   id: number;
@@ -47,6 +57,7 @@ export interface TakeProposalRow {
   proposed_at: string | Date;
   model_id: string;
   promoted_row_num: number | null;
+  evidence: unknown | null;
 }
 
 /** Normalize Postgres driver values to the public numeric row contract. */
@@ -59,7 +70,7 @@ function normalizeTakeProposalRow(row: TakeProposalRow): TakeProposalRow {
   };
 }
 
-export type TakeProposalErrorCode = 'not_found' | 'not_pending';
+export type TakeProposalErrorCode = 'not_found' | 'not_pending' | 'review_refused';
 
 export class TakeProposalError extends Error {
   constructor(
@@ -84,7 +95,7 @@ export function coerceProposalKind(raw: string): TakeKind {
 }
 
 const PROPOSAL_COLUMNS =
-  'id, source_id, page_slug, claim_text, kind, holder, weight, domain, status, proposed_at, model_id, promoted_row_num';
+  'id, source_id, page_slug, claim_text, kind, holder, weight, domain, status, proposed_at, model_id, promoted_row_num, evidence';
 
 export interface ListPendingOpts {
   /** Scope to one source (the CLI always provides one). Omit = all sources (trusted local only). */
@@ -98,7 +109,7 @@ export async function listPendingProposals(
   opts: ListPendingOpts = {},
 ): Promise<TakeProposalRow[]> {
   const limit = Math.max(1, Math.min(500, opts.limit ?? 20));
-  const where = [`status = 'pending'`];
+  const where = [`status IN ('pending','evidence_pending')`];
   const params: unknown[] = [];
   if (opts.sourceId) {
     params.push(opts.sourceId);
@@ -120,7 +131,7 @@ async function loadProposal(
   engine: BrainEngine,
   id: number,
   sourceId?: string,
-  opts: { allowStranded?: boolean } = {},
+  opts: { allowStranded?: boolean; allowEvidence?: boolean } = {},
 ): Promise<TakeProposalRow> {
   const params: unknown[] = [id];
   let scope = '';
@@ -136,6 +147,7 @@ async function loadProposal(
     throw new TakeProposalError('not_found', `No take proposal #${id}${sourceId ? ` in source '${sourceId}'` : ''}.`);
   }
   const row = normalizeTakeProposalRow(rows[0]);
+  if (opts.allowEvidence && ['evidence_pending', 'evidence_accepting', 'evidence_accepted'].includes(row.status)) return row;
   if (row.status !== 'pending') {
     // wave-g (#4480 follow-up): a crash between the accept CAS and the fence
     // write (or a failed rollback) strands the row as status='accepted' with
@@ -231,6 +243,101 @@ async function promoteProposalViaTakesAdd(
   return Number(result.row_num);
 }
 
+async function acceptEntitylessProposal(target: ProposalActionTarget, proposal: TakeProposalRow): Promise<number> {
+  const { engine } = target;
+  let evidence;
+  try {
+    evidence = parseEntitylessProposalEvidence(proposal.evidence);
+  } catch (error) {
+    throw new TakeProposalError('review_refused', error instanceof Error ? error.message : 'The review evidence is malformed.');
+  }
+  // This guard precedes preflight, CAS and durable request admission. Private
+  // evidence can be inspected or rejected on this CLI, but can never publish.
+  if (evidence.visibility === 'private') {
+    throw new TakeProposalError('review_refused', 'Private entityless fact proposals are local-only and cannot be published.');
+  }
+  if (proposal.status === 'evidence_accepted') {
+    if (proposal.promoted_row_num == null || !Number.isSafeInteger(proposal.promoted_row_num)) {
+      throw new TakeProposalError('review_refused', `Proposal #${proposal.id} has an invalid accepted receipt.`);
+    }
+    return proposal.promoted_row_num;
+  }
+  if (proposal.status !== 'evidence_pending' && proposal.status !== 'evidence_accepting') {
+    throw new TakeProposalError('not_pending', `Proposal #${proposal.id} is already '${proposal.status}'.`);
+  }
+
+  let authority: MaintenanceAuthority | null = null;
+  try {
+    if (proposal.status === 'evidence_pending') await assertEntitylessProposalCurrent(engine, asEntitylessRecord(proposal));
+    authority = await maintenancePreflight(engine, proposal.source_id, target.localDir ?? target.brainDir,
+      { allowUnmanagedDatabaseOnly: true });
+    if (!authority) throw new OperationError('owner_unavailable', 'The source is not ready for proposal publication.');
+  } catch (error) {
+    if (proposal.status === 'evidence_accepting') await restoreEntitylessProposalIfSettled(engine, proposal.id, proposal.source_id);
+    throw proposalActionError(error);
+  }
+
+  if (proposal.status === 'evidence_pending') {
+    const claimed = await engine.executeRaw<{ id: number }>(`UPDATE take_proposals
+      SET status='evidence_accepting',acted_at=now(),acted_by=$2
+      WHERE id=$1 AND source_id=$3 AND status='evidence_pending' RETURNING id`,
+    [proposal.id, target.actedBy ?? 'cli', proposal.source_id]);
+    if (claimed.length === 0) {
+      throw new TakeProposalError('not_pending', `Proposal #${proposal.id} was acted on concurrently.`);
+    }
+  }
+
+  const intent = {
+    kind: 'managed_maintenance_entityless_proposal_accept',
+    proposal_id: proposal.id,
+    evidence_hash: digest(evidence),
+    expected_revision: evidence.target.revision,
+  };
+  try {
+    const result = await submitMaintenanceIntent(engine, authority, proposal.page_slug, intent);
+    const rowNum = Number(result.row_num);
+    if (!Number.isSafeInteger(rowNum) || rowNum < 1) {
+      throw new TakeProposalError('review_refused', `Proposal #${proposal.id} is still awaiting its durable publication receipt.`);
+    }
+    return rowNum;
+  } catch (error) {
+    await restoreEntitylessProposalIfSettled(engine, proposal.id, proposal.source_id, authority.writer.principal.kind,
+      authority.writer.principal.id);
+    throw proposalActionError(error);
+  }
+}
+
+function asEntitylessRecord(proposal: TakeProposalRow): EntitylessProposalRecord {
+  return {
+    id: proposal.id, source_id: proposal.source_id, page_slug: proposal.page_slug, claim_text: proposal.claim_text,
+    kind: proposal.kind, holder: proposal.holder, weight: proposal.weight, status: proposal.status, evidence: proposal.evidence,
+  };
+}
+
+function proposalActionError(error: unknown): TakeProposalError {
+  if (error instanceof TakeProposalError) return error;
+  if (error instanceof OperationError) return new TakeProposalError('review_refused', error.message);
+  return new TakeProposalError('review_refused', error instanceof Error ? error.message : String(error));
+}
+
+async function restoreEntitylessProposalIfSettled(engine: BrainEngine, id: number, sourceId: string,
+  principalKind?: string, principalId?: string): Promise<void> {
+  const requestRows = await engine.executeRaw<{ state: string }>(`SELECT state FROM persistence_requests
+    WHERE source_id=$1 AND operation='submit_job' AND intent->>'kind'='managed_maintenance_entityless_proposal_accept'
+      AND intent->>'proposal_id'=$2
+      AND ($3::text IS NULL OR principal_kind=$3) AND ($4::text IS NULL OR principal_id=$4)`,
+  [sourceId, String(id), principalKind ?? null, principalId ?? null]).catch(() => []);
+  const stillRunning = requestRows.some(row => !['failed', 'cancelled', 'conflict'].includes(row.state));
+  if (!stillRunning) {
+    await engine.executeRaw(`UPDATE take_proposals SET status='evidence_pending',acted_at=NULL,acted_by=NULL,promoted_row_num=NULL
+      WHERE id=$1 AND source_id=$2 AND status='evidence_accepting'`, [id, sourceId]).catch(() => undefined);
+  }
+}
+
+function entitylessStatus(row: TakeProposalRow): boolean {
+  return row.status.startsWith('evidence_');
+}
+
 /**
  * Promote a pending proposal into the page's takes fence.
  *
@@ -248,7 +355,11 @@ export async function acceptProposal(
   id: number,
 ): Promise<{ proposal: TakeProposalRow; rowNum: number }> {
   const { engine } = target;
-  const proposal = await loadProposal(engine, id, target.sourceId, { allowStranded: true });
+  const proposal = await loadProposal(engine, id, target.sourceId, { allowStranded: true, allowEvidence: true });
+  if (entitylessStatus(proposal)) {
+    const rowNum = await acceptEntitylessProposal(target, proposal);
+    return { proposal: { ...proposal, status: 'evidence_accepted', promoted_row_num: rowNum }, rowNum };
+  }
   if (!target.brainDir) {
     throw new TakeProposalError(
       'not_found',
@@ -340,13 +451,19 @@ export async function rejectProposal(
   id: number,
 ): Promise<TakeProposalRow> {
   const { engine } = target;
-  const proposal = await loadProposal(engine, id, target.sourceId);
+  const proposal = await loadProposal(engine, id, target.sourceId, { allowEvidence: true });
+  const evidencePending = proposal.status === 'evidence_pending';
+  if (!evidencePending && proposal.status !== 'pending') {
+    throw new TakeProposalError('not_pending', `Proposal #${id} is already '${proposal.status}' (acted on) — only pending proposals can be rejected.`);
+  }
+  const pendingStatus = evidencePending ? 'evidence_pending' : 'pending';
+  const rejectedStatus = evidencePending ? 'evidence_rejected' : 'rejected';
   const rejected = await engine.executeRaw<{ id: number }>(
     `UPDATE take_proposals
-        SET status = 'rejected', acted_at = now(), acted_by = $2
-      WHERE id = $1 AND status = 'pending'
+        SET status = $3, acted_at = now(), acted_by = $2
+      WHERE id = $1 AND status = $4
       RETURNING id`,
-    [id, target.actedBy ?? 'cli'],
+    [id, target.actedBy ?? 'cli', rejectedStatus, pendingStatus],
   );
   if (rejected.length === 0) {
     throw new TakeProposalError(

@@ -29,6 +29,7 @@ import { createHash } from 'node:crypto';
 import { isAborted } from '../../abort-check.ts';
 import { maintenancePreflight, submitMaintenanceConsolidation } from '../../persistence/prepared-maintenance.ts';
 import { managedPersistenceEnabled } from '../../persistence/ownership.ts';
+import { produceEntitylessFactProposals } from '../entityless-proposals.ts';
 
 export interface ConsolidatePhaseOpts {
   dryRun?: boolean;
@@ -47,6 +48,8 @@ export interface ConsolidatePhaseOpts {
   /** Minimum age (ms) of the OLDEST fact in a bucket before consolidation. Default 24h. */
   minOldestAgeMs?: number;
   sourceId?: string;
+  /** Internal, explicit opt-in. Never wired to a CLI flag or cycle schedule. */
+  entitylessProposalTargetSlug?: string;
 }
 
 export async function runPhaseConsolidate(
@@ -64,6 +67,21 @@ export async function runPhaseConsolidate(
   let bucketsProcessed = 0;
   let bucketsSkipped = 0;
   let clustersSkippedRetired = 0;
+  let entitylessProposalsCreated = 0;
+  let entitylessReviewClusters = 0;
+  const entitylessSourceId = opts.sourceId?.trim();
+  const entitylessTargetSlug = opts.entitylessProposalTargetSlug?.trim();
+  if (opts.entitylessProposalTargetSlug !== undefined
+    && (!entitylessSourceId || entitylessSourceId === '__all__' || !entitylessTargetSlug)) {
+    return {
+      phase: 'consolidate', status: 'fail', duration_ms: 0,
+      summary: 'entityless review requires an explicit source and target',
+      details: { dryRun, facts_consolidated: 0, takes_written: 0, buckets_processed: 0, buckets_skipped: 0,
+        entityless_proposals_created: 0, entityless_review_clusters: 0 },
+      error: { class: 'EntitylessProposalScopeError', code: 'entityless_proposal_scope_required',
+        message: 'Entityless review requires an explicit sourceId and a nonblank target slug.' },
+    };
+  }
 
   // Pull every (source_id, entity_slug) bucket of unconsolidated facts.
   // Uses the partial idx_facts_unconsolidated index.
@@ -296,6 +314,31 @@ export async function runPhaseConsolidate(
     }
   }
 
+  // Entityless facts have no safe identity bucket. This isolated opt-in only
+  // creates review rows; it never takes the consolidation write path above.
+  if (opts.entitylessProposalTargetSlug !== undefined && !dryRun) {
+    try {
+      const review = await produceEntitylessFactProposals(engine, {
+        sourceId: entitylessSourceId!, targetSlug: entitylessTargetSlug!,
+      });
+      entitylessProposalsCreated = review.inserted;
+      entitylessReviewClusters = review.clusters;
+    } catch (err) {
+      // Proposal evidence can contain private fact text. Keep cycle progress
+      // and failure details bounded to a code; the local queue is the only
+      // intended surface for that evidence.
+      return {
+        phase: 'consolidate', status: 'fail', duration_ms: 0,
+        summary: 'failed to create entityless review proposals',
+        details: { dryRun, facts_consolidated: factsConsolidated, takes_written: takesWritten,
+          buckets_processed: bucketsProcessed, buckets_skipped: bucketsSkipped,
+          entityless_proposals_created: 0, entityless_review_clusters: 0 },
+        error: { class: 'EntitylessProposalFailed', code: 'entityless_proposal_failed',
+          message: err instanceof Error ? err.name : 'unknown error' },
+      };
+    }
+  }
+
   return {
     phase: 'consolidate',
     status: factsConsolidated === 0 && clustersSkippedRetired > 0 ? 'skipped' : 'ok',
@@ -303,7 +346,10 @@ export async function runPhaseConsolidate(
     summary: dryRun
       ? `(dry-run) would promote ${factsConsolidated} facts into ${takesWritten} takes across ${bucketsProcessed} buckets`
       : `promoted ${factsConsolidated} facts into ${takesWritten} takes across ${bucketsProcessed} buckets` +
-        (clustersSkippedRetired ? `; skipped ${clustersSkippedRetired} clusters with retired takes` : ''),
+        (clustersSkippedRetired ? `; skipped ${clustersSkippedRetired} clusters with retired takes` : '') +
+        (opts.entitylessProposalTargetSlug !== undefined
+          ? (dryRun ? '; entityless review proposal creation skipped (dry-run)'
+            : `; created ${entitylessProposalsCreated} entityless review proposal(s)`) : ''),
     details: {
       dryRun,
       facts_consolidated: factsConsolidated,
@@ -311,6 +357,10 @@ export async function runPhaseConsolidate(
       buckets_processed: bucketsProcessed,
       buckets_skipped: bucketsSkipped,
       clusters_skipped_retired: clustersSkippedRetired,
+      ...(opts.entitylessProposalTargetSlug !== undefined ? {
+        entityless_proposals_created: entitylessProposalsCreated,
+        entityless_review_clusters: entitylessReviewClusters,
+      } : {}),
       ...(factsConsolidated === 0 && clustersSkippedRetired > 0 ? { reason: 'retired_take' } : {}),
     },
   };
