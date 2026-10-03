@@ -143,6 +143,8 @@ world/private × 新status4種 × receipt有無の16ケースで旧acceptは全�
 
 対象は `shintaro-gbrain`、専用の整理先案は `notes/memory-review`。
 既存の人物ページへ割り当てず、承認後に専用ページを作成する。
+remote の完全一致読取では `page_not_found` だったが、private同名の不存在は未証明。
+承認後の作成直前にlocal経路でも確認し、同名ページがあれば上書きしない。
 既存 DB config の `dream.consolidate.entityless.shintaro-gbrain` に
 `{"source_incarnation":"<現在のsource incarnation>","target_slug":"notes/memory-review"}` を設定する案。
 未設定なら無効。設定を unset すれば翌回以降の候補生成を止められる。
