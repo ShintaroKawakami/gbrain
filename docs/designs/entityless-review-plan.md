@@ -47,8 +47,14 @@ schema の正本と登録・両 engine 用生成物は既存 generator で揃え
 private 候補、主体・根拠の変更、期限切れ、owner 不在、権限不足、整理先の非公開化・削除は拒否する。
 失敗時は take・ページ・元 facts を変更しない。再実行しても同じ採用を二重登録しない。
 
+期限が未来でも、有限の `valid_until` を持つ根拠を含む候補は採用しない。
+既存 takes の通常読取は `active` を確認するが、`until_date` による facts 同等の読取時失効を保証しないため。
+期限付き候補は local の確認までとし、新しい失効機構は追加しない。
+
 採用成功時にも、元 facts の本文、entity=NULL、visibility、`valid_until`、`consolidated_at` は変えない。
 take の provenance は永続した proposal/evidence へ結びつける。短い source 文字列への切り詰めで根拠を失わない。
+採用した take は明示的に追加する別の記憶となる。後日、元 fact を取り下げただけで take も自動的に消えるとは約束しない。
+その連動は既存の forget 経路で保証されておらず、必要なら別の仕様承認と検証が必要になる。
 
 ## 非公開の意味
 
