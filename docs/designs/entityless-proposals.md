@@ -19,6 +19,7 @@
 ## 進捗、retry、再レビュー
 
 - proposal evidence を進捗記録として使う。変更のない `evidence_accepted` / `evidence_rejected` は target revision が変わっても covered。`evidence_pending` は target revision が変わると新しい proposal を作る。
+- 初回の候補生成は可視性ごとに3 facts以上を必要とする。以前の evidence が示す2-fact identity（同じ source ID / incarnation、target slug、visibility と2つの fact ID）に限り、現在も eligible な2 facts がある場合は target page ID / revision の変更や fact snapshot の変更後に新しい revision-bound proposalを作る。新しい evidence は現在の完全な fact snapshot を固定し、未レビューの2-fact group は生成しない。
 - group 内の1 fact が変わると、その全 snapshot が一致しなくなるため元 group 全体を再候補化する。target が新規作成・更新された場合、pending group は新しい revision-bound proposal になる。
 - durable acceptance の pending/running と committed receipt は再利用する。terminal failed/conflict は次の acceptance 呼び出しで新しい attempt ID を使うため、同じ proposal を再試行できる。receipt lookup が失敗したときは状態不明として `evidence_accepting` を維持する。
 - finite `valid_until` を持つ fact はローカル候補になり得るが accept 時に拒否する。accept は元 fact の validity、supersession、withdrawal、source incarnation、target revision を確認する。durable admission 後と publication transaction 内でも再確認し、競合時は publication 全体を rollback する。

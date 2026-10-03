@@ -61,9 +61,9 @@ for (const backend of testBackends()) describe(`entityless proposal acceptance (
 const config = (): GBrainConfig => loadConfig() ?? { engine: 'pglite' } as GBrainConfig;
 const oldTimestamp = () => new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString();
 
-function unitVector(): string {
+function unitVector(component = 0): string {
   const vector = new Float32Array(1536);
-  vector[0] = 1;
+  vector[component] = 1;
   return `[${Array.from(vector).join(',')}]`;
 }
 
@@ -77,13 +77,14 @@ async function seedTarget(slug = 'notes/acceptance-target', visibility: 'world' 
   return { id: Number(snapshot.page.id), revision: snapshot.revision };
 }
 
-async function seedFact(text: string, visibility: 'world' | 'private' = 'world', validUntil?: string): Promise<number> {
+async function seedFact(text: string, visibility: 'world' | 'private' = 'world', validUntil?: string,
+  confidence = 0.75, vectorComponent = 0): Promise<number> {
   const rows = await engine.executeRaw<{ id: number }>(`INSERT INTO facts
       (source_id,entity_slug,fact,kind,visibility,notability,valid_from,valid_until,source,source_session,confidence,
        embedding,embedded_at,embedding_model,embedded_text_hash)
     VALUES ('default',NULL,$1,'fact',$2,'medium',$3::timestamptz,$4::timestamptz,'entityless-acceptance',
-      $5,0.75,$6::vector,$3::timestamptz,'openai:text-embedding-3-large',md5($1)) RETURNING id`,
-  [text, visibility, oldTimestamp(), validUntil ?? null, `accept-session-${text}`, unitVector()]);
+      $5,$7,$6::vector,$3::timestamptz,'openai:text-embedding-3-large',md5($1)) RETURNING id`,
+  [text, visibility, oldTimestamp(), validUntil ?? null, `accept-session-${text}`, unitVector(vectorComponent), confidence]);
   return Number(rows[0]!.id);
 }
 
@@ -142,6 +143,82 @@ test('world acceptance publishes through the guarded durable intent and leaves s
   const replay = await acceptProposal(proposalTarget(proposal), proposal.id);
   expect(replay.rowNum).toBe(first.rowNum);
   expect(await engine.listTakes({ page_slug: proposal.page_slug })).toHaveLength(1);
+  expect(await factBytes()).toBe(beforeFacts);
+}));
+
+test('producer weights round-trip at REAL precision for 0.8 and mixed confidence averages', async () => isolated(async () => {
+  const confidenceSets = [[0.8, 0.8, 0.8], [0.7, 0.8, 0.8]];
+  for (const [caseIndex, confidences] of confidenceSets.entries()) {
+    if (caseIndex > 0) await resetPgliteState(engine as PGLiteEngine);
+    await engine.setConfig('sync.write_through', 'false');
+    await seedTarget();
+    for (let index = 0; index < confidences.length; index++) {
+      await seedFact(`weight round-trip ${caseIndex}-${index}`, 'world', undefined, confidences[index]!);
+    }
+    const beforeFacts = await factBytes();
+    await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/acceptance-target' });
+    const [proposal] = await engine.executeRaw<TakeProposalRow>(`SELECT id,source_id,page_slug,claim_text,kind,holder,weight,domain,status,
+      proposed_at,model_id,promoted_row_num,evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1' ORDER BY id`);
+    expect(proposal).toBeTruthy();
+    const candidateWeight = Number((evidenceOf(proposal!).candidate as Record<string, unknown>).weight);
+    expect(Math.fround(Number(proposal!.weight))).toBe(Math.fround(candidateWeight));
+    if (caseIndex === 1) expect(Math.fround(candidateWeight)).not.toBe(candidateWeight);
+
+    const accepted = await acceptProposal(proposalTarget(proposal!), Number(proposal!.id));
+    expect(accepted.rowNum).toBeGreaterThan(0);
+    expect(await proposalState(Number(proposal!.id))).toEqual({ status: 'evidence_accepted', promoted_row_num: accepted.rowNum });
+    expect(await factBytes()).toBe(beforeFacts);
+  }
+}));
+
+test('two-fact groups refresh after another reviewed group changes the target revision', async () => isolated(async () => {
+  await engine.setConfig('sync.write_through', 'false');
+  await seedTarget();
+  const groupAIds = [
+    await seedFact('review group A synthetic fact 0', 'world', undefined, 0.75, 0),
+    await seedFact('review group A synthetic fact 1', 'world', undefined, 0.75, 0),
+  ];
+  expect((await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/acceptance-target' }))
+    .details.entityless_proposals_created).toBe(0);
+
+  const groupBIds = [
+    await seedFact('review group B synthetic fact 0', 'world', undefined, 0.75, 1),
+    await seedFact('review group B synthetic fact 1', 'world', undefined, 0.75, 1),
+  ];
+  const beforeFacts = await factBytes();
+  expect((await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/acceptance-target' }))
+    .details.entityless_proposals_created).toBe(2);
+  const original = await engine.executeRaw<TakeProposalRow>(`SELECT id,source_id,page_slug,claim_text,kind,holder,weight,domain,status,
+    proposed_at,model_id,promoted_row_num,evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1' ORDER BY id`);
+  const groupA = original.find(row => (evidenceOf(row).facts as Array<Record<string, unknown>>)
+    .every(fact => groupAIds.includes(Number(fact.id))));
+  const groupB = original.find(row => (evidenceOf(row).facts as Array<Record<string, unknown>>)
+    .every(fact => groupBIds.includes(Number(fact.id))));
+  expect(original).toHaveLength(2);
+  expect(groupA).toBeTruthy();
+  expect(groupB).toBeTruthy();
+
+  const acceptedA = await acceptProposal(proposalTarget(groupA!), Number(groupA!.id));
+  expect(acceptedA.rowNum).toBeGreaterThan(0);
+  await expect(acceptProposal(proposalTarget(groupB!), Number(groupB!.id))).rejects.toThrow('target page changed');
+  expect(await proposalState(Number(groupB!.id))).toEqual({ status: 'evidence_pending', promoted_row_num: null });
+
+  const currentTarget = await engine.readPageSnapshot('notes/acceptance-target', { sourceId: 'default' });
+  expect(currentTarget).toBeTruthy();
+  expect((await runPhaseConsolidate(engine, { sourceId: 'default', entitylessProposalTargetSlug: 'notes/acceptance-target' }))
+    .details.entityless_proposals_created).toBe(1);
+  const refreshed = await engine.executeRaw<TakeProposalRow>(`SELECT id,source_id,page_slug,claim_text,kind,holder,weight,domain,status,
+    proposed_at,model_id,promoted_row_num,evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1' ORDER BY id`);
+  expect(refreshed).toHaveLength(3);
+  const groupBRefresh = refreshed.find(row => Number(row.id) !== Number(groupB!.id)
+    && (evidenceOf(row).facts as Array<Record<string, unknown>>).map(fact => Number(fact.id)).sort((a, b) => a - b)
+      .join(',') === [...groupBIds].sort((a, b) => a - b).join(','));
+  expect(groupBRefresh?.status).toBe('evidence_pending');
+  expect((evidenceOf(groupBRefresh!).target as Record<string, unknown>).revision).toBe(currentTarget!.revision);
+  const acceptedB = await acceptProposal(proposalTarget(groupBRefresh!), Number(groupBRefresh!.id));
+  expect(acceptedB.rowNum).toBeGreaterThan(0);
+  expect(await proposalState(Number(groupBRefresh!.id))).toEqual({ status: 'evidence_accepted', promoted_row_num: acceptedB.rowNum });
+  expect(await engine.listTakes({ page_slug: 'notes/acceptance-target' })).toHaveLength(2);
   expect(await factBytes()).toBe(beforeFacts);
 }));
 
@@ -230,6 +307,15 @@ test('expired, withdrawn, changed or malformed evidence refuses before a take ca
   await expect(acceptProposal(proposalTarget(badEvidence), badEvidence.id)).rejects.toThrow('evidence is malformed');
   expect(await proposalState(badEvidence.id)).toEqual({ status: 'evidence_pending', promoted_row_num: null });
   expect(await engine.listTakes({ page_slug: badEvidence.page_slug })).toHaveLength(0);
+
+  await resetPgliteState(engine as PGLiteEngine);
+  await engine.setConfig('sync.write_through', 'false');
+  await seedTarget();
+  const changedWeight = await seedProposal();
+  await engine.executeRaw('UPDATE take_proposals SET weight=weight+0.01 WHERE id=$1', [changedWeight.id]);
+  await expect(acceptProposal(proposalTarget(changedWeight), changedWeight.id)).rejects.toThrow('evidence is malformed');
+  expect(await proposalState(changedWeight.id)).toEqual({ status: 'evidence_pending', promoted_row_num: null });
+  expect(await engine.listTakes({ page_slug: changedWeight.page_slug })).toHaveLength(0);
 }));
 
 test('TTL drift after durable admission is rejected by the publication preparer and stays reviewable', async () => isolated(async () => {

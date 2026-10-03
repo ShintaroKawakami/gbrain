@@ -41,9 +41,9 @@ async function isolated<T>(run: () => Promise<T>): Promise<T> {
 const oldTimestamp = () => new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString();
 const recentTimestamp = () => new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
-function unitVector(): string {
+function unitVector(component = 0): string {
   const vector = new Float32Array(1536);
-  vector[0] = 1;
+  vector[component] = 1;
   return `[${Array.from(vector).join(',')}]`;
 }
 
@@ -58,7 +58,7 @@ async function seedTarget(slug: string, visibility: 'world' | 'private' = 'world
 }
 
 async function seedFact(options: { sourceId?: string; text: string; visibility?: 'world' | 'private'; validFrom?: string;
-  session?: string; embedding?: string | null }): Promise<number> {
+  session?: string; embedding?: string | null; vectorComponent?: number }): Promise<number> {
   const sourceId = options.sourceId ?? 'default';
   const rows = await engine.executeRaw<{ id: number }>(`INSERT INTO facts
       (source_id,entity_slug,fact,kind,visibility,notability,valid_from,source,source_session,confidence,
@@ -66,7 +66,7 @@ async function seedFact(options: { sourceId?: string; text: string; visibility?:
     VALUES ($1,NULL,$2,'fact',$3,'medium',$4::timestamptz,'entityless-test',$5,0.8,$6::vector,$4::timestamptz,
       'openai:text-embedding-3-large',md5($2)) RETURNING id`,
   [sourceId, options.text, options.visibility ?? 'world', options.validFrom ?? oldTimestamp(),
-    options.session ?? `session-${options.text}`, options.embedding === undefined ? unitVector() : options.embedding]);
+    options.session ?? `session-${options.text}`, options.embedding === undefined ? unitVector(options.vectorComponent) : options.embedding]);
   return Number(rows[0]!.id);
 }
 
@@ -215,6 +215,52 @@ test('a 101-fact candidate cluster is fully covered by balanced evidence groups'
 
   expect(await produceEntitylessFactProposals(engine, { sourceId: 'default', targetSlug: 'notes/101-facts' }))
     .toEqual({ scanned: 0, inserted: 0, clusters: 0 });
+}));
+
+test('the three-fact initial gate permits only previously reviewed two-fact groups to refresh', async () => isolated(async () => {
+  const targetSlug = 'notes/reviewed-pairs';
+  await seedTarget(targetSlug);
+  const groupAIds = [
+    await seedFact({ text: 'review group A synthetic fact 0', vectorComponent: 0 }),
+    await seedFact({ text: 'review group A synthetic fact 1', vectorComponent: 0 }),
+  ];
+  expect((await produceEntitylessFactProposals(engine, { sourceId: 'default', targetSlug })).inserted).toBe(0);
+
+  const groupBIds = [
+    await seedFact({ text: 'review group B synthetic fact 0', vectorComponent: 1 }),
+    await seedFact({ text: 'review group B synthetic fact 1', vectorComponent: 1 }),
+  ];
+  const first = await produceEntitylessFactProposals(engine, { sourceId: 'default', targetSlug });
+  expect(first).toEqual({ scanned: 4, inserted: 2, clusters: 2 });
+  const original = await engine.executeRaw<{ id: number; status: string; evidence: unknown }>(
+    "SELECT id,status,evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1' ORDER BY id");
+  expect(original).toHaveLength(2);
+  const groupA = original.find(row => (readEvidence(row.evidence).facts as Array<Record<string, unknown>>)
+    .every(fact => groupAIds.includes(Number(fact.id))));
+  const groupB = original.find(row => (readEvidence(row.evidence).facts as Array<Record<string, unknown>>)
+    .every(fact => groupBIds.includes(Number(fact.id))));
+  expect(groupA).toBeTruthy();
+  expect(groupB).toBeTruthy();
+
+  await engine.executeRaw("UPDATE take_proposals SET status='evidence_accepted' WHERE id=$1", [groupA!.id]);
+  await engine.putPage(targetSlug, {
+    type: 'note', title: 'Review target', compiled_truth: 'Target page revised after group A review.', frontmatter: {},
+  }, { sourceId: 'default' });
+  await engine.executeRaw('UPDATE facts SET confidence=confidence-0.01 WHERE id=$1', [groupBIds[1]!]);
+  const revisedTarget = await engine.readPageSnapshot(targetSlug, { sourceId: 'default' });
+  const beforeRefresh = await factBytes();
+  const refreshed = await produceEntitylessFactProposals(engine, { sourceId: 'default', targetSlug });
+  expect(refreshed).toEqual({ scanned: 2, inserted: 1, clusters: 1 });
+  const after = await engine.executeRaw<{ id: number; status: string; evidence: unknown }>(
+    "SELECT id,status,evidence FROM take_proposals WHERE prompt_version='entityless-fact-review-v1' ORDER BY id");
+  expect(after).toHaveLength(3);
+  expect(after.find(row => Number(row.id) === Number(groupB!.id))?.status).toBe('evidence_pending');
+  const newGroupB = after.find(row => Number(row.id) !== Number(groupB!.id)
+    && (readEvidence(row.evidence).facts as Array<Record<string, unknown>>).map(fact => Number(fact.id)).sort((a, b) => a - b)
+      .join(',') === [...groupBIds].sort((a, b) => a - b).join(','));
+  expect(newGroupB?.status).toBe('evidence_pending');
+  expect((readEvidence(newGroupB!.evidence).target as Record<string, unknown>).revision).toBe(revisedTarget!.revision);
+  expect(await factBytes()).toBe(beforeRefresh);
 }));
 
 test('unchanged rejected and accepted evidence stays covered while a changed fact regenerates its original group', async () => isolated(async () => {
