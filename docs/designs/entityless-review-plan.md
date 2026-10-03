@@ -79,7 +79,7 @@ take.visibility の新設や既存 page の opt-out 変更は、今回の推奨�
 新テストは合成 PGLite/隔離 Postgres fixture を使う。本番の記憶を受入試験にしない。
 本番同版 baseline `a4c5ea3c99d41fa601f48c0cc5d73b4adea3b873` / v0.60.25.0 / Bun 1.4.2 では、
 `cycle-consolidate`、`consolidate-valid-until`、`cycle-repeated-consolidation`、`managed-maintenance` の4ファイル38テストが成功した。
-これは変更後の試験結果ではない。新実装は回収後に独立検証・レビュー・実装監査を行う。
+これは基準版の結果であり、変更後の検証結果は下記に分けて記録する。
 
 ## 本人に承認いただく最後の変更
 
@@ -121,16 +121,22 @@ Studio の PostgreSQL 15 は vector extension がなく、default Docker daemon 
 本番 DSN は未使用。既存 base の `managed-maintenance.test.ts` はこの実 Postgres で21件成功、0件失敗。
 変更後の row-lock/publication race の結果とは区別し、検証終了時にはこの一時 container を削除する。
 
-## 検証結果と残っている確認
+## 検証結果
 
-`0c54e699d` では、隔離HOMEで新旧9ファイル99件が成功し、実PostgreSQL16では採用・migration・既存maintenanceの32件が成功した。
-型検査とschema/registry生成物の鮮度確認も成功。実際の上流185/186 DDLを適用して根拠を保持する試験を含む。
-同じheadの旧版実関数16ケースはPGLite/実PostgreSQL双方で採用拒否・旧一覧0件・新規take/request0件を確認した。
+補修後のコード `a06dea799` は、隔離HOMEの新旧9ファイルで102件成功・0件失敗・633 assertions。
+実PostgreSQL16の採用・migration・既存maintenanceは34件成功・0件失敗・271 assertions。
+型検査も成功。schema/registry生成物は、同じ生成内容の `0c54e699d` で鮮度確認済み。
+上流183相当→今回184→原文185/186 DDLの適用と根拠保持、REAL保存の丸め、
+2件ずつの候補を順番に採用する際の再生成まで含む。
+
+全体レビューで見つけたREALの丸めと既存2件候補の再生成を補修した。
+旧版の実関数16ケースは `0c54e699d` のPGLite/実PostgreSQL双方で採用拒否・旧一覧0件・新規take/request0件を確認した。
+最新headでも再確認し、最終headの差分レビュー・実装監査・discrimination testとともにPR本文へ記録する。
 旧版consumer daemon全体の再起動試験とは区別する。
 
-全体レビューでREALの丸めと既存2件候補の再生成に問題を見つけ、補修中。
-最終headで関係試験・全体レビュー・実装監査を揃えるまで完成とはしない。
 worker内の環境では既存19件がEPERMで失敗した。成功したhost隔離試験と区別し、未実施を成功扱いしない。
+同じCLI helperの既存実装を照合し、legacyの整理先自動解決に関するレビュー指摘は非該当と確認した。
+元から `--dir` または `sync.repo_path` を使い、両方無ければ失敗する契約である。
 
 ## 本番反映案の具体化（まだ未実行）
 
@@ -153,4 +159,4 @@ remote の完全一致読取では `page_not_found` だったが、private同名
 `v184-decision-receipts.ts` のSHA-256は `b1c8efd66c0b8e7a2032d39a27f3bd4d9912d0df6f011a9230c3f6569f22210e`、
 `src/core/ai/decide/schema.ts` 全文のSHA-256は `377b8c17a2baebb5bef5ce289826ead5045af776c634994a1539157eeb75e09b`。
 上流185〜196と相対import先のDDLを静的に確認し、take_proposalsのevidence列・status制約を書き換える経路は見つからなかった。
-これは連続migration実行の成功証拠とは区別する。183→今回184→後続migrationの合成試験は最終実装で記録する。
+183→今回184→上流185/186の原文DDLはPGLite/実PostgreSQLで検証済み。187〜196は静的確認のみで、全面upgradeの成功とは扱わない。
