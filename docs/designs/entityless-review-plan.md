@@ -109,5 +109,8 @@ stable Hub と Mac mini の `mac-mini-mcp-autodeploy.sh` は現時点で `GBRAIN
 本番移行の承認前は fork 内の draft PR までとし、deploy branch への merge は保留する。
 
 実 Postgres の既存隔離 fixture は `test/helpers/persistence-postgres.ts`。
-Studio の既存 PostgreSQL 15 は vector extension がなく、Docker daemon も停止していた。
-本番 DSN は使わず、依存・常駐サービスも追加しない。実 Postgres の row-lock/publication race 試験は未実施と区別する。
+Studio の PostgreSQL 15 は vector extension がなく、default Docker daemon も停止していたが、
+既存の `colima-mixpost` daemon は利用可能だった。global context や他 PJ の container/volume を変えず、
+既存 CI と同じ `pgvector/pgvector:pg16` の専用一時 container を CPU 1・メモリ 1 GiB・localhost のみで作成した。
+本番 DSN は未使用。既存 base の `managed-maintenance.test.ts` はこの実 Postgres で21件成功、0件失敗。
+変更後の row-lock/publication race の結果とは区別し、検証終了時にはこの一時 container を削除する。
