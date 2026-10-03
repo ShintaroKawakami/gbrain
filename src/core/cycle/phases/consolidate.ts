@@ -47,6 +47,30 @@ export interface ConsolidatePhaseOpts {
   /** Minimum age (ms) of the OLDEST fact in a bucket before consolidation. Default 24h. */
   minOldestAgeMs?: number;
   sourceId?: string;
+  /**
+   * 2026-10-04 prototype: explicitly route active entityless WORLD facts into
+   * this existing page in sourceId. Requires managed persistence; never inferred.
+   */
+  entitylessTargetSlug?: string;
+}
+
+type ConsolidationFact = Pick<FactRow, 'id' | 'source_id' | 'entity_slug' | 'fact' | 'kind' | 'visibility' |
+  'valid_from' | 'source' | 'source_session' | 'confidence' | 'embedding' | 'embedding_model' | 'embedded_text_hash'>;
+
+interface EntitylessFactSqlRow {
+  id: number | bigint;
+  source_id: string;
+  entity_slug: null;
+  fact: string;
+  kind: FactRow['kind'];
+  visibility: 'world';
+  valid_from: Date | string;
+  source: string;
+  source_session: string | null;
+  confidence: number | string;
+  embedding: string | number[] | Float32Array | null;
+  embedding_model: string | null;
+  embedded_text_hash: string | null;
 }
 
 export async function runPhaseConsolidate(
@@ -55,6 +79,29 @@ export async function runPhaseConsolidate(
 ): Promise<PhaseResult> {
   const dryRun = opts.dryRun === true;
   const managed = await managedPersistenceEnabled(engine);
+  let entitylessTarget: Awaited<ReturnType<BrainEngine['readPageSnapshot']>> = null;
+  if (opts.entitylessTargetSlug !== undefined) {
+    const sourceId = opts.sourceId;
+    const targetSlug = opts.entitylessTargetSlug;
+    if (!sourceId || !sourceId.trim() || sourceId !== sourceId.trim()) {
+      return entitylessOptionFailure('entityless_source_required', 'Entityless consolidation requires a concrete sourceId.');
+    }
+    if (!targetSlug.trim() || targetSlug !== targetSlug.trim()) {
+      return entitylessOptionFailure('entityless_target_required', 'Entityless consolidation requires an explicit nonblank target slug.');
+    }
+    if (!managed) {
+      return entitylessOptionFailure('entityless_requires_managed_persistence', 'Entityless consolidation requires managed persistence.');
+    }
+    const [source] = await engine.executeRaw<{ id: string; archived: boolean }>(
+      'SELECT id,archived FROM sources WHERE id=$1', [sourceId]);
+    if (!source || source.archived) {
+      return entitylessOptionFailure('entityless_source_unavailable', 'The explicit entityless source is missing or inactive.');
+    }
+    entitylessTarget = await engine.readPageSnapshot(targetSlug, { sourceId, excludePrivate: true });
+    if (!entitylessTarget || entitylessTarget.page.deleted_at || entitylessTarget.page.frontmatter.visibility === 'private') {
+      return entitylessOptionFailure('entityless_target_unavailable', 'The explicit target must be an existing nonprivate page in the selected source.');
+    }
+  }
   const threshold = opts.clusterThreshold ?? 0.85;
   const minPerBucket = opts.minFactsPerBucket ?? 3;
   const minOldestAgeMs = opts.minOldestAgeMs ?? 24 * 60 * 60 * 1000;
@@ -65,24 +112,32 @@ export async function runPhaseConsolidate(
   let bucketsSkipped = 0;
   let clustersSkippedRetired = 0;
 
-  // Pull every (source_id, entity_slug) bucket of unconsolidated facts.
-  // Uses the partial idx_facts_unconsolidated index.
-  let buckets: Array<{ source_id: string; entity_slug: string; count: number }>;
+  // The legacy scan stays entity-only. The opt-in prototype adds exactly one
+  // source-scoped entityless bucket and never guesses an entity from its text.
+  let buckets: Array<{ source_id: string; entity_slug: string | null; count: number }>;
   try {
-    buckets = await engine.executeRaw<{
-      source_id: string; entity_slug: string; count: number;
-    }>(`
-      SELECT source_id, entity_slug, COUNT(*)::int AS count
-      FROM facts
-      WHERE consolidated_at IS NULL
-        AND expired_at IS NULL
-        AND (valid_until IS NULL OR valid_until > now())
-        AND entity_slug IS NOT NULL
-        AND ($2::boolean=false OR visibility='world')
-        AND ($1::text IS NULL OR source_id=$1)
-      GROUP BY source_id, entity_slug
-      HAVING COUNT(*) >= $3
-    `, [opts.sourceId ?? null, managed, minPerBucket]);
+    buckets = entitylessTarget
+      ? (await engine.executeRaw<{ source_id: string; count: number }>(`
+          SELECT source_id, COUNT(*)::int AS count
+          FROM facts
+          WHERE source_id=$1 AND entity_slug IS NULL AND consolidated_at IS NULL
+            AND expired_at IS NULL AND (valid_until IS NULL OR valid_until > now()) AND visibility='world'
+          GROUP BY source_id HAVING COUNT(*) >= $2
+        `, [opts.sourceId!, minPerBucket])).map(bucket => ({ ...bucket, entity_slug: null }))
+      : await engine.executeRaw<{
+          source_id: string; entity_slug: string; count: number;
+        }>(`
+          SELECT source_id, entity_slug, COUNT(*)::int AS count
+          FROM facts
+          WHERE consolidated_at IS NULL
+            AND expired_at IS NULL
+            AND (valid_until IS NULL OR valid_until > now())
+            AND entity_slug IS NOT NULL
+            AND ($2::boolean=false OR visibility='world')
+            AND ($1::text IS NULL OR source_id=$1)
+          GROUP BY source_id, entity_slug
+          HAVING COUNT(*) >= $3
+        `, [opts.sourceId ?? null, managed, minPerBucket]);
   } catch (err) {
     return {
       phase: 'consolidate',
@@ -109,12 +164,14 @@ export async function runPhaseConsolidate(
     }
 
     const maintenance = managed && !dryRun ? await maintenancePreflight(engine, b.source_id) : null;
-    const candidates = await engine.listFactsByEntity(b.source_id, b.entity_slug, {
-      activeOnly: true,
-      unconsolidatedOnly: true,
-      visibility: managed ? ['world'] : undefined,
-      limit: 100,
-    });
+    const candidates = entitylessTarget
+      ? await listEntitylessFacts(engine, b.source_id)
+      : await engine.listFactsByEntity(b.source_id, b.entity_slug!, {
+          activeOnly: true,
+          unconsolidatedOnly: true,
+          visibility: managed ? ['world'] : undefined,
+          limit: 100,
+        });
     const unconsolidated = managed ? candidates.filter(f => f.visibility === 'world') : candidates;
     if (unconsolidated.length < minPerBucket) {
       bucketsSkipped += 1;
@@ -134,12 +191,20 @@ export async function runPhaseConsolidate(
     const clusters = clusterFacts(unconsolidated, threshold);
 
     // Resolve entity_slug → page_id. If page missing in this source, skip.
-    const pageRows = await engine.executeRaw<{ id: number }>(
-      `SELECT id FROM pages WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL LIMIT 1`,
-      [b.source_id, b.entity_slug],
-    );
-    if (pageRows.length === 0) continue;
-    const pageId = pageRows[0].id;
+    let pageId: number;
+    if (entitylessTarget) {
+      if (!maintenance && !dryRun) {
+        return entitylessOptionFailure('entityless_requires_managed_persistence', 'Managed persistence stopped before entityless publication.');
+      }
+      pageId = entitylessTarget.page.id;
+    } else {
+      const pageRows = await engine.executeRaw<{ id: number }>(
+        `SELECT id FROM pages WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL LIMIT 1`,
+        [b.source_id, b.entity_slug],
+      );
+      if (pageRows.length === 0) continue;
+      pageId = pageRows[0].id;
+    }
 
     // Existing row_num max for this page → start appending after it.
     const rowMaxRows = await engine.executeRaw<{ max: number }>(
@@ -171,8 +236,10 @@ export async function runPhaseConsolidate(
       }
 
       if (maintenance) {
-        const receipt = await submitMaintenanceConsolidation(engine, maintenance, b.entity_slug, cluster,
-          { claim: best.fact, weight: clamp01(avgWeight), source: sources.slice(0, 200), since: sinceISO });
+        const receipt = await submitMaintenanceConsolidation(engine, maintenance,
+          entitylessTarget ? opts.entitylessTargetSlug! : b.entity_slug!, cluster,
+          { claim: best.fact, weight: clamp01(avgWeight), source: sources.slice(0, 200), since: sinceISO },
+          entitylessTarget ? { entitylessTarget: true } : undefined);
         factsConsolidated += Number(receipt.facts_consolidated ?? 0);
         takesWritten += Number(receipt.takes_written ?? 0);
         if (receipt.reason === 'retired_take') clustersSkippedRetired++;
@@ -326,9 +393,9 @@ export async function runPhaseConsolidate(
  * no-embedding singletons sit out the cycle. v0.32+ fact-extraction
  * pipeline ensures embeddings are computed at insertFact time.
  */
-function clusterFacts(facts: FactRow[], threshold: number): FactRow[][] {
+function clusterFacts(facts: ConsolidationFact[], threshold: number): ConsolidationFact[][] {
   const sorted = [...facts].sort((a, b) => b.valid_from.getTime() - a.valid_from.getTime());
-  const clusters: FactRow[][] = [];
+  const clusters: ConsolidationFact[][] = [];
   for (const f of sorted) {
     if (!f.embedding || !f.embedding_model || f.embedded_text_hash !== createHash('md5').update(f.fact).digest('hex')) {
       clusters.push([f]);
@@ -349,6 +416,31 @@ function clusterFacts(facts: FactRow[], threshold: number): FactRow[][] {
     if (!placed) clusters.push([f]);
   }
   return clusters;
+}
+
+function entitylessOptionFailure(reason: string, message: string): PhaseResult {
+  return { phase: 'consolidate', status: 'fail', duration_ms: 0, summary: message, details: { reason },
+    error: { class: 'ConsolidateEntitylessRefused', code: reason, message } };
+}
+
+async function listEntitylessFacts(engine: BrainEngine, sourceId: string): Promise<ConsolidationFact[]> {
+  const rows = await engine.executeRaw<EntitylessFactSqlRow>(`SELECT id,source_id,entity_slug,fact,kind,visibility,valid_from,
+      source,source_session,confidence,embedding,embedding_model,embedded_text_hash
+    FROM facts WHERE source_id=$1 AND entity_slug IS NULL AND consolidated_at IS NULL AND expired_at IS NULL
+      AND (valid_until IS NULL OR valid_until > now()) AND visibility='world'
+    ORDER BY valid_from DESC,id DESC LIMIT 100`, [sourceId]);
+  return rows.map(row => {
+    let embedding: Float32Array | null = null;
+    if (row.embedding instanceof Float32Array) embedding = row.embedding;
+    else if (Array.isArray(row.embedding)) embedding = new Float32Array(row.embedding);
+    else if (typeof row.embedding === 'string') {
+      const text = row.embedding.trim();
+      const values = (text.startsWith('[') ? text.slice(1, -1) : text).split(',').map(value => Number.parseFloat(value.trim())).filter(Number.isFinite);
+      embedding = values.length ? new Float32Array(values) : null;
+    }
+    return { ...row, id: Number(row.id), valid_from: row.valid_from instanceof Date ? row.valid_from : new Date(row.valid_from),
+      confidence: typeof row.confidence === 'string' ? Number.parseFloat(row.confidence) : row.confidence, embedding };
+  });
 }
 
 function clamp01(x: number): number {

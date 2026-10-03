@@ -147,6 +147,8 @@ export async function verifyMaintenanceOutputs(engine: BrainEngine, authority: M
 
 interface FactSnapshot { id: number; value: Record<string, unknown>; }
 interface EvidencePage { slug: string; revision: string; id: number; }
+type ConsolidationInputFact = Pick<FactRow, 'id' | 'source_id' | 'entity_slug' | 'fact' | 'kind' | 'visibility' |
+  'valid_from' | 'source' | 'source_session' | 'confidence' | 'embedding' | 'embedding_model' | 'embedded_text_hash'>;
 
 async function readFacts(engine: BrainEngine, sourceId: string, ids: number[], lock = false): Promise<FactSnapshot[]> {
   const rows = await engine.executeRaw<FactSnapshot>(`SELECT f.id,jsonb_build_object(
@@ -163,15 +165,25 @@ async function readFacts(engine: BrainEngine, sourceId: string, ids: number[], l
 }
 
 export async function submitMaintenanceConsolidation(engine: BrainEngine, authority: MaintenanceAuthority,
-  slug: string, cluster: FactRow[], take: { claim: string; weight: number; source: string; since: string }): Promise<Record<string, unknown>> {
+  slug: string, cluster: ConsolidationInputFact[], take: { claim: string; weight: number; source: string; since: string },
+  options?: { entitylessTarget: true }): Promise<Record<string, unknown>> {
   const sourceId = authority.writer.sourceId;
+  const entitylessTarget = options?.entitylessTarget === true;
+  if (entitylessTarget && (!slug.trim() || slug !== slug.trim())) {
+    throw new OperationError('invalid_params', 'Entityless consolidation requires an explicit nonblank target slug.');
+  }
+  if (new Set(cluster.map(fact => fact.id)).size !== cluster.length) {
+    throw new OperationError('invalid_params', 'A consolidation cluster cannot repeat a fact.');
+  }
   const facts = await readFacts(engine, sourceId, cluster.map(f => f.id));
-  if (facts.length !== cluster.length || facts.some(f => f.value.visibility !== 'world' || f.value.expired_at || f.value.consolidated_at)) {
+  if (facts.length !== cluster.length || facts.some(f => f.value.source_id !== sourceId || f.value.visibility !== 'world' || f.value.expired_at ||
+    f.value.consolidated_at || f.value.valid_until && Date.parse(String(f.value.valid_until)) <= Date.now())) {
     throw new OperationError('revision_conflict', 'The consolidation facts are no longer eligible.');
   }
   for (const fact of facts) {
     const observed = cluster.find(f => f.id === fact.id)!;
-    if (fact.value.fact !== observed.fact || fact.value.entity_slug !== slug || fact.value.confidence !== observed.confidence ||
+    if (fact.value.fact !== observed.fact || fact.value.entity_slug !== (entitylessTarget ? null : slug) ||
+      observed.entity_slug !== (entitylessTarget ? null : slug) || fact.value.confidence !== observed.confidence ||
       fact.value.source !== observed.source || fact.value.source_session !== observed.source_session ||
       Date.parse(String(fact.value.valid_from)) !== observed.valid_from.getTime()) {
       throw new OperationError('revision_conflict', 'The consolidation input changed after clustering.');
@@ -180,11 +192,14 @@ export async function submitMaintenanceConsolidation(engine: BrainEngine, author
   const pages: EvidencePage[] = [];
   for (const pageSlug of [...new Set([slug, ...facts.map(f => f.value.source_markdown_slug).filter((s): s is string => typeof s === 'string' && !!s)])].sort()) {
     const snapshot = await engine.readPageSnapshot(pageSlug, { sourceId, excludePrivate: true });
-    if (!snapshot) throw new OperationError('page_not_found', 'The consolidation evidence page is unavailable.');
+    if (!snapshot || snapshot.page.deleted_at || snapshot.page.frontmatter.visibility === 'private') {
+      throw new OperationError('page_not_found', 'The consolidation evidence page is unavailable.');
+    }
     pages.push({ slug: pageSlug, revision: snapshot.revision, id: snapshot.page.id });
   }
   const target = pages.find(p => p.slug === slug)!;
-  const intent = { kind: 'managed_maintenance_consolidate', expected_revision: target.revision, facts, pages, ...take };
+  const intent = { kind: 'managed_maintenance_consolidate', expected_revision: target.revision, facts, pages,
+    ...(entitylessTarget ? { target_mode: 'entityless' } : {}), ...take };
   const requestId = maintenanceRequestId({ source: authority.writer.sourceIncarnation, slug, intent });
   return submitMaintenance(engine, authority, slug, intent, requestId);
 }
@@ -284,8 +299,22 @@ export async function prepareMaintenanceMutation(engine: BrainEngine, row: Write
   if (row.intent?.kind === 'managed_maintenance_phantom_delete') return (await import('../cycle/phantom-redirect-managed.ts')).preparePhantomDelete(engine, row, config);
   if (row.intent?.kind !== 'managed_maintenance_consolidate') throw new OperationError('invalid_params', 'Unsupported maintenance request.');
   const p = row.intent;
+  // 2026-10-04 prototype: only the explicit marker admits NULL entity owners.
+  // Historical intents without a marker keep the original exact-slug contract.
+  if (p.target_mode !== undefined && p.target_mode !== 'entityless') {
+    throw new OperationError('invalid_params', 'Unsupported consolidation target mode.');
+  }
+  const entitylessTarget = p.target_mode === 'entityless';
   const facts = p.facts as FactSnapshot[];
   const pages = p.pages as EvidencePage[];
+  if (!Array.isArray(facts) || !Array.isArray(pages) || facts.length < 2 ||
+    entitylessTarget && (row.page_id === null || facts.some(fact => fact.value.entity_slug !== null || fact.value.source_id !== row.source_id)) ||
+    !entitylessTarget && facts.some(fact => fact.value.entity_slug !== row.slug || fact.value.source_id !== row.source_id)) {
+    throw new OperationError('revision_conflict', 'The consolidation facts do not match the admitted target mode.');
+  }
+  if (entitylessTarget && !pages.some(page => page.slug === row.slug && page.id === row.page_id)) {
+    throw new OperationError('invalid_params', 'Entityless consolidation requires its explicit same-source target page in the evidence set.');
+  }
   const [existing] = await engine.executeRaw<{ id: number; row_num: number; active: boolean; resolved_at: unknown }>(
     "SELECT id,row_num,active,resolved_at FROM takes WHERE page_id=$1 AND claim=$2 AND kind='fact' AND holder='self' ORDER BY id LIMIT 1", [row.page_id, p.claim]);
   if (existing && (!existing.active || existing.resolved_at)) {
@@ -310,6 +339,8 @@ export async function prepareMaintenanceMutation(engine: BrainEngine, row: Write
       }
       const current = await readFacts(tx, row.source_id, facts.map(f => f.id), true);
       if (digest(current) !== digest(facts) || current.some(f => f.value.visibility !== 'world' || f.value.expired_at || f.value.consolidated_at ||
+        f.value.source_id !== row.source_id ||
+        f.value.entity_slug !== (entitylessTarget ? null : row.slug) ||
         f.value.valid_until && Date.parse(String(f.value.valid_until)) <= Date.now())) {
         throw new OperationError('revision_conflict', 'The consolidation evidence changed.');
       }
