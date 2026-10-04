@@ -74,6 +74,8 @@ interface DreamArgs {
    * until a follow-up CLI cleanup picks one. Supersedes PR #1559.
    */
   source: string | null;
+  /** Explicit, local-review-only consolidate target. Requires an explicit source. */
+  entitylessProposalTargetSlug: string | null;
   /**
    * issue #1678: bounded single-hold backlog drain. `--drain` (currently only
    * for `--phase extract_atoms`) holds the cycle lock once and loops bounded
@@ -231,6 +233,37 @@ function parseArgs(args: string[]): DreamArgs {
   }
   const source = uniqSource[0] ?? uniqSourceId[0] ?? null;
 
+  const entitylessTargetValues = collectFlagValues(args, '--entityless-proposal-target');
+  if (entitylessTargetValues === null) {
+    console.error('--entityless-proposal-target <slug>: missing value. Usage: gbrain dream --phase consolidate --source <id> --entityless-proposal-target <slug>');
+    process.exit(2);
+  }
+  const normalizedTargets = entitylessTargetValues.map(value => value.trim());
+  if (normalizedTargets.some(value => !value || value.startsWith('--'))) {
+    console.error('--entityless-proposal-target requires a nonblank explicit target slug');
+    process.exit(2);
+  }
+  const uniqueTargets = Array.from(new Set(normalizedTargets));
+  if (uniqueTargets.length > 1) {
+    console.error(`specify --entityless-proposal-target once; got [${uniqueTargets.map(value => `"${value}"`).join(', ')}]`);
+    process.exit(2);
+  }
+  const entitylessProposalTargetSlug = uniqueTargets[0] ?? null;
+  if (entitylessProposalTargetSlug !== null) {
+    if (!source?.trim() || source.trim() === ALL_SOURCES) {
+      console.error('--entityless-proposal-target requires an explicit --source <id> or --source-id <id> (not __all__)');
+      process.exit(2);
+    }
+    if (entitylessProposalTargetSlug === ALL_SOURCES) {
+      console.error('--entityless-proposal-target requires one explicit target slug (not __all__)');
+      process.exit(2);
+    }
+    if (!phaseWasExplicit || phases.length !== 1 || phases[0] !== 'consolidate') {
+      console.error('--entityless-proposal-target requires only --phase consolidate');
+      process.exit(2);
+    }
+  }
+
   // issue #1678: --drain [--window <seconds>]. Only extract_atoms is drainable
   // this wave (it has a real eligibility predicate; synthesize_concepts does
   // not — Codex #12). --drain with no --phase defaults to extract_atoms.
@@ -305,10 +338,46 @@ function parseArgs(args: string[]): DreamArgs {
     to,
     bypassDreamGuard: args.includes('--unsafe-bypass-dream-guard'),
     source,
+    entitylessProposalTargetSlug,
     drain,
     windowSeconds,
     once,
   };
+}
+
+async function configuredEntitylessProposalTarget(engine: BrainEngine, sourceId: string): Promise<string | undefined> {
+  const key = `dream.consolidate.entityless.${sourceId}`;
+  const raw = await engine.getConfig(key);
+  if (raw === null) return undefined;
+
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    console.error(`[dream] invalid ${key}: expected JSON {"source_incarnation":"...","target_slug":"..."}`);
+    process.exit(1);
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    console.error(`[dream] invalid ${key}: expected an object with exactly source_incarnation and target_slug`);
+    process.exit(1);
+  }
+  const config = value as Record<string, unknown>;
+  const keys = Object.keys(config).sort();
+  if (keys.length !== 2 || keys[0] !== 'source_incarnation' || keys[1] !== 'target_slug'
+    || typeof config.source_incarnation !== 'string' || !config.source_incarnation.trim()
+    || typeof config.target_slug !== 'string' || !config.target_slug.trim()
+    || config.target_slug.trim() === ALL_SOURCES) {
+    console.error(`[dream] invalid ${key}: expected exactly nonblank source_incarnation and target_slug values`);
+    process.exit(1);
+  }
+
+  const [source] = await engine.executeRaw<{ incarnation: string; archived: boolean }>(
+    'SELECT incarnation,archived FROM sources WHERE id=$1', [sourceId]);
+  if (!source || source.archived || config.source_incarnation !== source.incarnation) {
+    console.error(`[dream] invalid ${key}: source incarnation does not match the active source; update or unset the config key`);
+    process.exit(1);
+  }
+  return config.target_slug.trim();
 }
 
 /**
@@ -436,6 +505,16 @@ Options:
   --source-id <id>    Alias for --source. Matches the v0.37.7.0+
                       naming used by import/extract/graph-query.
 
+  --entityless-proposal-target <slug>
+                      Create bounded local review proposals during an
+                      explicit --phase consolidate --source <id> run.
+                      This explicit flag overrides the source config key
+                      dream.consolidate.entityless.<source-id>. Config values
+                      require matching source incarnation and target_slug.
+                      Repeated identical targets are accepted; conflicting,
+                      blank and __all__ targets are rejected. --dry-run
+                      performs no proposal writes.
+
   --input <file>      Synthesize a specific transcript file (implies
                       --phase synthesize). Bypasses corpus-dir scan.
   --date YYYY-MM-DD   Synthesize transcripts dated for one specific day.
@@ -464,6 +543,7 @@ Examples:
   gbrain dream
   gbrain dream --dry-run --json
   gbrain dream --phase lint
+  gbrain dream --phase consolidate --source <id> --entityless-proposal-target <slug>
   gbrain dream --phase patterns --once   # run once, ignore dream.patterns.enabled=false
   gbrain dream --phase synthesize --input ~/transcripts/2026-04-25.txt
   gbrain dream --phase synthesize --from 2026-04-01 --to 2026-04-25
@@ -786,6 +866,17 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     }
   }
 
+  // The source-keyed opt-in is deliberately narrower than normal source
+  // resolution: only a literal --source/--source-id may read it. An explicit
+  // target flag wins; environment, path, default and __all__ routing never
+  // turn entityless review on implicitly.
+  let entitylessProposalTargetSlug = opts.entitylessProposalTargetSlug ?? undefined;
+  const consolidateWillRun = !opts.drain && (opts.phases.length === 0 || opts.phases.includes('consolidate'));
+  if (entitylessProposalTargetSlug === undefined && engine !== null && opts.source !== null
+    && opts.source.trim() !== ALL_SOURCES && consolidateWillRun) {
+    entitylessProposalTargetSlug = await configuredEntitylessProposalTarget(engine, resolvedSourceId!);
+  }
+
   const brainDir = await resolveBrainDir(engine, opts.dir, resolvedSourceId);
   // Both-null is the only hard error: no local checkout AND no DB connection
   // means neither filesystem phases nor DB phases can run. With an engine but
@@ -852,6 +943,7 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     synthFrom: opts.from ?? undefined,
     synthTo: opts.to ?? undefined,
     synthBypassDreamGuard: opts.bypassDreamGuard,
+    entitylessProposalTargetSlug,
     // issue #2860: exactly one phase is guaranteed here when opts.once is
     // set (parseArgs enforces --once requires a single explicit --phase).
     onceForPhase: opts.once ? opts.phases[0]! : undefined,
