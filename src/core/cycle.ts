@@ -548,6 +548,11 @@ export interface CycleOpts {
    */
   sourceId?: string;
   /**
+   * Explicit local-review target for the consolidate phase. The CLI accepts
+   * this only with an explicit source and an isolated consolidate run.
+   */
+  entitylessProposalTargetSlug?: string;
+  /**
    * #4700 — bare `gbrain dream` may opt the brain's default-like source
    * (sources.default / sole-non-default routing) into the full implicit
    * phase set instead of the freshness-only source cycle. Never set by the
@@ -2604,6 +2609,7 @@ export async function runCycle(
         const { result, duration_ms } = await racedTimePhase(() => runPhaseConsolidate(engine, {
           dryRun,
           sourceId: cycleSourceId,
+          entitylessProposalTargetSlug: opts.entitylessProposalTargetSlug,
           // W0 (Tier-1 #1): wrap the caller hook so this phase ALSO refreshes
           // the cycle lock (pre-fix these sites passed the raw — in production
           // always-undefined — hook, so long phases never refreshed).
