@@ -46,16 +46,13 @@ export const GET_RECENT_TRANSCRIPTS_DESCRIPTION =
 // ──────────────────────────────────────────────────────────────────────────────
 
 export const LIST_PAGES_DESCRIPTION =
-  "List pages with filters. For 'what's recent / what did I touch this week' use sort=updated_desc. Default 50 rows; a full page may be truncated: continue with updated_after + updated_after_slug from the last row.";
+  "List pages with filters. For 'what's recent / what did I touch this week' use sort=updated_desc. Default 50 rows (remote max 100); a full page may be truncated: continue with updated_after + updated_after_slug from the last row.";
 
 export const QUERY_DESCRIPTION =
-  "Hybrid search plus multi-query expansion for concept/landscape questions (expansion recovers synonyms). Still top-K; return_unit: sections or conversations. Lists: list_pages. Exact tokens: `search` is cheaper (no LLM call). Personal: get_recent_salience, find_anomalies; transcripts: `gbrain transcripts recent`. Do NOT assume 'crazy' means impressive (often difficult or emotionally charged). Needs an embedding key (else keyword-only); expansion needs a chat key. Fact rows: use follow_up. fields: \"full\" adds diagnostics.";
+  "Ranked hybrid search with multi-query expansion, for concept / synonym / landscape questions: expansion recovers synonym-phrased matches. Still top-K; return_unit returns whole sections or conversations. Lists: list_pages. Exact tokens: `search` is cheaper (no expansion LLM call). Personal questions: get_recent_salience, find_anomalies, get_recent_transcripts. Do NOT assume 'crazy' means impressive (often difficult or emotionally charged). fields: \"full\" adds diagnostics.";
 
 export const SEARCH_DESCRIPTION =
-  "Cheap hybrid search, no LLM expansion, top 20: exact tokens, names, field values. NOT proof of coverage; match: \"keyword\" pages every keyword match and takes OR across quoted names or codes (\"A\" OR \"B\" OR …): one call lists every page matching any. Name lists: entity names. Concepts/landscape: `query`; lists: list_pages; personal: get_recent_salience. return_unit: sections or conversations. fields: \"full\" adds diagnostics.";
-
-/** `search`'s `match` param (Cat 40 Hard F2). */
-export const SEARCH_MATCH_DESCRIPTION = 'keyword: every match, paged.';
+  "Cheap hybrid search (vector + keyword), no LLM expansion, top 20: for exact tokens, names, field values. Results are NOT proof of coverage: concepts or landscape, use `query`; exhaustive lists, list_pages. return_unit returns whole sections or conversations. Personal questions: get_recent_salience; saved facts: recall. fields: \"full\" adds diagnostics.";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // v0.32.6 — contradiction probe MCP surface (M3)
@@ -74,7 +71,7 @@ export const FIND_CONTRADICTIONS_DESCRIPTION =
   "`gbrain eval suspected-contradictions` for that.";
 
 export const FIND_TRAJECTORY_DESCRIPTION =
-  "Return the chronological claim trajectory for an entity (typed " +
+  "v0.35.4 — return the chronological claim trajectory for an entity (typed " +
   "metric values over time, plus auto-detected regressions and narrative drift). " +
   "Use this when the user asks 'how has Acme's MRR trended', 'show me what " +
   "alice-example said about runway over time', 'is this founder consistent', " +
@@ -103,7 +100,7 @@ export const FIND_TRAJECTORY_DESCRIPTION =
 export const CODE_CALLERS_DESCRIPTION =
   "BEFORE editing any function, run code_callers with the symbol name to find " +
   "every caller (the people who'd be affected by your change). Returns direct " +
-  "callers from the tree-sitter call graph. Use during plan-mode to size " +
+  "callers from the v0.20+ tree-sitter call graph. Use during plan-mode to size " +
   "the change. Defaults to source-scoped; for multi-source brains pass source_id " +
   "or all_sources=true. " +
   "Returns: `{symbol, count, callers: [{from_symbol_qualified, to_symbol_qualified, edge_type, resolved}]}`. " +
@@ -170,7 +167,7 @@ export const SKILL_CATALOG_INSTRUCTIONS = {
       "are not callable by you on this server.",
     "For host-repository skills, declared `tools` narrow the usable tools. Valid " +
       "frontmatter without `tools` inherits your available brain tools; `tools: []` permits none. " +
-      "Canonical shared skills follow the same rule; their other requirements gate `usable`.",
+      "Canonical shared skills use their approved requirements instead.",
   ],
 } as const;
 
@@ -188,7 +185,7 @@ export const SKILL_CLIENT_GUIDANCE = {
     "Do not invent tools — only the tools in `usable_tools` are callable by you.",
     "For host-repository skills, declared `tools` narrow this list. Valid frontmatter " +
       "without `tools` inherits your available brain tools; `tools: []` permits none. " +
-      "Canonical shared skills follow the same rule; their other requirements gate `usable`.",
+      "Canonical shared skills use their approved requirements instead.",
     "If `mutating` is true, this skill writes to the brain; confirm before doing so " +
       "if the user hasn't clearly asked for a write.",
   ],
@@ -203,4 +200,4 @@ export const SKILL_CLIENT_GUIDANCE = {
  * test/operations-descriptions.test.ts.
  */
 export const CAPTURE_DESCRIPTION =
-  "Quick note (\"just remember this\"): slugged under inbox/ by date + content hash, so recapturing is idempotent. Use put_page to control slug or type; remember for facts about entities.";
+  "Quick note (\"just remember this\"): auto-slugged under inbox/ by date + content hash, so recapturing is idempotent. Use put_page to control slug or type; remember for facts about entities.";

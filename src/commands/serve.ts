@@ -1,17 +1,11 @@
 import { spawnSync } from 'node:child_process';
-import { PoolStallWatch } from '../core/postgres-engine/pool-stall-watch.ts';
 import type { BrainEngine } from '../core/engine.ts';
-// C10: `--fail-fast` / GBRAIN_SERVE_FAIL_FAST=1 — exit with the classified envelope instead of status-only/degraded mode (decided in src/cli.ts's connect path; F4's status mode consults it too).
-export { serveFailFastRequested, writeServeFailFastEnvelope } from '../core/serve-fail-fast.ts';
 import { isEngineDegraded as isEngineDegradedForServe } from '../core/degraded-marker.ts';
 import { startMcpServer, stdioRpcsInFlightCount, resolveMcpStdioSourceScope } from '../mcp/server.ts';
 import { VERB_NAMES } from '../core/verbs.ts';
 import { RESIDENT_POOL_FLOOR } from '../core/pg-access-classify.ts';
 import { redirectStdoutLoggingToStderr } from '../core/console-prefix.ts';
-import { startFactsDrainScheduler, type FactsDrainScheduler, type FactsDrainSchedulerOpts } from '../core/facts/drain-scheduler.ts';
-import { startMovementWatch, type MovementWatch } from '../core/persistence/sync-movement.ts';
 import { onForwardProgress } from '../core/forward-progress.ts';
-import { graduationHandoffRequested, writeServeGraduationEnvelope } from '../core/persistence/graduation-serve-guard.ts';
 import {
   installLoopStallWatchdog,
   resolveServeStallWatchdogMs,
@@ -70,8 +64,6 @@ const IDLE_SWEEP_INTERVAL_MS = 10 * 60_000;
 // Small per-run budget for idle sweeps: the serve must snap back to
 // serving tool calls the moment the client wakes up.
 const IDLE_SWEEP_BUDGET_MS = 3_000;
-/** How often a PGLite stdio serve checks for a graduation run's intent marker (a stat; plan: at most every 2 s). */
-const GRADUATION_HANDOFF_POLL_MS = 2_000;
 
 export interface ServeOptions {
   // Test seam — defaults to the live process. The lifecycle plumbing reads
@@ -84,13 +76,11 @@ export interface ServeOptions {
   signals?: Pick<NodeJS.Process, 'on'>;
   exit?: (code?: number) => void;
   log?: (msg: string) => void;
-  /** Receives the stdio lifecycle's drain-then-shutdown (the graduation hand-off uses it). */
-  onShutdownReady?: (shutdown: (reason: string) => void) => void;
   // Test seam: replace startMcpServer to avoid booting the real MCP SDK
   // (which unconditionally attaches a 'data' listener to real
   // process.stdin and would pollute the test runner's stdin handle).
   // Defaults to the real implementation when omitted.
-  startMcpServer?: (engine: BrainEngine, opts?: { surface?: 'verbs' | 'starter' | 'full'; surfaceSource?: 'env' | 'flag' | 'config' | 'default'; invalidSurfaceEnv?: string; sourceGuard?: boolean; onBootPhase?: (phase: string) => void; access?: 'full' | 'read-only' }) => Promise<void>;
+  startMcpServer?: (engine: BrainEngine, opts?: { surface?: 'verbs' | 'starter' | 'full'; sourceGuard?: boolean; onBootPhase?: (phase: string) => void; access?: 'full' | 'read-only' }) => Promise<void>;
   // Test seam for the parent-process watchdog. The default
   // (`readLiveParentPid`) reads the live kernel PPID via `ps` on POSIX
   // because `process.ppid` is captured at process creation and does not
@@ -141,10 +131,6 @@ export interface ServeOptions {
   // without booting the real OAuth server. Type-only reference to
   // serve-http.ts — erased at compile time, so the lazy runtime import stays.
   runServeHttp?: (typeof import('./serve-http.ts'))['runServeHttp'];
-  /** `--http` recovery from status-only mode: the listener the status server already bound (serve-http-status.ts). */
-  adoptServer?: import('./serve-http-listen.ts').AdoptableServer;
-  // Test seam (X8): replaces armCorpusDrain on the --http lane.
-  armCorpusDrain?: (typeof import('../core/sweep.ts'))['armCorpusDrain'];
   // Test seam (#4281): replaces installLoopStallWatchdog.
   installStallWatchdog?: (o: LoopStallWatchdogOpts) => WatchdogHandle;
   // Test seam (#4281) for the loop-stall threshold in ms; 0 = off. Defaults
@@ -158,9 +144,6 @@ export interface ServeOptions {
   // (pre-#4409 behavior). Defaults to GBRAIN_SERVE_EOF_DRAIN_MS (30s when
   // unset; lenient parse).
   eofDrainMs?: number;
-  // Test seam for the automatic facts drain (src/core/facts/drain-scheduler.ts):
-  // false disables it; an object overrides its timer and run body.
-  factsDrain?: false | Pick<FactsDrainSchedulerOpts, 'run' | 'tickMs' | 'maxGapMs' | 'now'>;
 }
 
 /**
@@ -229,25 +212,13 @@ export async function runServe(
   // that used `gbrain auth create` keep working unchanged).
   const isHttp = args.includes('--http');
 
-  // MEMORY_VERBS v1: tool-surface mode. stdio: GBRAIN_SURFACE > --surface >
-  // config `mcp_surface` > 'full'; --http ignores GBRAIN_SURFACE (an HTTP
-  // ceiling never widens without an explicit --surface restart).
+  // MEMORY_VERBS v1: tool-surface mode. Flag > config `mcp_surface` > 'full'.
   // 'verbs' exposes exactly the seven protocol verbs (the quickstart surface);
-  // 'starter' the ~20-op daily-driver set; 'full' keeps every operation.
-  const { parseSurfaceFlag, resolveSurfaceWithSource, resolveStdioSurface, parseAccessFlag, SURFACE_SOURCE_LABEL } = await import('../mcp/surface.ts');
+  // 'starter' the ~20-op daily-driver set; 'full' (default) keeps every
+  // operation — existing installs see no change.
+  const { parseSurfaceFlag, resolveSurface, parseAccessFlag } = await import('../mcp/surface.ts');
   const { loadConfig } = await import('../core/config.ts');
-  const surfaceFlag = parseSurfaceFlag(args);
-  const resolved = isHttp ? resolveSurfaceWithSource(surfaceFlag, loadConfig()) : resolveStdioSurface(surfaceFlag, loadConfig());
-  const surface = resolved.surface;
-  if (isHttp && process.env.GBRAIN_SURFACE) {
-    console.error('[gbrain serve] GBRAIN_SURFACE is ignored with --http: the HTTP surface ceiling is set by --surface (or config mcp_surface); GBRAIN_MCP_FORCE_SURFACE narrows it.');
-  }
-  if (resolved.invalidEnv !== undefined) {
-    console.error(`[gbrain serve] ignoring GBRAIN_SURFACE="${resolved.invalidEnv}" (use verbs | starter | full)`);
-  }
-  console.error(`[gbrain serve] surface=${surface} (source: ${SURFACE_SOURCE_LABEL[resolved.source]})`);
-  // #6383: the pool stall line (Postgres only; the watch reports nothing for an engine without pool numbers).
-  if (engine.kind === 'postgres') new PoolStallWatch(engine, (line) => console.error(line)).start();
+  const surface = resolveSurface(parseSurfaceFlag(args), loadConfig());
   // #4768: stdio read-only access ceiling. HTTP refuses it: per-token grants
   // (auth rescope-token --operations / rescope-client) are its operation control.
   const access = parseAccessFlag(args);
@@ -278,9 +249,7 @@ export async function runServe(
     const port = portIdx >= 0 ? parseInt(args[portIdx + 1]) || 3131 : 3131;
 
     const ttlIdx = args.indexOf('--token-ttl');
-    // auth.ts reaches the whole operations graph; only --http needs it.
-    const { parseTokenTtl } = await import('./auth.ts');
-    const tokenTtl = ttlIdx >= 0 ? parseTokenTtl(args[ttlIdx + 1] ?? '', 'Omit the flag for the 3600-second default.') : 3600;
+    const tokenTtl = ttlIdx >= 0 ? parseInt(args[ttlIdx + 1]) || 3600 : 3600;
 
     // #1353: --enable-dcr-insecure opts into the consent-bypassing
     // client_credentials grant on the DCR path. It implies --enable-dcr (you
@@ -346,17 +315,10 @@ export async function runServe(
       }
     }
 
-    // X8 (D18): the HTTP serve's corpus drain — a stdio serve sweeps on idle,
-    // `--http` never did, so refused harvests and session-end corpus files
-    // waited for a hand-run sweep and then for retention GC.
-    const { armCorpusDrain } = await import('../core/sweep.ts');
-    const corpusDrain = (opts.armCorpusDrain ?? armCorpusDrain)(engine, { sourceId: process.env.GBRAIN_SOURCE || undefined });
-
     try {
-      await runHttp(engine, { port, tokenTtl, enableDcr, enableDcrInsecure, publicUrl, logFullParams, bind, suppressBootstrapToken, printAdminToken, surface, adoptServer: opts.adoptServer });
+      await runHttp(engine, { port, tokenTtl, enableDcr, enableDcrInsecure, publicUrl, logFullParams, bind, suppressBootstrapToken, printAdminToken, surface });
     } finally {
       stallWatchdog?.dispose();
-      corpusDrain?.cancel();
     }
 
     await finishHttpServe(engine, opts);
@@ -382,7 +344,7 @@ export async function runServe(
   // the MCP client log "Failed to parse JSONRPC message" for every line.
   redirectStdoutLoggingToStderr();
 
-  const activateStdioIdleActivityTracking = installStdioLifecycle(engine, args, installGraduationHandoff(engine, opts));
+  const activateStdioIdleActivityTracking = installStdioLifecycle(engine, args, opts);
 
   const start = opts.startMcpServer ?? startMcpServer;
 
@@ -430,7 +392,7 @@ export async function runServe(
   }
 
   try {
-    await start(engine, { surface, surfaceSource: resolved.source, ...(resolved.invalidEnv !== undefined ? { invalidSurfaceEnv: resolved.invalidEnv } : {}), ...(sourceGuard ? { sourceGuard } : {}), onBootPhase: phase => { bootPhase = phase; bootProgressAt = Date.now(); }, ...(access === 'read-only' ? { access } : {}) });
+    await start(engine, { surface, ...(sourceGuard ? { sourceGuard } : {}), onBootPhase: phase => { bootPhase = phase; bootProgressAt = Date.now(); }, ...(access === 'read-only' ? { access } : {}) });
     // `--stdio-idle-timeout` arms its timer during lifecycle installation,
     // but its stdin activity listener must wait until startMcpServer has
     // attached the MCP SDK transport listener. Attaching any `data` listener
@@ -505,37 +467,6 @@ function resolveBootTimeoutMs(): number {
   return n * 1000;
 }
 
-/**
- * Engine graduation hand-off (§13): a PGLite stdio serve polls (a stat every
- * 2 s) for another live run's intent marker. On one it writes the
- * graduation_in_progress envelope and takes the lifecycle's drain-then-shutdown
- * (in-flight requests finish, bounded; the engine closes and releases the
- * brain); the process exits 75 so a supervisor relaunch (which exits the same
- * way while the marker stands) is distinguishable from a clean stop.
- */
-function installGraduationHandoff(engine: BrainEngine, opts: ServeOptions): ServeOptions {
-  if (engine.kind !== 'pglite') return opts;
-  const exit = opts.exit ?? ((code?: number) => { process.exit(code); });
-  const log = opts.log ?? ((msg: string) => console.error(msg));
-  let handoffExit: number | null = null;
-  let shutdown: ((reason: string) => void) | null = null;
-  const timer = setInterval(() => {
-    if (handoffExit !== null || !shutdown || isEngineDegradedForServe(engine)) return;
-    const request = graduationHandoffRequested();
-    if (!request) return;
-    clearInterval(timer);
-    log('GBrain MCP server: an engine graduation run asked for this brain; handing it over.');
-    handoffExit = writeServeGraduationEnvelope(request, (s) => log(s.trimEnd()));
-    shutdown('graduation-handoff');
-  }, GRADUATION_HANDOFF_POLL_MS);
-  timer.unref?.();
-  return {
-    ...opts,
-    exit: (code?: number) => exit(handoffExit ?? code),
-    onShutdownReady: (fn) => { shutdown = fn; opts.onShutdownReady?.(fn); },
-  };
-}
-
 interface StdioLifecycleDeps {
   stdin: NodeJS.ReadableStream & { isTTY?: boolean };
   signals: Pick<NodeJS.Process, 'on'>;
@@ -545,46 +476,6 @@ interface StdioLifecycleDeps {
   setInterval: (fn: () => void, ms: number) => unknown;
   clearInterval: (handle: unknown) => void;
   probeWatchdog: () => boolean;
-}
-
-/**
- * Automatic facts drain (Foundations 2, Lane D): PGLite has no job worker, so
- * the resident serve runs queued facts-absorb jobs on its own unref'd timer,
- * bounded per run and per day. Activity is read from stdin 'data' chunks
- * through a listener attached on the first tick (same reason as the idle
- * sweep: never before the SDK transport attaches). Opt out with
- * `gbrain config set facts.extraction_enabled false`.
- */
-function installFactsDrain(engine: BrainEngine, opts: ServeOptions, deps: StdioLifecycleDeps, shuttingDown: () => boolean): FactsDrainScheduler | null {
-  if (opts.factsDrain === false || engine.kind !== 'pglite') return null;
-  let lastStdinDataAt = 0;
-  let listenerAttached = false;
-  return startFactsDrainScheduler(engine, {
-    owner: 'serve',
-    ...(opts.factsDrain ?? {}),
-    setInterval: deps.setInterval,
-    clearInterval: deps.clearInterval,
-    log: (line) => deps.log(line),
-    lastActivityAt: () => {
-      if (listenerAttached) return lastStdinDataAt;
-      listenerAttached = true;
-      deps.stdin.on('data', () => { lastStdinDataAt = Date.now(); });
-      return Number.MAX_SAFE_INTEGER;
-    },
-    canRun: async () => !shuttingDown() && !isEngineDegradedForServe(engine) && !(await loadSyncRunner()).isDelegatedSyncRunning(),
-  });
-}
-
-/**
- * #6317 (B4): the facts drain plus the movement watch (one `[gbrain notice]`
- * when a managed source's sync data stops moving; reader in
- * persistence/sync-movement.ts), stopped together at shutdown.
- */
-function installResidentTickers(engine: BrainEngine, opts: ServeOptions, deps: StdioLifecycleDeps, shuttingDown: () => boolean): { stop(): Promise<void> } {
-  const factsDrain = installFactsDrain(engine, opts, deps, shuttingDown);
-  // The watch keeps its own unref'd timer: the injected lifecycle timers are the parent watchdog's and the idle sweep's, which tests count.
-  const movementWatch: MovementWatch = startMovementWatch(engine, { log: deps.log });
-  return { stop: async () => { movementWatch.stop(); await factsDrain?.stop(); } };
 }
 
 function installStdioLifecycle(
@@ -607,7 +498,6 @@ function installStdioLifecycle(
   let parentWatchdog: unknown = null;
   let idleSweepTimer: unknown = null;
   let activateIdleActivityTracking = (): void => {};
-  let factsDrain: { stop(): Promise<void> } | null = null;
   const beginShutdown = (reason: string): void => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -656,9 +546,6 @@ function installStdioLifecycle(
     armDeadline(CLEANUP_DEADLINE_MS);
 
     Promise.resolve()
-      // The facts drain aborts its in-flight job (left queued, no attempt
-      // counted) before the engine goes away.
-      .then(() => factsDrain?.stop())
       // Idempotent shared promise — mcp/server.ts's shutdown races here on
       // the same signals; whichever runs first does the abort+settle, the
       // other awaits it. Must precede disconnect (settle writes need the
@@ -746,7 +633,6 @@ function installStdioLifecycle(
       beginShutdown(reason);
     })();
   };
-  opts.onShutdownReady?.(drainThenShutdown);
   if (!deps.stdin.isTTY && !mcpStdioMode) {
     deps.stdin.once('end', () => drainThenShutdown('stdin-end'));
     deps.stdin.once('close', () => drainThenShutdown('stdin-close'));
@@ -867,9 +753,6 @@ function installStdioLifecycle(
     }, IDLE_SWEEP_INTERVAL_MS);
     (idleSweepTimer as { unref?: () => void } | null)?.unref?.();
   }
-
-  // Automatic facts drain (Lane D) and the #6317 movement watch: see installResidentTickers.
-  factsDrain = installResidentTickers(engine, opts, deps, () => shuttingDown);
 
   // Optional idle-timeout safety net. Default OFF; opt-in via
   // `--stdio-idle-timeout <seconds>`. The flag is for the rare case where

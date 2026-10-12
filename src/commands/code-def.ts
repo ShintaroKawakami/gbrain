@@ -40,7 +40,6 @@ export interface CodeDefResult {
 // small-sibling merging). Re-exported here so existing importers keep their
 // surface.
 import { DEF_TYPES } from '../core/chunkers/def-types.ts';
-import { legacyNestedErrorDocument } from '../core/agent-output.ts';
 
 export { DEF_TYPES };
 
@@ -157,7 +156,7 @@ export async function runCodeDef(engine: BrainEngine, args: string[]): Promise<v
       hint: 'gbrain code-def <symbol> [--source S | --all-sources] [--lang <language>] [--json]',
     });
     if (shouldEmitJson(args)) {
-      console.log(JSON.stringify(legacyNestedErrorDocument(err.envelope, ['gbrain', 'code-def', '--help'])));
+      console.log(JSON.stringify({ error: err.envelope }));
     } else {
       console.error(err.message);
     }

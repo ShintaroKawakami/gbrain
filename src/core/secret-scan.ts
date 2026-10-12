@@ -31,15 +31,6 @@
 import { existsSync, readFileSync, statSync } from 'fs';
 import { isAbsolute, join, relative, sep } from 'path';
 import { createHash } from 'crypto';
-import {
-  LABELED_CREDENTIAL_PATTERNS,
-  ECHO_MIN_CHARS_LABELED,
-  LABELED_PRECHECK_RE,
-  danglingLabel,
-  labeledEchoEligible,
-  labeledValueIsCredential,
-  newTableScanState, tableCredentialCells,
-} from './secret-scan-labeled.ts';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -81,12 +72,6 @@ export interface ScanOpts {
   workspaceRoot?: string;
   /** Opt-in generic high-entropy assignment heuristic. Default false. */
   highEntropy?: boolean;
-  /**
-   * Opt-in `labeled_credential` detector (secret-scan-labeled.ts): a value
-   * after a password / login / credentials label. Transcript pages and the
-   * transcript audit only. Default false.
-   */
-  labeledCredentials?: boolean;
 }
 
 /** Name of the per-workspace allowlist override file. */
@@ -119,10 +104,8 @@ interface CompiledPattern {
   entropyGated?: boolean;
   /** See CorePattern.precheck. */
   precheck?: (line: string) => boolean;
-  /** See CorePattern.validate; `head` is the match text before the value. */
-  validate?: (value: string, head: string) => boolean;
-  /** Runs only on the line after one that ends in a dangling credential label of this form. */
-  continuation?: 'single' | 'pair';
+  /** See CorePattern.validate. */
+  validate?: (value: string) => boolean;
 }
 
 interface CorePattern {
@@ -714,17 +697,6 @@ function compilePatterns(opts: ScanOpts): CompiledPattern[] {
       });
     }
   }
-  if (opts.labeledCredentials) {
-    for (const p of LABELED_CREDENTIAL_PATTERNS) {
-      out.push({
-        name: 'labeled_credential',
-        // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp -- compile-time literal; bounded quantifiers, pinned by test/secret-scan-perf.test.ts
-        re: new RegExp(p.source, 'gi'),
-        ...(p.continuation ? { continuation: p.continuation } : { precheck: (line: string) => LABELED_PRECHECK_RE.test(line) }),
-        validate: (value: string, head: string) => labeledValueIsCredential(value, p.form, head),
-      });
-    }
-  }
   return out;
 }
 
@@ -974,15 +946,11 @@ function scanInternal(text: string, opts: ScanOpts): RawHit[] {
   // redactFindings can splice the text once instead of searching it per
   // value.
   let offset = 0;
-  // W4.1: Markdown table state for the labeled lane (credential columns of the table being scanned).
-  const table = opts.labeledCredentials === true ? newTableScanState() : null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? '';
     const lineStart = offset;
     offset += line.length + 1;
-    const dangling = opts.labeledCredentials === true && i > 0 ? danglingLabel(lines[i - 1] ?? '') : null;
-    const cells = table ? tableCredentialCells(line, lines[i + 1], table) : [];
-    if (line.length < 8 && !dangling && cells.length === 0) continue;
+    if (line.length < 8) continue;
     // ENG-12: a line wholly inside a private-key claim is already redacted by
     // it; hits on it would only double-report (one key, one finding).
     if (pem.length > 0 && insideClaim(pem, lineStart, lineStart + line.length)) continue;
@@ -1001,7 +969,6 @@ function scanInternal(text: string, opts: ScanOpts): RawHit[] {
       hits.push({ pattern, value, start, abs: lineStart + start, line: i + 1, lineText: line, spans });
     };
     for (const p of patterns) {
-      if (p.continuation && p.continuation !== dangling) continue;
       if (p.precheck && !p.precheck(line)) continue;
       p.re.lastIndex = 0;
       let m: RegExpExecArray | null;
@@ -1015,7 +982,7 @@ function scanInternal(text: string, opts: ScanOpts): RawHit[] {
         // the assignment's value), before any overlap split.
         if (p.entropyGated && (!HIGH_ENTROPY_REQUIRES_DIGIT_RE.test(value) || !HIGH_ENTROPY_REQUIRES_NON_DIGIT_RE.test(value))) continue;
         if (p.entropyGated && correctedEntropy(value) < HIGH_ENTROPY_MIN_BITS_PER_CHAR) continue;
-        if (p.validate && !p.validate(value, m[1])) continue;
+        if (p.validate && !p.validate(value)) continue;
         if (!taken) {
           taken = new Uint8Array(line.length);
         } else if (anyTaken(taken, start, end)) {
@@ -1038,7 +1005,6 @@ function scanInternal(text: string, opts: ScanOpts): RawHit[] {
         claim(p.name, value, start);
       }
     }
-    for (const c of cells) if (!taken || !anyTaken(taken, c.start, c.start + c.value.length)) { taken ??= new Uint8Array(line.length); claim('labeled_credential', c.value, c.start); }
   }
   return hits;
 }
@@ -1266,10 +1232,7 @@ export function scanFiles(paths: string[], opts: ScanOpts = {}): SecretFinding[]
 // collision-safe: a value must clear its pattern's floor
 // (ECHO_MIN_CHARS_BEARER = 20, ECHO_MIN_CHARS_ENTROPY = 12 — the rules' own
 // floors, restated so a pattern edit alone can never widen the pass to
-// short, collision-prone values; an opted-in `labeled_credential` value
-// needs ECHO_MIN_CHARS_LABELED = 8 and must not be a stoplisted word, so
-// `pwd: 1234` never scrubs every later "1234"), must be at most
-// ECHO_MAX_VALUE_CHARS long,
+// short, collision-prone values), must be at most ECHO_MAX_VALUE_CHARS long,
 // and only the first ECHO_MAX_UNIQUE unique values in claim order — ONE cap
 // across both patterns — join. A value past either cap is still redacted at
 // its claimed span; only its echoes are the accepted miss.
@@ -1358,15 +1321,12 @@ export interface RedactionPlan {
 }
 
 function addEchoValue(into: EchoDictionary, pattern: string, value: string): void {
-  if (pattern === 'labeled_credential' && !labeledEchoEligible(value)) return;
   const floor =
     pattern === 'bearer'
       ? ECHO_MIN_CHARS_BEARER
       : pattern === 'high_entropy_assignment'
         ? ECHO_MIN_CHARS_ENTROPY
-        : pattern === 'labeled_credential'
-          ? ECHO_MIN_CHARS_LABELED
-          : Infinity;
+        : Infinity;
   if (value.length < floor || value.length > ECHO_MAX_VALUE_CHARS) return;
   if (into.has(value) || into.size >= ECHO_MAX_UNIQUE) return;
   into.set(value, pattern);

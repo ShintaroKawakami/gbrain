@@ -19,7 +19,6 @@
 import type { BrainEngine } from '../engine.ts';
 import { loadActivePackBestEffort } from './best-effort.ts';
 import type { OperationContext } from '../operations.ts';
-import { maintenanceTransaction } from '../persistence/attribution.ts';
 
 export interface SyncOpts {
   /** Apply UPDATE statements. Default false (dry-run). */
@@ -120,7 +119,7 @@ async function applyTypeAssignment(
   // Loop guard: max 10000 iterations protects against runaway.
   for (let i = 0; i < 10000; i++) {
     try {
-      const rows = await maintenanceTransaction(engine, tx => tx.executeRaw<{ updated: string }>(
+      const rows = await engine.executeRaw<{ updated: string }>(
         `WITH win AS (
            SELECT id FROM pages
            WHERE deleted_at IS NULL
@@ -135,7 +134,7 @@ async function applyTypeAssignment(
          )
          SELECT COUNT(*)::text AS updated FROM upd`,
         [type, `${prefix}%`, batchSize, ...sourceParams],
-      ));
+      );
       const batchCount = parseInt(rows[0]?.updated ?? '0', 10) || 0;
       if (batchCount === 0) break;
       totalApplied += batchCount;

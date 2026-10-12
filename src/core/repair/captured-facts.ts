@@ -36,8 +36,7 @@
 import { existsSync, readdirSync, readFileSync, type Dirent } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
-import { opError, OperationError } from '../ops/contract.ts';
-import { readFix } from '../ops/op-fix.ts';
+import { OperationError } from '../ops/contract.ts';
 import { parseFactsFence, type ParsedFact } from '../facts-fence.ts';
 import { strikeFenceRow } from '../facts/forget.ts';
 import { serializePageToMarkdown } from '../markdown.ts';
@@ -54,7 +53,6 @@ import { claudeProjectsDir } from '../bootstrap/host-specs.ts';
 import { corpusFileSessionId, corpusTextForExtraction } from '../context/corpus-segments.ts';
 import { pruneDir } from '../sync.ts';
 import { afterCursor, repairRequestId, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairListing, type RepairPlan, type RepairScope } from './core.ts';
-import { maintenanceTransaction } from '../persistence/attribution.ts';
 
 export const CAPTURE_LANES = ['hook:writeback', 'hook:compact', 'sweep:corpus'] as const;
 const CORPUS_KEY = 'dream.synthesize.session_corpus_dir';
@@ -268,11 +266,7 @@ export const capturedFactsRepair: RepairHandler = {
         `Preview first: ${command} — then run the apply command it prints: ${command} --apply --expect <preview-hash>`,
         'docs/guides/repair.md#explicit-only-repair-kinds');
     }
-    const approved = await loadApprovedSet<CapturedFactsPage>(engine, { command: 'captured-facts', hash: opts.expect, previewCommand: command,
-      emptyHash: async () => {
-        const [brain] = await engine.executeRaw<{ brain_id: string }>('SELECT brain_id FROM persistence_brain WHERE singleton=1').catch(() => []);
-        return previewHash(['captured-facts-v1', brain?.brain_id ?? 'host', scope.source_ids, includeAmbiguous, []]);
-      } });
+    const approved = await loadApprovedSet<CapturedFactsPage>(engine, { command: 'captured-facts', hash: opts.expect, previewCommand: command });
     const scopeKey = JSON.stringify(scope.source_ids);
     if (approved.items.some(page => page.include_ambiguous !== includeAmbiguous || JSON.stringify(page.scope) !== scopeKey)) {
       throw previewChangedError(opts.expect, command);
@@ -315,7 +309,7 @@ const expireRows = (tx: BrainEngine, sourceId: string, ids: number[]) => tx.exec
  * unmanaged brain one transaction.
  */
 async function expireDatabaseRows(engine: BrainEngine, page: CapturedFactsPage, hash: string, ids: number[]): Promise<number[]> {
-  if (!await managedPersistenceEnabled(engine)) return (await maintenanceTransaction(engine, tx => expireRows(tx, page.source_id, ids))).map(row => Number(row.id));
+  if (!await managedPersistenceEnabled(engine)) return (await engine.transaction(tx => expireRows(tx, page.source_id, ids))).map(row => Number(row.id));
   const authority = (await maintenancePreflight(engine, page.source_id))!;
   const snapshot = await engine.readPageSnapshot(page.slug, { sourceId: page.source_id });
   const h = digest(['captured-facts-expire-v1', hash, page.source_id, page.slug, ids, snapshot?.revision ?? null]);
@@ -328,11 +322,7 @@ async function expireDatabaseRows(engine: BrainEngine, page: CapturedFactsPage, 
 /** Preparer for `managed_maintenance_expire_captured_facts`: expires the named database-only rows of the source. */
 export async function prepareCapturedFactsExpiry(engine: BrainEngine, row: WriteRequest): Promise<PreparedMutation> {
   const ids = (row.intent as { fact_ids?: unknown } | null)?.fact_ids;
-  if (!Array.isArray(ids) || !ids.every(id => Number.isSafeInteger(id))) {
-    throw opError('invalid_params', 'The captured facts expiry intent does not name its facts.',
-      `Request ${row.request_id} in source ${row.source_id} does not name the facts to expire, so nothing changed. Preview the repair again and apply the new preview after the user approves.`,
-      { fix: readFix('Previews the captured-facts repair without changing anything.', { argv: ['gbrain', 'repair', 'captured-facts', '--source', row.source_id, '--json'] }) });
-  }
+  if (!Array.isArray(ids) || !ids.every(id => Number.isSafeInteger(id))) throw new OperationError('invalid_params', 'The captured facts expiry intent does not name its facts.');
   const snapshot = await engine.readPageSnapshot(row.slug, { sourceId: row.source_id });
   await authorizeWrite(engine, row.authority, 'submit_job', row.slug);
   return { observedRevision: snapshot?.revision ?? null, noop: true,

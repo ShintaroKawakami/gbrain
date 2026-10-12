@@ -293,8 +293,8 @@ export function resolvePreset(flags: AgentRegisterArgs): ResolvedPreset {
         scopes: explicit(flags.scopes, 'read write'),
         writeSource: explicit(flags.source, 'default'),
         federatedRead: flags.federatedRead ?? 'snapshot',
-        // S0/D4: no narrowing on any install path; pass --surface starter for a capped harness.
-        surface: explicit(flags.surface, 'full'),
+        // starter is literally "the ~20-op daily-driver set" (mcp/surface.ts).
+        surface: explicit(flags.surface, 'starter'),
         workspaceDerived: false,
       };
     case 'coding-agent': {
@@ -318,10 +318,10 @@ export function resolvePreset(flags: AgentRegisterArgs): ResolvedPreset {
         scopes: explicit(flags.scopes, 'read write'),
         writeSource,
         federatedRead: [writeSource, ...flags.federatedRead.filter(s => s !== writeSource)],
-        // S0/D4: full like every other install path. Code-intel reads are
-        // source-scoped for remote callers (readPolicyOpts / routeCodeIntelScope),
-        // so full no longer reaches past the client's grant.
-        surface: explicit(flags.surface, 'full'),
+        // starter, not full: `full` exposes brain-wide unscoped code-intel
+        // reads to a scoped client. Widen per client via
+        // `gbrain auth rescope-client --surface full`.
+        surface: explicit(flags.surface, 'starter'),
         workspaceDerived,
       };
     }
@@ -948,10 +948,10 @@ PRESETS
                  SNAPSHOT of all current non-archived sources EXCLUDING other
                  agents' *-workspace sources (agent scratch — share one via an
                  explicit --federated-read). New sources need a re-grant via
-                 \`gbrain auth rescope-client\`. Surface: full.
+                 \`gbrain auth rescope-client\`. Surface: starter.
   coding-agent   write-isolated: writes land in <name>${WORKSPACE_SUFFIX} (auto-created,
                  DB-only). Requires --federated-read (the project sources it may
-                 read). Surface: full.
+                 read). Surface: starter.
 
 NOTES
   Runs on the BRAIN HOST (a thin client is refused). Every block embeds the

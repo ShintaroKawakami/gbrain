@@ -112,7 +112,6 @@ export interface LinkRow {
   to_source_id: string;
   origin_source_id: string;
   link_kind: string | null;
-  resolution_type: string | null;
 }
 
 /** One timeline row, keys === the jsonb_to_recordset column list. */
@@ -154,7 +153,6 @@ export function buildLinkRows(links: LinkBatchInput[]): LinkRow[] {
     to_source_id: l.to_source_id || 'default',
     origin_source_id: l.origin_source_id || 'default',
     link_kind: l.link_kind ?? null,
-    resolution_type: l.resolution_type ?? null,
   }));
 }
 

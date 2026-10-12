@@ -39,8 +39,6 @@ function fakeEngine(): Record<string, unknown> {
     getConfig: async (key: string) => (key === 'version' ? '100000' : null),
     setConfig: async () => {},
     initSchema: async () => {},
-    // The connect path's graduation gate probes for a persistence_graduation row; none exists here.
-    executeRaw: async () => [],
   };
 }
 
@@ -113,7 +111,7 @@ beforeAll(async () => {
     order: 99,
     drain: async () => { events.push('drain'); return { unfinished: 0 }; },
   });
-  main = (await import('../src/cli/main.ts')).__testing.main;
+  main = (await import('../src/cli.ts')).__testing.main;
 });
 
 afterAll(() => {
@@ -155,10 +153,7 @@ describe('CLI dispatch lifecycle (connect / remote-route / drain / disconnect)',
   });
 
   test('serve is never torn down by the dispatcher', async () => {
-    // The configured data dir exists: serve with a missing brain directory starts status-only instead of connecting.
-    const dataDir = join(home, 'brain.pglite');
-    mkdirSync(dataDir, { recursive: true });
-    writeConfig({ ...LOCAL, database_path: dataDir });
+    writeConfig(LOCAL);
     expect(await run(['serve'])).toEqual(['connect', 'handler:serve', 'returned']);
   });
 
@@ -175,9 +170,7 @@ describe('CLI dispatch lifecycle (connect / remote-route / drain / disconnect)',
   test('--help never connects: self-help route and the generic stub', async () => {
     writeConfig(LOCAL);
     expect(await run(['sync', '--help'])).toEqual(['handler:sync', 'returned']);
-    // D3: orphans' own help is now reached engine-free (selfHelp + SELF_HELP_WITHOUT_ENGINE).
-    expect(await run(['orphans', '--help'])).toEqual(['handler:orphans', 'returned']);
-    expect(await run(['files', '--help'])).toEqual(['returned']);
+    expect(await run(['orphans', '--help'])).toEqual(['returned']);
   });
 
   test('connect failure runs no handler and no teardown', async () => {

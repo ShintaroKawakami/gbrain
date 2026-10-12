@@ -1,8 +1,7 @@
 /**
  * A conflicted coordinated write keeps PageRevisionConflictError's own
  * message, so a caller that never supplied expected_revision is not told its
- * revision went stale (#5659), and since #5385 it also gets its own code
- * (`revision_required`) while a stale revision stays `revision_conflict`.
+ * revision went stale (#5659).
  */
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -29,8 +28,7 @@ test('a missing expected_revision and a stale one report different conflicts', a
 
   const missing = await dispatchToolCall(engine, 'put_page', { slug, content: page('second body') }, ctx);
   expect(missing.isError).toBe(true);
-  // #5385: the missing precondition is the caller's omission, not a race, so it carries its own code.
-  expect(body(missing)).toMatchObject({ write_error: 'revision_required',
+  expect(body(missing)).toMatchObject({ write_error: 'revision_conflict',
     message: 'The page already exists; an expected revision is required.' });
 
   const stale = await dispatchToolCall(engine, 'put_page', { slug, content: page('second body'),

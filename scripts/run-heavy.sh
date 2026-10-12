@@ -9,9 +9,6 @@
 #   bash scripts/run-heavy.sh           # same
 #   bash scripts/run-heavy.sh <pattern> # only scripts whose basename matches glob
 #
-# Every script runs even after one fails, so one red script never hides
-# another. The summary lists each failing script with its own rerun command.
-#
 # Exit codes:
 #   0  all scripts passed (or no scripts found — informational)
 #   N  exit code of the first failing script
@@ -56,8 +53,7 @@ echo "[run-heavy] running ${#heavy_files[@]} heavy script(s):"
 for f in "${heavy_files[@]}"; do echo "  - $f"; done
 echo ""
 
-first_rc=0
-failures=()
+failed=0
 for f in "${heavy_files[@]}"; do
   echo "[run-heavy] --- $f ---"
   start=$(date +%s)
@@ -68,19 +64,15 @@ for f in "${heavy_files[@]}"; do
     rc=$?
     elapsed=$(( $(date +%s) - start ))
     echo "[run-heavy] FAIL ($f exited $rc after ${elapsed}s)" >&2
-    [ "$first_rc" -ne 0 ] || first_rc=$rc
-    failures+=("$f|$rc")
+    failed=$rc
+    break
   fi
   echo ""
 done
 
-if [ "${#failures[@]}" -ne 0 ]; then
-  echo "[run-heavy] FAILED — ${#failures[@]} of ${#heavy_files[@]} script(s) failed:" >&2
-  for entry in "${failures[@]}"; do
-    f="${entry%|*}"
-    echo "  - $f (exit ${entry##*|}); rerun: bash scripts/run-heavy.sh $(basename "$f")" >&2
-  done
-  exit "$first_rc"
+if [ "$failed" -ne 0 ]; then
+  echo "[run-heavy] FAILED — first failing script aborted the run." >&2
+  exit "$failed"
 fi
 
 echo "[run-heavy] all ${#heavy_files[@]} script(s) passed."

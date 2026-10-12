@@ -12,19 +12,16 @@
 
 import crypto from 'crypto';
 import type { BrainEngine } from '../engine.ts';
-import { queueWorkerAlive } from '../minions/no-worker.ts';
 import {
   computeRecommendations,
 } from '../brain-score-recommendations.ts';
 import type { RemediationStep } from '../remediation-step.ts';
 import { loadRecommendationContext } from './context.ts';
 import { computeRemediationPlan } from './plan.ts';
-import { planRepairStepsReport, previewFailureField, runRepairSteps, type RepairPlanStep, type RepairPreviewFailure, type RepairStepResult } from './repairs.ts';
+import { planRepairSteps, runRepairSteps, type RepairPlanStep, type RepairStepResult } from './repairs.ts';
 import { OperationError } from '../ops/contract.ts';
-import { isManualOnlyStep, manualOnlyFix } from './manual-only.ts';
 import type { RemediationCheckpoint } from '../remediation-checkpoint.ts';
 import type {
-  ManualOnlySkippedStep,
   RemediationHooks,
   RemediationOpts,
   RemediationResult,
@@ -43,97 +40,6 @@ import type {
  *
  * Callers decide exit codes from the result.
  */
-/**
- * E3: the job steps a run executes. An unreachable score target skips the
- * PAID steps only (their ids land in `job_steps_skipped.skipped`); free steps
- * still run so the brain improves as far as it can — when a worker serves the
- * queue. With no worker (PGLite, or no supervisor) they would wait out their
- * timeout, so every job step is skipped as before.
- */
-function planJobSteps(planned: RemediationStep[], manifest: { job_ids: string[] } | undefined, unreachable?: { target: number; ceiling: number }) {
-  const remediable = planned.filter((r) => r.status === 'remediable' && (!manifest || manifest.job_ids.includes(r.id)));
-  const workerRuns = !unreachable || queueWorkerAlive('default') === true;
-  const freeRecs = workerRuns ? remediable.filter((r) => (r.est_usd_cost ?? 0) === 0) : [];
-  if (!unreachable) return { recs: remediable, freeRecs, jobStepsSkipped: undefined };
-  return {
-    recs: freeRecs, freeRecs,
-    jobStepsSkipped: { reason: 'target_unreachable' as const, ...unreachable, skipped: remediable.filter((r) => !freeRecs.includes(r)).map((r) => r.id) },
-  };
-}
-
-/**
- * Holds manual-only steps out of a run's job steps. `withoutManualOnly`
- * returns the other steps and records each remediable manual-only one once
- * (`manual_only_skipped`), naming the rows of its job an earlier run already
- * queued: they still run once a worker picks them up.
- */
-function manualOnlySkips(engine: BrainEngine) {
-  const skipped: ManualOnlySkippedStep[] = [];
-  const withoutManualOnly = async (steps: RemediationStep[]): Promise<RemediationStep[]> => {
-    const manual = steps.filter((s) => isManualOnlyStep(s) && s.status === 'remediable' && !skipped.some((m) => m.id === s.id));
-    if (manual.length) {
-      const { cliRenderContext, renderAction } = await import('../agent-output.ts');
-      const queued = await engine.executeRaw<{ id: number | string; name: string; status: string }>(
-        `SELECT id, name, status FROM minion_jobs
-          WHERE name = ANY($1::text[]) AND status NOT IN ('completed', 'failed', 'dead', 'cancelled')
-          ORDER BY id`,
-        [[...new Set(manual.map((s) => s.job))]],
-      ).catch(() => []);
-      for (const step of manual) {
-        const jobs = queued.filter((q) => q.name === step.job).map((q) => ({ id: Number(q.id), status: q.status }));
-        skipped.push({
-          code: 'manual_only_skipped',
-          id: step.id, job: step.job, params: step.params,
-          ...(step.est_usd_cost !== undefined ? { est_usd_cost: step.est_usd_cost } : {}),
-          why: `${step.job} is manual-only, so this automatic run did not submit it`
-            + (jobs.length ? `; ${jobs.length} ${step.job} job(s) an earlier run queued (${jobs.map((j) => `#${j.id} ${j.status}`).join(', ')}) still run when a worker picks them up unless cancelled with gbrain jobs cancel <id>.` : '.'),
-          fix: renderAction(manualOnlyFix(step), cliRenderContext()),
-          ...(jobs.length ? { queued_jobs: jobs } : {}),
-        });
-      }
-    }
-    return steps.filter((s) => !isManualOnlyStep(s));
-  };
-  return { withoutManualOnly, field: () => (skipped.length ? { manual_only_skipped: skipped } : {}) };
-}
-
-/**
- * How a submitted step is awaited. PGLite has no background worker, and a
- * Postgres queue may have none running: when the caller allows it and no
- * registered worker serves the queue, the step runs in this process (as `jobs submit --follow` does)
- * instead of waiting out its timeout for a worker that never comes.
- */
-function stepWaiter(engine: BrainEngine, queue: InstanceType<typeof import('../minions/queue.ts').MinionQueue>, allowInline: boolean) {
-  const worker = allowInline ? queueWorkerAlive('default') : true;
-  const inline = engine.kind === 'pglite' ? worker !== true : worker === false;
-  return async (jobId: number, waitOpts: { pollMs: number; timeoutMs: number }) => {
-    if (inline) return runJobInline(engine, queue, jobId, waitOpts);
-    const { waitForCompletion } = await import('../minions/wait-for-completion.ts');
-    return waitForCompletion(queue, jobId, waitOpts);
-  };
-}
-
-/** One submitted job, executed by an in-process worker until it is terminal. */
-async function runJobInline(
-  engine: BrainEngine,
-  queue: InstanceType<typeof import('../minions/queue.ts').MinionQueue>,
-  jobId: number,
-  waitOpts: { pollMs: number; timeoutMs: number },
-) {
-  const { MinionWorker } = await import('../minions/worker.ts');
-  const { registerBuiltinHandlers } = await import('../../commands/jobs.ts');
-  const { waitForCompletion } = await import('../minions/wait-for-completion.ts');
-  const worker = new MinionWorker(engine, { queue: 'default', pollInterval: 100, healthCheckInterval: 0 });
-  await registerBuiltinHandlers(worker, engine);
-  const running = worker.start();
-  try {
-    return await waitForCompletion(queue, jobId, waitOpts);
-  } finally {
-    worker.stop();
-    await running;
-  }
-}
-
 export async function runRemediation(
   engine: BrainEngine,
   opts: RemediationOpts = {},
@@ -169,11 +75,9 @@ export async function runRemediation(
   const ctx = await loadRecommendationContext(engine);
   const extraRemediations = opts.extraRemediations ?? [];
   const brainId = repairs ? (await (await import('../repair/core.ts')).resolveRepairScope(engine)).brain_id : undefined;
-  let previewFailures: RepairPreviewFailure[] = [];
-  const manualOnly = manualOnlySkips(engine);
   const synthetic = (score: number, extra: Partial<RemediationResult> = {}): RemediationResult => ({
     doctor_run_id: crypto.randomUUID(), brain_score_initial: score, brain_score_final: score, brain_score_target: targetScore,
-    target_reached: false, submitted: [], aborted_count: 0, ...previewFailureField(previewFailures), ...manualOnly.field(), ...extra,
+    target_reached: false, submitted: [], aborted_count: 0, ...extra,
   });
 
   // Resume loads its checkpoint first: a checkpoint that records a manifest
@@ -204,23 +108,25 @@ export async function runRemediation(
   // Pre-flight ceiling check via the shared plan computation. The score target
   // governs job steps only; repair steps are planned independently of it.
   const initialPlan = await computeRemediationPlan(engine, { targetScore, extraRemediations });
-  const repairReport = repairs ? await planRepairStepsReport(engine, { noEmbed: repairs.noEmbed, kinds: manifest ? manifest.repair_kinds as RepairPlanStep['kind'][] : undefined, registry: repairs.registry }) : { steps: [], previewFailures: [] };
-  let repairSteps: RepairPlanStep[] = repairReport.steps;
-  previewFailures = repairReport.previewFailures;
+  let repairSteps: RepairPlanStep[] = repairs
+    ? await planRepairSteps(engine, { noEmbed: repairs.noEmbed, kinds: manifest ? manifest.repair_kinds as RepairPlanStep['kind'][] : undefined })
+    : [];
   // Embeddings a budget stop left behind after re-sealing; the re-sealed pages no longer show up in a repair plan.
   let pendingEmbedSources = includeRepairs && manifest ? [...(cp?.pending_embed_sources ?? [])] : [];
-  const initialHealth = await engine.getHealth();
-  const { freeRecs, jobStepsSkipped, recs: plannedJobSteps } = planJobSteps(await manualOnly.withoutManualOnly(computeRecommendations(initialHealth, ctx, extraRemediations)), manifest,
-    initialPlan.target_unreachable ? { target: targetScore, ceiling: initialPlan.max_reachable_score } : undefined);
-  if (jobStepsSkipped && freeRecs.length === 0 && !(includeRepairs && (repairSteps.length || pendingEmbedSources.length))) {
+  if (initialPlan.target_unreachable && !(includeRepairs && (repairSteps.length || pendingEmbedSources.length))) {
     hooks.onTargetUnreachable?.(targetScore, initialPlan.max_reachable_score);
     return synthetic(initialPlan.brain_score_current, {
       target_unreachable: { target: targetScore, ceiling: initialPlan.max_reachable_score },
       ...(repairs && repairSteps.length ? { repairs: [], repairs_skipped: repairSteps } : {}),
     });
   }
+  const jobStepsSkipped = initialPlan.target_unreachable
+    ? { reason: 'target_unreachable' as const, target: targetScore, ceiling: initialPlan.max_reachable_score } : undefined;
   if (jobStepsSkipped) hooks.onTargetUnreachable?.(targetScore, initialPlan.max_reachable_score);
-  let recs: RemediationStep[] = plannedJobSteps;
+
+  const initialHealth = await engine.getHealth();
+  let recs: RemediationStep[] = jobStepsSkipped ? [] : computeRecommendations(initialHealth, ctx, extraRemediations)
+    .filter((r) => r.status === 'remediable' && (!manifest || manifest.job_ids.includes(r.id)));
   const skippedRepairs = includeRepairs ? [] : repairSteps;
   if (!includeRepairs) repairSteps = [];
   if (recs.length === 0 && repairSteps.length === 0 && pendingEmbedSources.length === 0) {
@@ -290,10 +196,9 @@ export async function runRemediation(
   const repairResults: RepairStepResult[] = [];
 
   const { MinionQueue } = await import('../minions/queue.ts');
-  const { openStepImpact, closeStepImpact } = await import('../onboard/impact-capture.ts');
+  const { waitForCompletion } = await import('../minions/wait-for-completion.ts');
   const isPGLite = engine.kind === 'pglite';
   const queue = new MinionQueue(engine);
-  const waitStep = stepWaiter(engine, queue, opts.inlineJobs === true);
 
   // A4 amended: install a BudgetTracker scope around the plan-step loop so
   // any gateway.chat / embed / rerank inside a Minion handler (synthesize,
@@ -302,9 +207,9 @@ export async function runRemediation(
   // the throw propagates; the caller hook surfaces the actionable --resume hint.
   // Repairs run first under their own tracker; job steps then get a tracker capped at what the repairs left,
   // so in-process spend, reserved effect estimates and job spend all draw on one cumulative cap.
-  const repairTracker = new BudgetTracker({ label: 'remediation.repairs', maxCostUsd: remainingCap, capSource: opts.capSource });
+  const repairTracker = new BudgetTracker({ label: 'remediation.repairs', maxCostUsd: remainingCap });
   let jobTracker: InstanceType<typeof BudgetTracker> | undefined;
-  // Effect kinds embed outside any tracker, so their estimate is reserved up front; paid-model spend no tracker here metered is charged once its step reports it.
+  // Effect kinds embed in the persistence consumer, outside any tracker, so their estimate is reserved up front.
   let reservedUsd = 0;
   let trackerExhausted = false;
   const stepTrackers: Array<InstanceType<typeof BudgetTracker>> = [];
@@ -371,10 +276,10 @@ export async function runRemediation(
     }
     if (repairSteps.length === 0) return;
     for (const step of repairSteps) hooks.onRepairStepStart?.(step);
-    const results = await runRepairSteps(engine, repairSteps, { remote: repairs.remote, noEmbed: repairs.noEmbed, remainingUsd, registry: repairs.registry,
-      charge: (usd) => { reservedUsd += usd; }, spentUsd: spentThisRun, exhausted: () => trackerExhausted,
+    const results = await runRepairSteps(engine, repairSteps, { remote: repairs.remote, noEmbed: repairs.noEmbed, remainingUsd,
+      charge: (usd) => { reservedUsd += usd; }, exhausted: () => trackerExhausted,
       stepBudget: async (run) => {
-        const tracker = new BudgetTracker({ label: 'remediation.repair-step', maxCostUsd: remainingUsd(), capSource: opts.capSource });
+        const tracker = new BudgetTracker({ label: 'remediation.repair-step', maxCostUsd: remainingUsd() });
         stepTrackers.push(tracker);
         watch(tracker);
         return withBudgetTracker(tracker, run);
@@ -418,7 +323,6 @@ export async function runRemediation(
 
       hooks.onStepStart?.(stepCount, totalSteps, step);
       try {
-        const impact = await openStepImpact(engine, step);
         const isProtected = !!step.protected;
         const submitWith = (key: string) =>
           queue.add(
@@ -454,10 +358,14 @@ export async function runRemediation(
         };
         submitted.push(submittedResult);
 
-        const terminal = await waitStep(job.id, { pollMs: isPGLite ? 250 : 1000, timeoutMs: (step.est_seconds + 60) * 1000 });
+        const terminal = await waitForCompletion(queue, job.id, {
+          pollMs: isPGLite ? 250 : 1000,
+          timeoutMs: (step.est_seconds + 60) * 1000,
+        });
         submittedResult.status = terminal.status;
-        if (impact) await closeStepImpact(engine, impact, step, { jobId: job.id, status: terminal.status, doctorRunId });
-        if (terminal.status !== 'completed') abortedIds.add(step.id);
+        if (terminal.status !== 'completed') {
+          abortedIds.add(step.id);
+        }
         hooks.onStepEnd?.(submittedResult);
       } catch (e) {
         if (e instanceof BudgetExhausted) {
@@ -495,9 +403,8 @@ export async function runRemediation(
       // ids this run already processed (any terminal status), or the recheck
       // would resubmit completed extras every iteration, forever.
       const pendingExtras = extraRemediations.filter((r) => !attemptedIds.has(r.id));
-      recs = (await manualOnly.withoutManualOnly(computeRecommendations(freshHealth, ctx, pendingExtras)))
-        .filter((r) => r.status === 'remediable' && !attemptedIds.has(r.id) && (!manifest || manifest.job_ids.includes(r.id))
-          && (!jobStepsSkipped || (r.est_usd_cost ?? 0) === 0));
+      recs = computeRecommendations(freshHealth, ctx, pendingExtras)
+        .filter((r) => r.status === 'remediable' && !attemptedIds.has(r.id) && (!manifest || manifest.job_ids.includes(r.id)));
     }
   };
 
@@ -512,7 +419,7 @@ export async function runRemediation(
       jobsBudgetRefused = true;
       recs = [];
     }
-    jobTracker = new BudgetTracker({ label: 'remediation.run', maxCostUsd: afterRepairs, capSource: opts.capSource });
+    jobTracker = new BudgetTracker({ label: 'remediation.run', maxCostUsd: afterRepairs });
     watch(jobTracker);
     await withBudgetTracker(jobTracker, runLoop);
   } catch (err) {
@@ -559,6 +466,5 @@ export async function runRemediation(
       repairs: repairResults, repairs_skipped: skippedRepairs,
       budget: { max_usd: maxUsd ?? null, spent_usd: settledUsd(), include_repairs: includeRepairs, plan_hash: planHash },
     } : {}),
-    ...previewFailureField(previewFailures), ...manualOnly.field(),
   };
 }

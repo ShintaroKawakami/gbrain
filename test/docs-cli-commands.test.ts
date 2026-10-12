@@ -8,10 +8,8 @@
  * and checks each verb against the live CLI surface: CLI_ONLY, operation
  * cliHints names (non-hidden), and aliases.
  *
- * Docs-CLI truth check: in docs/guides/, docs/migrations/, docs/mcp/, skills/
- * and the root agent entry points (AGENTS.md, INSTALL_FOR_AGENTS.md,
- * BOOTSTRAP_FOR_AGENTS.md, CLAUDE.md, llms.txt) each invocation's flags must
- * also pass the production argument pipeline
+ * Docs-CLI truth check: in docs/guides/, docs/migrations/ and skills/ each
+ * invocation's flags must also pass the production argument pipeline
  * (parseGlobalFlags + validateCommandFlags, see test/helpers/
  * cli-command-surface.ts), so a documented flag the CLI rejects fails here.
  *
@@ -34,7 +32,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readdirSync, readFileSync, statSync } from 'fs';
 import { dirname, join, relative } from 'path';
-import { CLI_ONLY } from '../src/cli/main.ts';
+import { CLI_ONLY } from '../src/cli.ts';
 import {
   codeRegions, flagRejection, gbrainInvocations, HISTORICAL_MARKER, liveCliVerbs,
 } from './helpers/cli-command-surface.ts';
@@ -50,11 +48,8 @@ const EXCLUDED = [
   'docs/test-audit/',
 ];
 
-/** Root files agents read first: scanned for verbs and flags. */
-const AGENT_ENTRY_POINTS = ['AGENTS.md', 'INSTALL_FOR_AGENTS.md', 'BOOTSTRAP_FOR_AGENTS.md', 'CLAUDE.md', 'llms.txt'];
-
-/** Trees and files whose invocations are checked for flags as well as verbs. */
-const FLAG_CHECKED = ['docs/guides/', 'docs/migrations/', 'docs/mcp/', 'skills/', ...AGENT_ENTRY_POINTS];
+/** Trees whose invocations are checked for flags as well as verbs. */
+const FLAG_CHECKED = ['docs/guides/', 'docs/migrations/', 'skills/'];
 
 /**
  * Shrink-only: file → the offending verbs/flags it may carry, with why.
@@ -78,7 +73,7 @@ function* mdFiles(dir: string): Generator<string> {
 }
 
 function scanText(rel: string, text: string, valid: Set<string>): Violation[] {
-  const checkFlags = FLAG_CHECKED.some((t) => (t.endsWith('/') ? rel.startsWith(t) : rel === t));
+  const checkFlags = FLAG_CHECKED.some((t) => rel.startsWith(t));
   const out: Violation[] = [];
   for (const { code, line, historical } of codeRegions(text)) {
     if (historical) continue;
@@ -98,10 +93,7 @@ function scanText(rel: string, text: string, valid: Set<string>): Violation[] {
 
 function scan(): Violation[] {
   const valid = liveCliVerbs();
-  const files = [
-    join(ROOT, 'README.md'), ...AGENT_ENTRY_POINTS.map((f) => join(ROOT, f)),
-    ...mdFiles(join(ROOT, 'docs')), ...mdFiles(join(ROOT, 'skills')),
-  ];
+  const files = [join(ROOT, 'README.md'), ...mdFiles(join(ROOT, 'docs')), ...mdFiles(join(ROOT, 'skills'))];
   const out: Violation[] = [];
   for (const file of files) {
     const rel = relative(ROOT, file);
@@ -114,11 +106,6 @@ function scan(): Violation[] {
 const allowed = (v: Violation) => ALLOWLIST[v.file]?.tokens.includes(v.token) ?? false;
 
 describe('#3502 — docs reference only real gbrain commands and flags', () => {
-  test('the agent entry points are scanned, flags included', () => {
-    for (const f of AGENT_ENTRY_POINTS) expect(FLAG_CHECKED).toContain(f);
-    expect(FLAG_CHECKED).toContain('docs/mcp/');
-  });
-
   const violations = scan();
 
   test('every `gbrain <verb> [--flag]` in README/docs/skills resolves against the live CLI', () => {

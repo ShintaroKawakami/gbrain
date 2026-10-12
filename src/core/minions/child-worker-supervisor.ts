@@ -36,7 +36,7 @@
  *                  (escalating exponential backoff).
  */
 
-import { spawn, type ChildProcess } from '../spawn.ts';
+import { spawn, type ChildProcess } from 'child_process';
 import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join, resolve as resolvePath } from 'node:path';
@@ -54,8 +54,6 @@ export type ChildSupervisorEvent =
   | { kind: 'worker_spawn_failed'; error: string; phase: 'sync' | 'async'; errnoCode?: string }
   | {
       kind: 'worker_exited';
-      /** The exited child's pid (absent when the spawn never produced a process). */
-      pid?: number;
       code: number | null;
       signal: NodeJS.Signals | null;
       runDurationMs: number;
@@ -195,7 +193,6 @@ export class ChildWorkerSupervisor {
   private readonly tiniPath: string;
   private _crashCount = 0;
   private _lastExitCode: number | null = null;
-  private _lastExit: { code: number | null; signal: NodeJS.Signals | null } | null = null;
   private _cleanRestartTimestamps: number[] = [];
   /** Sliding window of RSS-watchdog exit timestamps (issue #1678). Separate
    *  from crashCount so the >5-min stable-run reset can't defeat the breaker. */
@@ -226,12 +223,6 @@ export class ChildWorkerSupervisor {
   }
   get crashCount(): number {
     return this._crashCount;
-  }
-  /** #5062: how the most recent child exited, recorded on the shutdown path
-   *  too, so a composer can tell a clean drain (code 0) from a forced or
-   *  failed stop. */
-  get lastExit(): { code: number | null; signal: NodeJS.Signals | null } | null {
-    return this._lastExit;
   }
   get configurationBlocked(): boolean {
     if (this.opts.processingState?.blocked) this.markConfigurationBlocked();
@@ -557,7 +548,6 @@ export class ChildWorkerSupervisor {
 
         this.opts.onEvent({
           kind: 'worker_exited',
-          pid: child.pid,
           code: null,
           signal: null,
           runDurationMs: runDuration,
@@ -595,13 +585,12 @@ export class ChildWorkerSupervisor {
         settled = true;
         cleanup();
         this._child = null;
-        this._lastExit = { code, signal };
 
         if (code === WORKER_EXIT_CONFIGURATION) {
           this.opts.processingState?.workerExited();
           this._lastExitCode = code;
           this.markConfigurationBlocked();
-          this.opts.onEvent({ kind: 'worker_exited', pid: child.pid, code, signal: signal ?? null,
+          this.opts.onEvent({ kind: 'worker_exited', code, signal: signal ?? null,
             runDurationMs: this.now() - this._lastStartTime, likelyCause: 'configuration_blocked', crashCount: this._crashCount });
           resolve();
           return;
@@ -695,7 +684,6 @@ export class ChildWorkerSupervisor {
 
         this.opts.onEvent({
           kind: 'worker_exited',
-          pid: child.pid,
           code: code ?? null,
           signal: signal ?? null,
           runDurationMs: runDuration,

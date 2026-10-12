@@ -13,7 +13,7 @@
  * inject a fake reader).
  */
 
-import { isInteractive, readLine } from '../interaction.ts';
+import { createInterface } from 'readline';
 
 import type { ResolvedSource } from './remote-source.ts';
 import type { SkillpackManifest } from './manifest-v1.ts';
@@ -67,14 +67,19 @@ export interface AskTrustOptions {
   trustFlag?: boolean;
   /** Inject a custom reader for testing. */
   readLine?: (question: string) => Promise<string>;
-  /** Default: isInteractive() (a human can answer the prompt). */
+  /** Default reader uses readline against stdin. */
   isTTY?: boolean;
 }
 
-/** Default reader: interaction.readLine (stderr prompt; EOF/timeout read as a decline, never a hang). */
-async function defaultReadLine(question: string): Promise<string> {
-  const read = await readLine({ prompt: question });
-  return read.kind === 'line' ? read.text : '';
+/** Default TTY-aware reader. */
+function defaultReadLine(question: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  return new Promise((resolveAns) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolveAns(answer);
+    });
+  });
 }
 
 /**
@@ -111,10 +116,10 @@ export async function askTrust(
     return { trusted: true, reason: 'trust_flag_bypassed' };
   }
 
-  const isTTY = opts.isTTY ?? isInteractive();
+  const isTTY = opts.isTTY ?? Boolean(process.stdin.isTTY && process.stderr.isTTY);
   if (!isTTY) {
     process.stderr.write(
-      '[skillpack] no human at this terminal and no --trust: the user decides whether to trust a new third-party source; nothing was written.\n',
+      '[skillpack] non-TTY environment and no --trust flag; refusing to scaffold a new third-party source without explicit consent.\n',
     );
     return { trusted: false, reason: 'non_tty_no_trust_flag' };
   }

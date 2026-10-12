@@ -5,9 +5,8 @@
  * Protects: a managed checkout shared by several sources is fast-forwarded only
  * after every accepted write to it drained, never under a moving HEAD, and the
  * refresh converges or refuses with a typed, filled fix.
- * Regression it catches: admission, claiming or the consumer's idle probe
- * ignoring the refresh fence (a write publishing onto a checkout whose HEAD is
- * moving, or a fenced effect waking the consumer every poll), a per-source fence,
+ * Regression it catches: admission or claiming ignoring the refresh fence (a
+ * write publishing onto a checkout whose HEAD is moving), a per-source fence,
  * a refresh that merges dirty or diverged checkouts, a refresh that leaves the
  * fence up after a refusal, or topology changes racing a refresh.
  * Existing coverage: none; managed sync refused to pull and lane B only
@@ -16,21 +15,16 @@
  * drained, fenced and merged points; no production behavior is replaced.
  */
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { operations } from '../src/core/operations.ts';
-import { parseRefreshArgs, runSourcesRefresh } from '../src/commands/sources-refresh.ts';
+import { runSourcesRefresh } from '../src/commands/sources-refresh.ts';
 import { claimCoalescedGitEffects, claimPersistenceEffect } from '../src/core/persistence/effect-journal.ts';
 import { localHostId } from '../src/core/persistence/identity.ts';
-import { tryAcquireNativeLock } from '../src/core/persistence/native-lock.ts';
-import { getWorktreeBinding } from '../src/core/persistence/ownership.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
-import { PersistenceConsumer } from '../src/core/persistence/consumer.ts';
 import { runManagedSourceLifecycle } from '../src/core/persistence/source-lifecycle.ts';
 import { runPersistenceAdministration } from '../src/core/persistence/administration.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
@@ -40,7 +34,6 @@ import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-force-exit.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
-import { withEnv } from './helpers/with-env.ts';
 import { git, page, withRefreshFixture, type RefreshFixture } from './helpers/worktree-refresh-fixture.ts';
 
 const backends = testBackends();
@@ -69,13 +62,6 @@ const refusedWith = async (promise: Promise<unknown>, code: string) => {
   expect(error!.code).toBe(code);
   return error!;
 };
-test('refresh timer bounds reject overflow and accept the maximum delay', () => each(async f => {
-  await refusedWith(refreshWorktree(f.engine, f.alpha, { fetchTimeoutMs: 2 ** 31 }), 'invalid_params');
-  const drain = parseRefreshArgs([f.alpha, '--wait-drain', String((2 ** 31) / 1000), '--dry-run']).options;
-  expect(drain.waitDrainMs).toBeGreaterThan(2 ** 31 - 1); // the drain wait is a performance.now() deadline, not a timer: still accepted
-  expect((await refreshWorktree(f.engine, f.alpha, drain)).status).toBe('dry_run');
-  expect((await refreshWorktree(f.engine, f.alpha, { fetchTimeoutMs: 2 ** 31 - 1, dryRun: true })).status).toBe('dry_run');
-}));
 /** Requeue a committed git effect so the drain must wait for the consumer to process it again. */
 async function requeueGitEffect(f: RefreshFixture, delayMs: number): Promise<number> {
   const [effect] = await f.engine.executeRaw<{ id: number }>(`SELECT id FROM persistence_effects WHERE worktree_id=$1::uuid AND kind='git' ORDER BY id DESC LIMIT 1`, [f.worktreeId]);
@@ -119,58 +105,6 @@ test('3. a fetch killed by its bound leaves no refresh row and HEAD unchanged', 
   expect(error.suggestion).toContain('--fetch-timeout-ms');
   expect(await f.refreshRows()).toEqual([]);
   expect(f.head()).toBe(head);
-}), 120_000);
-
-/** Runs `fn` with a PATH git that fails (stderr line, then `code`) whenever an argument equals `token`; every other command is the real git. */
-async function withFailingGit<T>(token: string, code: number, fn: () => Promise<T>): Promise<T> {
-  const bin = mkdtempSync(join(tmpdir(), 'gbrain-failing-git-'));
-  const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
-  writeFileSync(join(bin, 'git'), `#!/bin/sh
-for a in "$@"; do if [ "$a" = "${token}" ]; then echo "fatal: injected failure of ${token}" >&2; exit ${code}; fi; done
-exec ${realGit} "$@"
-`, { mode: 0o755 });
-  try { return await withEnv({ PATH: `${bin}:${process.env.PATH}` }, fn); } finally { rmSync(bin, { recursive: true, force: true }); }
-}
-const refusedOnGit = async (f: RefreshFixture, token: string, code: number, command: string) => {
-  const head = f.head();
-  const error = await withFailingGit(token, code, () => refusedWith(refreshWorktree(f.engine, f.alpha), 'git_unavailable'));
-  expect(error.message).toContain(`git ${command} failed (fatal: injected failure of ${token})`);
-  expect(error.suggestion).toContain(`gbrain sources refresh ${f.alpha}`);
-  expect(await f.refreshRows()).toEqual([]);
-  expect(f.head()).toBe(head);
-};
-
-test('3b. a failing git symbolic-ref is a git failure, not a detached HEAD', () => each(async f => {
-  f.push('alpha/two.md', page('Alpha two', 'Upstream.'));
-  await refusedOnGit(f, 'symbolic-ref', 128, 'symbolic-ref --quiet --short HEAD');
-  git(f.root, 'checkout', '-q', '--detach');
-  const detached = await refusedWith(refreshWorktree(f.engine, f.alpha), 'refresh_no_upstream');
-  expect(detached.message).toContain('(detached HEAD)');
-}), 120_000);
-
-test('3c. a failing git remote is a git failure, not a checkout without remotes', () => each(async f => {
-  git(f.root, 'branch', '--unset-upstream');
-  await refusedOnGit(f, 'remote', 128, 'remote');
-  const noUpstream = await refusedWith(refreshWorktree(f.engine, f.alpha), 'refresh_no_upstream');
-  expect(noUpstream.suggestion).toContain('branch --set-upstream-to origin/main');
-}), 120_000);
-
-test('3d. a failing git config --get of the branch remote or merge is a git failure, not an unset key', () => each(async f => {
-  const target = f.push('alpha/two.md', page('Alpha two', 'Upstream.'));
-  await refusedOnGit(f, 'branch.main.remote', 3, 'config --get branch.main.remote');
-  await refusedOnGit(f, 'branch.main.merge', 3, 'config --get branch.main.merge');
-  expect((await refreshWorktree(f.engine, f.alpha)).status).toBe('completed');
-  expect(f.head()).toBe(target);
-}), 120_000);
-
-test('3e. a checkout that is not a Git checkout is refresh_no_upstream naming that, not a detached HEAD or a git failure', () => each(async f => {
-  renameSync(join(f.root, '.git'), join(f.dir, 'moved.git'));
-  try {
-    const error = await refusedWith(refreshWorktree(f.engine, f.alpha), 'refresh_no_upstream');
-    expect(error.message).toContain(`The checkout ${f.root} is not a Git checkout`);
-    expect(error.suggestion).toContain('Nothing to refresh');
-    expect(await f.refreshRows()).toEqual([]);
-  } finally { renameSync(join(f.dir, 'moved.git'), join(f.root, '.git')); }
 }), 120_000);
 
 test('4. a diverged checkout is refused with no row and HEAD unchanged', () => each(async f => {
@@ -245,9 +179,6 @@ test('8. a queued git effect drains before fenced, and nothing on the worktree i
       await f.engine.executeRaw(`UPDATE persistence_effects SET state='queued',next_attempt_at=now()-interval '1 second' WHERE id=$1`, [effectId]);
       expect(await claimPersistenceEffect(f.engine, localHostId())).toBeNull();
       expect(await claimCoalescedGitEffects(f.engine, localHostId(), f.worktreeId, 5)).toEqual([]);
-      // The idle probe mirrors the claims: a fenced effect is not work, so the consumer keeps backing off.
-      const probe = new PersistenceConsumer(f.engine, {} as never, async () => { throw new Error('no preparation in this probe'); });
-      expect(await (probe as unknown as { hasWork(): Promise<boolean> }).hasWork()).toBe(false);
       // The resident consumer polls too; a claimable effect would leave 'queued' within a few polls.
       await new Promise(resolve => setTimeout(resolve, 1200));
       expect((await f.engine.executeRaw<{ state: string }>('SELECT state FROM persistence_effects WHERE id=$1', [effectId]))[0].state).toBe('queued');
@@ -320,16 +251,13 @@ test('12. an unmanaged brain refuses refresh_not_managed naming gbrain sync, on 
 test('13. drain starvation: a writer every 50 ms is refused during draining and the refresh completes inside --wait-drain', () => each(async f => {
   const target = f.push('alpha/two.md', page('Alpha two', 'Upstream.'));
   await f.put(f.alpha, 'notes/seed', page('Seed', 'Has a git effect.'));
-  // The git effect the refresh drains becomes runnable once the writer has been refused four times (not after a fixed
-  // delay), so the draining window always spans several writer attempts however slow one write is on the host.
-  const effect = await requeueGitEffect(f, 60_000);
+  await requeueGitEffect(f, 1000);
   let stop = false;
   const outcomes: string[] = [];
   const writer = (async () => {
     while (!stop) {
       try { await f.put(f.alpha, `notes/w-${randomUUID().slice(0, 8)}`, page('W', 'steady traffic')); outcomes.push('accepted'); }
       catch (error) { outcomes.push((error as { code?: string }).code ?? 'error'); }
-      if (outcomes.filter(code => code === 'worktree_refreshing').length === 4) await f.engine.executeRaw('UPDATE persistence_effects SET next_attempt_at=now() WHERE id=$1', [effect]);
       await new Promise(resolve => setTimeout(resolve, 50));
     }
   })();
@@ -359,74 +287,6 @@ test('13b. a publication in flight (recovery under a live claim) is drained, not
   } finally {
     await f.engine.executeRaw(`UPDATE persistence_requests SET state='committed', recovery=NULL, claim_expires_at=NULL WHERE id=$1::uuid`, [request.id]);
   }
-}), 120_000);
-
-test('13c. a committed write whose publisher still holds the worktree lock (recovery not yet cleared) is drained, not refused', () => each(async f => {
-  // The coordinator commits the receipt (completeWrite) and only then clears the request's recovery record
-  // (clearResolvedRecovery), holding the worktree native lock throughout. A refresh whose precheck lands in
-  // that window used to refuse refresh_recovery_required; on loaded CI this flaked cases 8 and 13.
-  const target = f.push('alpha/two.md', page('Alpha two', 'Upstream.'));
-  await f.put(f.alpha, 'notes/seed', page('Seed', 'Has a worktree request.'));
-  const [request] = await f.engine.executeRaw<{ id: string }>(
-    'SELECT id::text FROM persistence_requests WHERE source_id=$1 AND worktree_id IS NOT NULL ORDER BY sequence DESC LIMIT 1', [f.alpha]);
-  const binding = (await getWorktreeBinding(f.engine, f.alpha))!;
-  // Let the seed's Git effect finish, then stop the resident consumer so its recovery scan cannot settle the planted record.
-  for (let i = 0; i < 100; i++) {
-    const [busy] = await f.engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM persistence_effects
-      WHERE worktree_id=$1::uuid AND kind IN ('git','withdrawal-mirror') AND state IN ('queued','running')`, [f.worktreeId]);
-    if (Number(busy.n) === 0) break;
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  await disposePersistenceConsumer(f.engine);
-  const committedWithRecovery = () => f.engine.executeRaw(
-    `UPDATE persistence_requests SET recovery='{"version":1}'::jsonb, claim_expires_at=NULL WHERE id=$1::uuid AND state='committed'`, [request.id]);
-  const clear = () => f.engine.executeRaw('UPDATE persistence_requests SET recovery=NULL WHERE id=$1::uuid', [request.id]);
-  try {
-    // No live owner: the same record left by a crashed publisher is still refused.
-    await committedWithRecovery();
-    await refusedWith(refreshWorktree(f.engine, f.alpha, { waitDrainMs: 300 }), 'refresh_recovery_required');
-    // Live owner: the publisher holds the worktree lock until it clears the record.
-    const lock = (await tryAcquireNativeLock(binding.coordination_path!))!;
-    expect(lock).not.toBeNull();
-    await committedWithRecovery();
-    const publisherFinishes = new Promise<void>(resolve => setTimeout(() => { void clear().then(() => lock.release()).then(resolve); }, 400));
-    const result = await refreshWorktree(f.engine, f.alpha, { waitDrainMs: 10_000 });
-    await publisherFinishes;
-    expect(result).toMatchObject({ status: 'completed', target_head: target });
-  } finally { await clear(); }
-}), 120_000);
-
-test('13d. a publisher that clears its record and releases the lock between the precheck probe and its lock attempt is not refused', () => each(async f => {
-  // TOCTOU on 13c's fix: the precheck sees the record, then the publisher finishes before the lock probe.
-  const target = f.push('alpha/two.md', page('Alpha two', 'Upstream.'));
-  await f.put(f.alpha, 'notes/seed', page('Seed', 'Has a worktree request.'));
-  const [request] = await f.engine.executeRaw<{ id: string }>(
-    'SELECT id::text FROM persistence_requests WHERE source_id=$1 AND worktree_id IS NOT NULL ORDER BY sequence DESC LIMIT 1', [f.alpha]);
-  for (let i = 0; i < 100; i++) {
-    const [busy] = await f.engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM persistence_effects
-      WHERE worktree_id=$1::uuid AND kind IN ('git','withdrawal-mirror') AND state IN ('queued','running')`, [f.worktreeId]);
-    if (Number(busy.n) === 0) break;
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  await disposePersistenceConsumer(f.engine);
-  const clear = () => f.engine.executeRaw('UPDATE persistence_requests SET recovery=NULL WHERE id=$1::uuid', [request.id]);
-  await f.engine.executeRaw(`UPDATE persistence_requests SET recovery='{"version":1}'::jsonb, claim_expires_at=NULL WHERE id=$1::uuid AND state='committed'`, [request.id]);
-  const engine = f.engine as BrainEngine & { executeRaw: BrainEngine['executeRaw'] };
-  const original = engine.executeRaw;
-  let finished = false;
-  // Intercept only the precheck's first recovery probe, then hand the engine back untouched.
-  engine.executeRaw = (async (sql: string, params?: unknown[], opts?: unknown) => {
-    if (finished || !sql.includes('AS publication')) return original.call(engine, sql, params as never, opts as never);
-    finished = true;
-    engine.executeRaw = original;
-    const rows = await original.call(engine, sql, params as never, opts as never);
-    await clear();
-    return rows;
-  }) as BrainEngine['executeRaw'];
-  try {
-    expect(await refreshWorktree(f.engine, f.alpha, { waitDrainMs: 10_000 })).toMatchObject({ status: 'completed', target_head: target });
-    expect(finished).toBe(true);
-  } finally { engine.executeRaw = original; await clear(); }
 }), 120_000);
 
 test('admission completes a syncing refresh whose members all reached the target, and refuses while one lags', () => each(async f => {

@@ -23,7 +23,6 @@
  * ~/.claude/plans/system-instruction-you-are-working-eager-bird.md.
  */
 import { execFileSync } from 'node:child_process';
-import { gitChildEnv } from './git-env.ts';
 
 export type GitHeadProbe = (localPath: string) => string | null;
 // `null` distinguishes probe error from known-dirty (false). Doctor treats
@@ -37,7 +36,6 @@ export type GitCleanProbe = (localPath: string, ignoreUntracked?: boolean) => bo
 const DEFAULT_HEAD_PROBE: GitHeadProbe = (localPath) => {
   try {
     const out = execFileSync('git', ['-C', localPath, 'rev-parse', 'HEAD'], {
-      env: gitChildEnv(),
       encoding: 'utf8',
       timeout: 5000,
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -58,7 +56,6 @@ const DEFAULT_CLEAN_PROBE: GitCleanProbe = (localPath, ignoreUntracked) => {
     const args = ['-C', localPath, 'status', '--porcelain'];
     if (ignoreUntracked) args.push('--untracked-files=no');
     const out = execFileSync('git', args, {
-      env: gitChildEnv(),
       encoding: 'utf8',
       timeout: 5000,
       stdio: ['ignore', 'pipe', 'ignore'],

@@ -103,12 +103,9 @@ describe('E2E: parser ↔ engine integration for every built-in', () => {
         expect(Number.isFinite(ts)).toBe(true);
         // Pattern's timezone policy determines date range constraints.
         // For inline-date patterns the date is in the line; for
-        // time-only patterns it's from frontmatter ('2024-03-15'). Since
-        // #5430 a declared `timezone` converts the local wall time to UTC,
-        // so the date is checked in the zone the page declared.
+        // time-only patterns it's from frontmatter ('2024-03-15').
         if (pattern.date_source === 'frontmatter') {
-          const zone = typeof frontmatter.timezone === 'string' ? frontmatter.timezone : 'UTC';
-          expect(new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ts))).toBe('2024-03-15');
+          expect(msg.timestamp.slice(0, 10)).toBe('2024-03-15');
         }
         expect(msg.speaker.length).toBeGreaterThan(0);
       }
@@ -161,7 +158,6 @@ describe('E2E: D8 date derivation chain through Page', () => {
     );
     expect(result.matched_pattern_id).toBe('telegram-bracket');
     expect(result.messages).toHaveLength(1);
-    // #5430: 18:37 in America/Los_Angeles (PDT, UTC-7) on 2026-05-24 is 01:37Z the next day.
-    expect(result.messages[0].timestamp).toBe('2026-05-25T01:37:00Z');
+    expect(result.messages[0].timestamp).toBe('2026-05-24T18:37:00Z');
   });
 });

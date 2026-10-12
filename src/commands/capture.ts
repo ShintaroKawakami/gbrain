@@ -31,13 +31,12 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { readStdinPayload } from '../core/stdin-read.ts';
 import { resolve } from 'node:path';
 import type { BrainEngine } from '../core/engine.ts';
 import { loadConfig, isThinClient } from '../core/config.ts';
 import { callRemoteTool, unpackToolResult, RemoteMcpError } from '../core/mcp-client.ts';
 import { computeContentHash } from '../core/ingestion/types.ts';
-import { operations, opError } from '../core/operations.ts';
+import { operations, OperationError } from '../core/operations.ts';
 import type { OperationContext } from '../core/operations.ts';
 import { resolveSourceWithTier } from '../core/source-resolver.ts';
 // Pure content helpers moved to core (shared with the capture MCP op — the
@@ -95,9 +94,7 @@ function parseArgs(args: string[]): RunOpts | { help: true; positional: string |
     const mutationFlag = /^--(request-id|expected-revision)(?:=(.*))?$/.exec(a);
     if (mutationFlag) {
       const value = mutationFlag[2] ?? args[++i];
-      if (!value || value.startsWith('--')) throw opError('invalid_params', `${mutationFlag[1]} requires a UUID.`, mutationFlag[1] === 'request-id'
-        ? 'Give --request-id the UUID an earlier attempt of this capture printed (it replays that request), or omit it and gbrain generates one.'
-        : 'Give --expected-revision the revision gbrain get --json returned for the page, or omit it to capture without a revision check.');
+      if (!value || value.startsWith('--')) throw new OperationError('invalid_params', `${mutationFlag[1]} requires a UUID.`);
       if (mutationFlag[1] === 'request-id') opts.request_id = value;
       else opts.expected_revision = value;
       continue;
@@ -128,9 +125,7 @@ function parseArgs(args: string[]): RunOpts | { help: true; positional: string |
     if (a === '--where') { const v = args[++i]; if (v) opts.where = v; continue; }
     if (a === '--kind') { const v = args[++i]; if (v) opts.kind = v; continue; }
     if (a === '--depth') { const v = args[++i]; if (v) opts.depth = v; continue; }
-    if (a.startsWith('--')) throw opError('invalid_params', `Unsupported capture option '${a.split('=')[0]}'.`,
-      `Remove ${a.split('=')[0]}; gbrain capture accepts --file, --stdin, --slug, --type, --source, --who, --what, --where, --kind, --depth, --request-id, --expected-revision, --force, --json and --quiet.`,
-      { fix: { argv: ['gbrain', 'capture', '--help'], consent: [], actor: 'agent', why: 'Prints the capture forms and flags.', requires_exclusive: false } });
+    if (a.startsWith('--')) throw new OperationError('invalid_params', `Unsupported capture option '${a}'.`);
     positional.push(a);
   }
   if (positional.length > 0) {
@@ -183,6 +178,15 @@ Examples:
   gbrain capture --file ./notes/today.md --slug daily/2026-05-20
   JOB=$(gbrain capture "..." --quiet)
 `;
+
+
+async function readStdinBuffer(): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : (chunk as Buffer));
+  }
+  return Buffer.concat(chunks);
+}
 
 
 /**
@@ -283,14 +287,7 @@ export async function runCapture(engine: BrainEngine | null, args: string[], opt
   let rawBuffer: Buffer | null = null;
   let inputLabel = ''; // for error messages
   if (parsed.stdin) {
-    // Bounded read (C5): an open-but-silent pipe times out instead of hanging,
-    // and partial input is never captured. Raw bytes reach the binary guards.
-    const read = await readStdinPayload('echo "a thought" | gbrain capture --stdin');
-    if (!read.ok) {
-      console.error(`gbrain capture: ${read.message}`);
-      process.exit(1);
-    }
-    rawBuffer = read.raw;
+    rawBuffer = await readStdinBuffer();
     inputLabel = 'stdin';
   } else if (parsed.filePath) {
     inputLabel = parsed.filePath;
@@ -397,15 +394,11 @@ export async function runCapture(engine: BrainEngine | null, args: string[], opt
       if (delegated.handled) result = delegated.result as Record<string, unknown>;
       else {
         if (!engine && options.getEngine) engine = await options.getEngine();
-        if (!engine) throw opError('owner_unavailable', 'Capture requires a connected engine or a local persistence owner.',
-          'Run gbrain capture from the CLI on the brain host, where it opens the brain itself or hands the capture to a running gbrain serve.',
-          { fix: { argv: ['gbrain', 'doctor', '--json'], consent: [], actor: 'agent', why: 'Shows whether this machine resolves a brain and whether a serve owns it, read-only.', requires_exclusive: false } });
+        if (!engine) throw new OperationError('owner_unavailable', 'Capture requires a connected engine or a local persistence owner.');
         const resolved = await resolveSourceWithTier(engine, parsed.source ?? null);
         resolvedSourceId = resolved.source_id;
         const captureOp = operations.find(operation => operation.name === 'capture');
-        if (!captureOp) throw opError('unavailable', 'The capture operation is missing; upgrade this installation.',
-          'This gbrain build has no capture operation. Check for an update and, with the user\'s go-ahead, run gbrain upgrade, then capture again.',
-          { fix: { argv: ['gbrain', 'check-update', '--json'], consent: [], actor: 'agent', why: 'Reports whether a newer gbrain is available, read-only.', requires_exclusive: false } });
+        if (!captureOp) throw new OperationError('unavailable', 'The capture operation is missing; upgrade this installation.');
         const ctx: OperationContext = {
           engine, config: cfg ?? { engine: 'pglite' }, sourceId: resolvedSourceId,
           remote: false, dryRun: false, writeWaitMs: currentCliWriteWait().waitMs,

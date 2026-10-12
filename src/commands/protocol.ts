@@ -189,9 +189,8 @@ async function runConformanceCommand(args: string[]): Promise<void> {
         isError?: boolean;
         content?: Array<{ type?: string; text?: string }>;
       };
-      // The protocol body is content[0] alone (D3); later blocks are model-visible notices.
-      const first = res.content?.[0];
-      return { isError: res.isError, text: typeof first?.text === 'string' ? first.text : '' };
+      const text = (res.content ?? []).map(c => (typeof c.text === 'string' ? c.text : '')).join('\n');
+      return { isError: res.isError, text };
     },
   };
 

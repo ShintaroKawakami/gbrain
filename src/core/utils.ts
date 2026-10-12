@@ -91,11 +91,6 @@ export const HASH_EPHEMERAL_FRONTMATTER_KEYS: readonly string[] = [
   // (paraphrases defeat content_hash_duplicates). The marker is re-derived
   // deterministically from the body, so dropping it from the hash is safe.
   ATOMS_SCAN_HASH_KEY,
-  // #5575 CEO-21: the lower-only `trust_tier` marker a below-owner write-through stamps. It labels the
-  // content, it is not content: page purge tombstones match (source_id, content_hash) with or without it,
-  // and an agent stamping it onto identical content is no content change. (The tier trigger still treats
-  // it as content: trust/schema.ts TRUST_EPHEMERAL_FRONTMATTER_KEYS excludes it.)
-  'trust_tier',
 ];
 
 /**
@@ -381,17 +376,6 @@ export function isUndefinedTableError(error: unknown): boolean {
   return /relation .* does not exist|no such table|undefined table/i.test(message);
 }
 
-/**
- * SQLSTATE 22007 / 22008: a date or timestamp the database could not parse.
- * On a read path that is the caller's input, never a degraded result or a
- * server fault: list_pages reports it as invalid_params and the hybrid
- * lexical arms rethrow it instead of failing open.
- */
-export function isDatetimeInputError(err: unknown): boolean {
-  const code = (err as { code?: unknown } | null)?.code;
-  return code === '22007' || code === '22008';
-}
-
 const _warnedKeys = new Set<string>();
 
 /**
@@ -463,39 +447,6 @@ export function rowToChunk(row: Record<string, unknown>, includeEmbedding = fals
   };
 }
 
-/**
- * v0.34: effective_date / effective_date_source carried through from the
- * pages join. Same three-state read as readOptionalDate elsewhere: the
- * field is left UNTOUCHED when the column isn't in the projection (so
- * legacy callers see undefined), set to null when the column was selected
- * but the page row has no date, and to YYYY-MM-DD when populated. Postgres
- * returns Date objects via postgres.js; PGLite returns strings. Normalize
- * to date-only ISO so downstream prompt-builders don't see noise from
- * midnight-UTC timestamps. Shared by search rows and frozen-hit rows.
- */
-export function applyEffectiveDate(result: SearchResult, row: Record<string, unknown>): void {
-  if ('effective_date' in row) {
-    const raw = row.effective_date;
-    if (raw === null) {
-      result.effective_date = null;
-    } else if (raw instanceof Date) {
-      result.effective_date = raw.toISOString().slice(0, 10);
-    } else if (typeof raw === 'string' && raw) {
-      // Postgres TIMESTAMPTZ already serializes as "YYYY-MM-DD ..." — slice
-      // the date portion. PGLite returns the same shape via its parser.
-      result.effective_date = raw.slice(0, 10);
-    }
-  }
-  if ('effective_date_source' in row) {
-    const raw = row.effective_date_source;
-    if (raw === null) {
-      result.effective_date_source = null;
-    } else if (typeof raw === 'string' && raw) {
-      result.effective_date_source = raw;
-    }
-  }
-}
-
 export function rowToSearchResult(row: Record<string, unknown>): SearchResult {
   const result: SearchResult = {
     slug: row.slug as string,
@@ -516,7 +467,34 @@ export function rowToSearchResult(row: Record<string, unknown>): SearchResult {
   if (typeof row.source_id === 'string') {
     result.source_id = row.source_id;
   }
-  applyEffectiveDate(result, row);
+  // v0.34: effective_date / effective_date_source carried through from the
+  // pages join. Same three-state read as readOptionalDate elsewhere: the
+  // field is left UNTOUCHED when the column isn't in the projection (so
+  // legacy callers see undefined), set to null when the column was selected
+  // but the page row has no date, and to YYYY-MM-DD when populated. Postgres
+  // returns Date objects via postgres.js; PGLite returns strings. Normalize
+  // to date-only ISO so downstream prompt-builders don't see noise from
+  // midnight-UTC timestamps.
+  if ('effective_date' in row) {
+    const raw = row.effective_date;
+    if (raw === null) {
+      result.effective_date = null;
+    } else if (raw instanceof Date) {
+      result.effective_date = raw.toISOString().slice(0, 10);
+    } else if (typeof raw === 'string' && raw) {
+      // Postgres TIMESTAMPTZ already serializes as "YYYY-MM-DD ..." — slice
+      // the date portion. PGLite returns the same shape via its parser.
+      result.effective_date = raw.slice(0, 10);
+    }
+  }
+  if ('effective_date_source' in row) {
+    const raw = row.effective_date_source;
+    if (raw === null) {
+      result.effective_date_source = null;
+    } else if (typeof raw === 'string' && raw) {
+      result.effective_date_source = raw;
+    }
+  }
   if (typeof row.message_id === 'string' && row.message_id.trim().length > 0) {
     result.message_id = row.message_id;
   }

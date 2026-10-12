@@ -25,8 +25,8 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 
-import { chat } from '../../src/core/ai/gateway.ts';
-import { configureEvalGateway } from '../../src/eval/shared/gateway-bootstrap.ts';
+import { configureGateway, chat } from '../../src/core/ai/gateway.ts';
+import { loadConfig } from '../../src/core/config.ts';
 import { ANTHROPIC_PRICING } from '../../src/core/anthropic-pricing.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -333,7 +333,6 @@ async function callModel(prompt: string, modelFull: string): Promise<{ text: str
     model: modelFull,
     messages: [{ role: 'user', content: prompt }],
     maxTokens: 64,
-    allowFallback: false,
   });
   return {
     text: result.text,
@@ -407,7 +406,18 @@ export async function main(argv: string[]): Promise<number> {
 
   const { full: modelFull, bare: modelBare } = resolveModel(args.model);
 
-  configureEvalGateway({ chatModel: modelFull });
+  // Self-configure the gateway (matches src/commands/eval-cross-modal.ts:195-220).
+  const config = loadConfig();
+  configureGateway({
+    embedding_model: config?.embedding_model,
+    embedding_dimensions: config?.embedding_dimensions,
+    expansion_model: config?.expansion_model,
+    chat_model: config?.chat_model ?? modelFull,
+    chat_fallback_chain: config?.chat_fallback_chain,
+    base_urls: config?.provider_base_urls,
+    provider_chat_options: config?.provider_chat_options,
+    env: { ...process.env } as Record<string, string>,
+  });
 
   // Provider-aware auth check (codex review P2-3). The CLI advertises full
   // provider:model support and the test suite covers `openai:gpt-4o`, so the

@@ -307,7 +307,7 @@ export async function unionLinksAcrossIdentity(
   slug: string,
   links: Link[],
   direction: 'out' | 'in',
-  opts: { sourceId?: string; allowedSources?: string[]; excludePrivate?: boolean; temporal?: import('./link-validity.ts').EdgeTemporalOpts } = {},
+  opts: { sourceId?: string; allowedSources?: string[]; excludePrivate?: boolean } = {},
 ): Promise<Link[]> {
   if (!(await isIdentityUnionEnabled(engine))) return links;
   let members: EntityIdentityMember[];
@@ -345,7 +345,6 @@ export async function unionLinksAcrossIdentity(
         sourceId: m.source_id,
         ...(opts.allowedSources?.length ? { sourceIds: opts.allowedSources } : {}),
         excludePrivate: opts.excludePrivate,
-        ...(opts.temporal ? { temporal: opts.temporal } : {}),
       };
       const memberLinks = direction === 'out'
         ? await engine.getLinks(m.slug, memberScope)

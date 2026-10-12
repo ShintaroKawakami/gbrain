@@ -5,14 +5,11 @@
  *
  *   1. Find candidates (entity-prefiltered, k=5 cap) — caller has done this.
  *   2. If candidates is empty → INSERT (independent).
- *   3. CHEAP FAST-PATH (D13): if top-candidate cosine ≥ the embedding
- *      model's calibrated threshold (supersession-threshold.ts; 0.95 for
- *      voyage-4@1024) → DUPLICATE. Skip the LLM call entirely. An
- *      uncalibrated model has no fast path.
+ *   3. CHEAP FAST-PATH (D13): if top-candidate cosine ≥ 0.95 → DUPLICATE.
+ *      Skip the LLM call entirely. Cheapest accurate dedup.
  *   4. Run the LLM classifier asking: duplicate | supersede | independent.
  *   5. CLASSIFIER FAILURE FALLBACK (D12): on LLM error/timeout/refusal,
  *      compute cosine; if top-candidate ≥ 0.92 → DUPLICATE; else → INSERT.
- *      An uncalibrated model always falls back to INSERT.
  *
  * Pure logic — engine writes happen in the orchestrator layer, not here.
  *
@@ -23,7 +20,6 @@ import { chat, isAvailable } from '../ai/gateway.ts';
 import type { ChatResult } from '../ai/gateway.ts';
 import { resolveTierDefault } from '../model-config.ts';
 import type { FactRow, FactKind } from '../engine.ts';
-import { resolveSupersessionThreshold } from './supersession-threshold.ts';
 
 /** Classifier output. id is the matching candidate's id when not 'independent'. */
 export type ClassifyResult =
@@ -32,12 +28,10 @@ export type ClassifyResult =
   | { decision: 'independent'; reason: 'no_candidates' | 'classifier' | 'cosine_fallback' };
 
 export interface ClassifyOpts {
-  /** Cosine threshold for the cheap fast-path. Default: the calibrated threshold of `embeddingModel` at the embedding's dims. */
+  /** Cosine threshold for the cheap fast-path. Default 0.95. */
   cheapThreshold?: number;
-  /** Cosine threshold for the failure fallback. Default 0.92 for a calibrated model; none (INSERT) otherwise. */
+  /** Cosine threshold for the failure fallback. Default 0.92. */
   fallbackThreshold?: number;
-  /** The `provider:model` the embeddings came from; selects the calibrated threshold. */
-  embeddingModel?: string | null;
   /** Override the chat model; default uses gateway's expansion model (Haiku). */
   model?: string;
   /** Abort signal for shutdown. */
@@ -81,11 +75,10 @@ export async function classifyAgainstCandidates(
     return { decision: 'independent', reason: 'no_candidates' };
   }
 
-  const calibrated = newFact.embedding ? resolveSupersessionThreshold(opts.embeddingModel, newFact.embedding.length).threshold : null;
-  const cheap = opts.cheapThreshold ?? calibrated ?? Number.POSITIVE_INFINITY;
-  const fallback = opts.fallbackThreshold ?? (calibrated === null ? Number.POSITIVE_INFINITY : 0.92);
+  const cheap = opts.cheapThreshold ?? 0.95;
+  const fallback = opts.fallbackThreshold ?? 0.92;
 
-  // CHEAP FAST-PATH: skip LLM if top-1 cosine >= the calibrated threshold (D13).
+  // CHEAP FAST-PATH: skip LLM if top-1 cosine >= 0.95 (D13).
   let topId: number | null = null;
   let topScore = -1;
   if (newFact.embedding) {
@@ -126,7 +119,6 @@ export async function classifyAgainstCandidates(
         },
       ],
       maxTokens: 200,
-      thinking: 'off',
       abortSignal: opts.abortSignal,
     });
   } catch (err) {

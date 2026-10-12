@@ -12,7 +12,6 @@ import { parseMarkdown, serializePageToMarkdown } from '../src/core/markdown.ts'
 import { acceptWriterTransfer, acquireWorktree, claimWorktree, getWorktreeBinding, prepareWriterTransfer } from '../src/core/persistence/ownership.ts';
 import { registerLocalWriter, withVerifiedLocalRegistration, type LocalRegistration } from '../src/core/persistence/identity.ts';
 import { runReconcileApply, runReconcileBackups, runReconcilePreview, assertReconcileOutputPath } from '../src/core/persistence/reconcile.ts';
-import { fileClaimCandidatesSql } from '../src/core/persistence/reconcile-state.ts';
 import { prepareFileTarget } from '../src/core/persistence/page-prepare.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { admitWrite, claimNextWrite, compactWriteReceipts, getWriteRequest } from '../src/core/persistence/journal.ts';
@@ -23,7 +22,7 @@ import { retainReconcileBackup } from '../src/core/persistence/reconcile-backup.
 import { prepareReconcileMutation } from '../src/core/persistence/reconcile-prepare.ts';
 import { publishMutation } from '../src/core/persistence/coordinator.ts';
 import { localHostId } from '../src/core/persistence/identity.ts';
-import { parseFactsFence, renderFactsTable, replaceOrInsertFactsFence, upsertFactRow } from '../src/core/facts-fence.ts';
+import { parseFactsFence, upsertFactRow } from '../src/core/facts-fence.ts';
 import { sha256 } from '../src/core/persistence/digest.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
 import { operationsByName } from '../src/core/operations.ts';
@@ -460,9 +459,8 @@ test('public warn-mode put_page rejects reserved reconciliation fields for local
     }, { remote, sourceId: f.id, config: { engine: engine.kind }, auth: { token: 'fixture', clientId: 'fixture-client', scopes: ['read', 'write'], sourceId: f.id },
       logger: { info() {}, warn() {}, error() {} } }));
     expect(result.isError).toBe(true);
-    // #5970: a write refuses every undeclared parameter at dispatch, in warn mode too, so the reserved field is
-    // named as unknown before admission's own reserved-field refusal would run; nothing is admitted either way.
-    expect(JSON.parse((result.content[0] as { text: string }).text)).toMatchObject({ error: 'invalid_params', suggestion: `Unknown parameter "${Object.keys(extra)[0]}".` });
+    expect(JSON.parse((result.content[0] as { text: string }).text)).toMatchObject({ error: 'invalid_params' });
+    expect((result.content[0] as { text: string }).text).toContain('Reserved persistence fields');
   }
   expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1', [f.id])).toHaveLength(0);
 }), 120_000);
@@ -633,75 +631,19 @@ test('genuine shared-file origins through explicit paths or URI fallback still r
   }
 }), 120_000);
 
-// #6222 (fix wave 12, W1.3): the census was capped at 100 candidates, so a common file name
-// (date-named archives such as channels/<name>/2015-09.md) refused every page that had it.
-// It now pages through every same-name candidate and realpath still decides ownership.
-test('same-name pages in other directories and a shared provenance URI no longer refuse reconciliation', async () => isolated(async engine => {
-  const f = await fixture(engine, true), uri = pathToFileURL(f.file).href;
+test('candidate-origin fanout stops at a bounded verification limit rather than scanning the source', async () => isolated(async engine => {
+  const f = await fixture(engine), uri = pathToFileURL(f.file).href;
   await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], async () => {
     await tx.executeRaw('UPDATE pages SET source_uri=$3 WHERE source_id=$1 AND slug=$2', [f.id, f.slug, uri]);
     await tx.executeRaw(`INSERT INTO pages(source_id,slug,type,title,compiled_truth,frontmatter,source_path,source_uri)
-      SELECT $1,'channels/c'||n||'/example','note','Channel '||n,'Independent channel '||n,'{}'::jsonb,'channels/c'||n||'/example.md',
-        CASE WHEN n % 2 = 0 THEN $2 END FROM generate_series(1,205) n`, [f.id, uri]);
-  }, TEST_WRITE_ATTRIBUTION));
-  for (let n = 1; n <= 205; n++) {
-    mkdirSync(join(f.root, 'channels', `c${n}`), { recursive: true });
-    writeFileSync(join(f.root, 'channels', `c${n}`, 'example.md'), `Independent channel ${n}\n`);
-  }
-  const neighbours = () => engine.executeRaw('SELECT slug,source_path,knowledge_revision FROM pages WHERE source_id=$1 AND slug<>$2 ORDER BY id', [f.id, f.slug]);
-  const before = await neighbours();
-  await local(engine, f.registration, async () => {
-    const result = await runReconcilePreview(engine, { source_id: f.id, slug: f.slug });
-    expect(result).toMatchObject({ status: 'ready', relative_path: 'notes/example.md' });
-    expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1', [f.id])).toHaveLength(0);
-    expect((await runReconcileApply(engine, { source_id: f.id, slug: f.slug, preview: result.preview, request_id: randomUUID() })).state).toBe('committed');
-  });
-  expect(await neighbours()).toEqual(before);
-  for (const n of [1, 102, 205]) expect(readFileSync(join(f.root, 'channels', `c${n}`, 'example.md'), 'utf8')).toBe(`Independent channel ${n}\n`);
-}), 180_000);
-
-test.each(['path', 'uri'])('a real second claimant behind 200 same-name pages still refuses, in preview and on a stale-preview apply (%s)', async origin => isolated(async engine => {
-  const f = await fixture(engine, true), raw = readFileSync(f.file);
-  await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], async () => {
-    await tx.executeRaw(`INSERT INTO pages(source_id,slug,type,title,compiled_truth,frontmatter,source_path)
-      SELECT $1,'channels/c'||n||'/example','note','Channel '||n,'Independent channel '||n,'{}'::jsonb,'channels/c'||n||'/example.md'
-      FROM generate_series(1,200) n`, [f.id]);
+      SELECT $1,'other/candidate-'||n,'note','Independent origin','Independent candidate '||n,'{}'::jsonb,'other/candidate-'||n||'.md',$2
+      FROM generate_series(1,101) n`, [f.id, uri]);
   }, TEST_WRITE_ATTRIBUTION));
   await local(engine, f.registration, async () => {
-    const { preview } = await runReconcilePreview(engine, { source_id: f.id, slug: f.slug });
-    await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], () => tx.putPage('other/late-claimant', {
-      type: 'note', title: 'Late claimant', compiled_truth: 'Another page claiming the same file.', frontmatter: {},
-      source_path: origin === 'path' ? './notes//example.md' : null, source_uri: origin === 'uri' ? pathToFileURL(f.file).href : null,
-    }, { sourceId: f.id }), TEST_WRITE_ATTRIBUTION));
-    const snapshot = await engine.readPageSnapshot(f.slug, { sourceId: f.id });
-    const collision = { code: 'source_changed', message: 'Several pages claim the recorded canonical file.' };
-    await expect(runReconcilePreview(engine, { source_id: f.id, slug: f.slug })).rejects.toMatchObject(collision);
-    await expect(runReconcileApply(engine, { source_id: f.id, slug: f.slug, preview, request_id: randomUUID() })).rejects.toMatchObject(collision);
-    expect(await engine.readPageSnapshot(f.slug, { sourceId: f.id })).toEqual(snapshot);
-    expect(readFileSync(f.file)).toEqual(raw);
+    await expect(runReconcilePreview(engine, { source_id: f.id, slug: f.slug })).rejects.toMatchObject({
+      code: 'source_changed', message: 'Too many candidate page origins to verify this exact file safely.' });
     expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1', [f.id])).toHaveLength(0);
   });
-}), 180_000);
-
-test('a fresh PGLite schema builds the v219 name indexes inline', async () => {
-  const engine = engines[0]!;
-  const rows = await engine.executeRaw<{ present: boolean }>("SELECT to_regclass('pages_source_path_name_idx') IS NOT NULL AS present UNION ALL SELECT to_regclass('pages_file_uri_name_idx') IS NOT NULL");
-  expect(rows.map(row => row.present)).toEqual([true, true]);
-});
-
-// #6254: the census runs about five times per reconciled page; on Postgres it must use the
-// v219 expression indexes instead of evaluating a regexp over every page of the source.
-test('the file-claim census is served by the v219 name indexes on Postgres', async () => isolated(async engine => {
-  if (engine.kind !== 'postgres') return;
-  const f = await fixture(engine);
-  await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], () => tx.executeRaw(`INSERT INTO pages(source_id,slug,type,title,compiled_truth,frontmatter,source_path)
-    SELECT $1,'bulk/p'||n,'note','Bulk '||n,'Bulk '||n,'{}'::jsonb,'bulk/p'||n||'.md' FROM generate_series(1,3000) n`, [f.id]), TEST_WRITE_ATTRIBUTION));
-  await engine.executeRaw('ANALYZE pages');
-  const plan = (await engine.executeRaw<{ 'QUERY PLAN': string }>(`EXPLAIN ${fileClaimCandidatesSql('linux')}`,
-    [f.id, 0, 0, 2147483647, 'example.md', 'example.md', ['example.md']]))
-    .map(row => row['QUERY PLAN']).join('\n');
-  expect(plan).toContain('pages_source_path_name_idx');
-  expect(plan).toContain('pages_file_uri_name_idx');
 }), 120_000);
 
 // The parser must not normalize an already-resolved identity a second time.
@@ -729,127 +671,3 @@ test.each(['notes/example.md', 'notes/example.md.md'])('reconciliation preserves
       expect(await engine.getPage('notes/other', { sourceId: f.id })).toBeNull();
     });
   }), 120_000);
-
-test('a fact withdrawn between reconciliation preparation and publication leaves the canonical file and page unchanged', async () => isolated(async engine => {
-  for (const enabled of [false, true]) {
-    const claim = 'withdrawn between reconciliation preparation and publication';
-    const fence = renderFactsTable([{ rowNum: 1, claim, kind: 'fact', confidence: 1, visibility: 'world', notability: 'medium', active: true, context: 'test evidence' }]);
-    const f = await fixture(engine, enabled, `Facts: ${fence}`), originalBytes = readFileSync(f.file);
-    await local(engine, f.registration, async () => {
-      const repair = await preparedRepair(engine, f);
-      expect(String(repair.prepared.file?.content)).toContain(claim);
-      // The withdrawal row alone: a full forget would also rewrite this page and trip the revision check first.
-      // Either the preview's withdrawals pin or the prepared import's validation must refuse it.
-      await engine.executeRaw("INSERT INTO fact_withdrawals(source_id,visibility,subject,fact_hash) VALUES($1,'world','*',gbrain_fact_fingerprint($2))", [f.id, claim]);
-      const boundaries: string[] = [];
-      const result = await publishMutation(engine, repair.row, repair.prepared, localHostId(), {
-        boundary: async name => { boundaries.push(name); }, fileBoundary: name => { boundaries.push(name); } });
-      expect(result.state).toBe('conflict');
-      expect(boundaries).not.toContain('before_publication');
-      expect(boundaries).not.toContain('before_file');
-      expect(readFileSync(f.file)).toEqual(originalBytes);
-      expect((await engine.readPageSnapshot(f.slug, { sourceId: f.id }))?.revision).toBe(f.snapshot.revision);
-    });
-  }
-}), 120_000);
-
-// Subject-'*' purges ride the preview as a count/latest marker (page-state/types.ts GlobalPurgeMarker), not a list:
-// a '*' tombstone added after the preview, for a claim in the page or any other, makes the preview stale; an artifact
-// written before the marker existed reads stale too, never trusted.
-test("a subject-'*' purge recorded after the preview makes it stale; an artifact without the purge marker is stale", async () => isolated(async engine => {
-  const claim = 'purged after the reconciliation preview';
-  const fence = renderFactsTable([{ rowNum: 1, claim, kind: 'fact', confidence: 1, visibility: 'world', notability: 'medium', active: true, context: 'test evidence' }]);
-  const purgeAll = (sourceId: string, text: string) => engine.executeRaw(
-    "INSERT INTO fact_purges(source_id,visibility,subject,fact_hash) VALUES($1,'world','*',gbrain_fact_fingerprint($2))", [sourceId, text]);
-  for (const target of [claim, 'an unrelated claim purged everywhere']) {
-    const f = await fixture(engine, false, `Facts: ${fence}`), originalBytes = readFileSync(f.file);
-    await local(engine, f.registration, async () => {
-      const { preview } = await runReconcilePreview(engine, { source_id: f.id, slug: f.slug });
-      expect(preview.preimages.database).not.toHaveProperty('globalPurges');
-      await purgeAll(f.id, target);
-      await expect(runReconcileApply(engine, { source_id: f.id, slug: f.slug, preview, request_id: randomUUID() })).rejects.toMatchObject({ code: 'source_changed' });
-      expect(readFileSync(f.file)).toEqual(originalBytes);
-      expect((await engine.readPageSnapshot(f.slug, { sourceId: f.id }))?.revision).toBe(f.snapshot.revision);
-      const fresh = (await runReconcilePreview(engine, { source_id: f.id, slug: f.slug })).preview;
-      expect(fresh.preimages.database.globalPurges).toMatchObject({ count: 1 });
-      // The purged row is still in the file but no longer in the database view, so that preview needs a decision.
-      if (target === claim) { expect(fresh.status).toBe('needs_resolution'); return; }
-      expect(fresh.status).toBe('ready');
-      const { globalPurges: _marker, ...legacyDatabase } = fresh.preimages.database;
-      const legacy = { ...fresh, preimages: { ...fresh.preimages, database: legacyDatabase } };
-      await expect(runReconcileApply(engine, { source_id: f.id, slug: f.slug, preview: legacy as typeof fresh, request_id: randomUUID() }))
-        .rejects.toMatchObject({ code: 'source_changed' });
-      expect(readFileSync(f.file)).toEqual(originalBytes);
-    });
-  }
-}), 120_000);
-
-// #6137: private fact rows are identified by (row number, claim), never by claim text alone.
-type FenceRow = { rowNum: number; claim: string; visibility: 'private' | 'world'; context?: string; source?: string; confidence?: number; forgotten?: boolean };
-const LONG_PRIVATE_CONTEXT = 'Told in confidence at the example offsite';
-function factsBody(rows: FenceRow[], prose = 'A durable example biography.') {
-  const facts = rows.map(r => ({ rowNum: r.rowNum, claim: r.claim, kind: 'fact' as const, confidence: r.confidence ?? 1, visibility: r.visibility,
-    notability: 'medium' as const, source: r.source, active: !r.forgotten, ...(r.forgotten ? { forgotten: true, context: 'forgotten: user request' } : { context: r.context }) }));
-  return replaceOrInsertFactsFence(prose, renderFactsTable(facts));
-}
-const TWIN: FenceRow[] = [{ rowNum: 1, claim: 'Prefers the example venue', visibility: 'private' }, { rowNum: 2, claim: 'Prefers the example venue', visibility: 'world' }];
-const FORGOTTEN_TWIN: FenceRow[] = [{ ...TWIN[0], forgotten: true }, TWIN[1]];
-const PRIVATE_AND_WORLD: FenceRow[] = [{ rowNum: 1, claim: 'Holds a private example account', visibility: 'private', context: LONG_PRIVATE_CONTEXT, source: 'Slack import' },
-  { rowNum: 2, claim: 'Works at acme-example', visibility: 'world', source: 'Slack import' }];
-const reconcileCases: Array<{ name: string; stored: FenceRow[]; incoming?: FenceRow[]; prose?: string; refusedRow?: number }> = [
-  { name: 'a frontmatter-only edit with an active private twin', stored: TWIN },
-  { name: 'a frontmatter-only edit with a forgotten private twin', stored: FORGOTTEN_TWIN },
-  { name: 'a take_file body edit with an active private twin', stored: TWIN, incoming: TWIN, prose: 'A revised public biography.' },
-  { name: 'a take_file body edit with a forgotten private twin', stored: FORGOTTEN_TWIN, incoming: FORGOTTEN_TWIN, prose: 'A revised public biography.' },
-  { name: 'an edit of the world twin', stored: TWIN, incoming: [TWIN[0], { ...TWIN[1], claim: 'Now prefers the new example venue' }] },
-  { name: 'a new unrelated world row', stored: PRIVATE_AND_WORLD, incoming: [...PRIVATE_AND_WORLD, { rowNum: 3, claim: 'Lives in example-city', visibility: 'world' }] },
-  { name: 'a new world row sharing a short context and the source', stored: [{ ...PRIVATE_AND_WORLD[0], context: 'Slack import' }, PRIVATE_AND_WORLD[1]],
-    incoming: [{ ...PRIVATE_AND_WORLD[0], context: 'Slack import' }, PRIVATE_AND_WORLD[1], { rowNum: 3, claim: 'Joined the example guild', visibility: 'world', context: 'Slack import', source: 'Slack import' }] },
-  { name: 'an existing world row whose context equals the private context', stored: [PRIVATE_AND_WORLD[0], { ...PRIVATE_AND_WORLD[1], context: LONG_PRIVATE_CONTEXT }],
-    incoming: [PRIVATE_AND_WORLD[0], { ...PRIVATE_AND_WORLD[1], context: LONG_PRIVATE_CONTEXT }], prose: 'A revised public biography.' },
-  { name: 'editing the private twin', stored: TWIN, incoming: [{ ...TWIN[0], confidence: 0.5 }, TWIN[1]], refusedRow: 1 },
-  { name: 'making a private fact world', stored: TWIN, incoming: [{ ...TWIN[0], visibility: 'world' }, TWIN[1]], refusedRow: 1 },
-  { name: 'copying a private claim into a new world row', stored: PRIVATE_AND_WORLD, incoming: [...PRIVATE_AND_WORLD, { rowNum: 3, claim: PRIVATE_AND_WORLD[0].claim, visibility: 'world' }], refusedRow: 3 },
-  { name: 'writing a private claim over an existing world row', stored: PRIVATE_AND_WORLD, incoming: [PRIVATE_AND_WORLD[0], { ...PRIVATE_AND_WORLD[1], claim: PRIVATE_AND_WORLD[0].claim }], refusedRow: 2 },
-  { name: 'copying a private context into an existing world row', stored: PRIVATE_AND_WORLD,
-    incoming: [PRIVATE_AND_WORLD[0], { ...PRIVATE_AND_WORLD[1], context: LONG_PRIVATE_CONTEXT }], refusedRow: 2 },
-  { name: 'copying a private context into a new world row', stored: PRIVATE_AND_WORLD,
-    incoming: [...PRIVATE_AND_WORLD, { rowNum: 3, claim: 'Mentioned an example plan', visibility: 'world', context: LONG_PRIVATE_CONTEXT }], refusedRow: 3 },
-];
-for (const c of reconcileCases) {
-  test(`#6137 reconcile private facts: ${c.refusedRow ? 'refuses' : 'publishes'} ${c.name}`, async () => isolated(async engine => {
-    const f = await fixture(engine, false, factsBody(c.stored));
-    if (c.incoming || c.prose) {
-      writeFileSync(f.file, serializePageToMarkdown({ ...f.snapshot.page, compiled_truth: factsBody(c.incoming ?? c.stored, c.prose) }, f.snapshot.tags));
-    }
-    await local(engine, f.registration, async () => {
-      const preview = async () => {
-        const initial = await runReconcilePreview(engine, { source_id: f.id, slug: f.slug });
-        const decisions = initial.preview.conflicts.map(conflict => ({ path: conflict.path, action: 'take_file' }));
-        return decisions.length ? runReconcilePreview(engine, { source_id: f.id, slug: f.slug, from: initial.preview, decisions }) : initial;
-      };
-      if (c.refusedRow) {
-        const error = await preview().then(() => null, (e: unknown) => e as { code: string; message: string; suggestion: string; why?: string; fix?: { argv?: string[] } });
-        expect(error).toMatchObject({ code: 'permission_denied' });
-        const text = `${error!.message} ${error!.suggestion} ${error!.why ?? ''}`;
-        expect(text).toContain(`Row ${c.refusedRow} `);
-        for (const row of [...c.stored, ...(c.incoming ?? [])]) {
-          expect(text).not.toContain(row.claim);
-          if (row.context) expect(text).not.toContain(row.context);
-        }
-        expect(error!.fix?.argv).toEqual(['gbrain', 'get', '--source', f.id, '--', f.slug]);
-        expect((await engine.readPageSnapshot(f.slug, { sourceId: f.id }))!.revision).toBe(f.snapshot.revision);
-        return;
-      }
-      const resolved = await preview();
-      const receipt = await runReconcileApply(engine, { source_id: f.id, slug: f.slug, preview: resolved.preview, request_id: randomUUID() });
-      expect(receipt.state).toBe('committed');
-      const stored = (await engine.readPageSnapshot(f.slug, { sourceId: f.id }))!;
-      const fileFence = parseFactsFence(parseMarkdown(readFileSync(f.file, 'utf8'), f.slug).compiled_truth);
-      expect(renderFactsTable(fileFence.facts)).toBe(renderFactsTable(parseFactsFence(stored.page.compiled_truth).facts));
-      const privateRow = parseFactsFence(stored.page.compiled_truth).facts.find(fact => fact.rowNum === 1)!;
-      expect(privateRow.visibility).toBe(c.stored[0].visibility);
-      expect(privateRow.claim).toBe(c.stored[0].claim);
-    });
-  }), 120_000);
-}

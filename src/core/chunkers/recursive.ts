@@ -20,8 +20,8 @@
  * Lossless invariant: non-overlapping portions reassemble to original.
  */
 
-import { countCJKAwareWords, isCJKDominant, wordStats, concatWordStats, wordCountOf, CJK_SENTENCE_DELIMITERS, CJK_CLAUSE_DELIMITERS } from '../cjk.ts';
-import { estimateEmbedTokens, fitsEmbedTokens, DEFAULT_MAX_CHUNK_TOKENS } from './token-estimate.ts';
+import { countCJKAwareWords, isCJKDominant, CJK_SENTENCE_DELIMITERS, CJK_CLAUSE_DELIMITERS } from '../cjk.ts';
+import { estimateEmbedTokens, DEFAULT_MAX_CHUNK_TOKENS } from './token-estimate.ts';
 import { safeSplitIndex } from '../text-safe.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
 import { credentialSafeProjection } from '../credential-projection.ts';
@@ -104,7 +104,8 @@ export function chunkText(text: string, opts?: ChunkOptions): TextChunk[] {
 
   // v0.28: strip fenced takes blocks BEFORE chunking. Takes are retrieval-
   // accessible only via the takes table; their content must not appear in
-  // content_chunks where the per-token allow-list cannot reach.
+  // content_chunks where the per-token allow-list cannot reach. The
+  // takes_fence_chunk_leak doctor check verifies this invariant.
   //
   // v0.32.2: also strip private facts (Codex R2-#1). World facts stay so
   // search retains its public-knowledge surface; private rows are filtered
@@ -166,7 +167,6 @@ function capByChars(
   knownEst?: number,
 ): string[] {
   if (text.length === 0) return [];
-  if (knownEst === undefined && text.length <= maxChars && fitsEmbedTokens(text, maxTokens)) return [text];
   const est = knownEst ?? probeEmbedTokens(text);
   const window = est <= maxTokens
     ? maxChars
@@ -194,7 +194,7 @@ function capByChars(
     const end = safeSplitIndex(text, Math.min(text.length, i + window));
     const slice = text.slice(i, end).trim();
     if (slice.length > 0) {
-      const sliceEst = fitsEmbedTokens(slice, maxTokens) ? 0 : estimateEmbedTokens(slice);
+      const sliceEst = estimateEmbedTokens(slice);
       if (sliceEst > maxTokens) {
         // Denser than the text average — re-derive locally, reusing the exact
         // figure just measured (it also guarantees window < slice.length, so
@@ -346,28 +346,21 @@ function splitOnWhitespace(text: string, target: number): string[] {
 
 /**
  * Greedily merge adjacent pieces until each chunk is near the target size.
- * Avoids creating chunks larger than target * 1.5. The running chunk's word
- * stats grow with it (concatWordStats), so each piece is counted once instead
- * of recounting the whole chunk on every merge.
+ * Avoids creating chunks larger than target * 1.5.
  */
 function greedyMerge(pieces: string[], target: number): string[] {
   if (pieces.length === 0) return [];
 
   const result: string[] = [];
-  const limit = Math.ceil(target * 1.5);
   let current = pieces[0];
-  let currentStats = wordStats(current);
 
   for (let i = 1; i < pieces.length; i++) {
-    const pieceStats = wordStats(pieces[i]);
-    const combinedStats = concatWordStats(currentStats, pieceStats);
-    if (wordCountOf(combinedStats) <= limit) {
-      current += pieces[i];
-      currentStats = combinedStats;
+    const combined = current + pieces[i];
+    if (countWords(combined) <= Math.ceil(target * 1.5)) {
+      current = combined;
     } else {
       result.push(current);
       current = pieces[i];
-      currentStats = pieceStats;
     }
   }
 

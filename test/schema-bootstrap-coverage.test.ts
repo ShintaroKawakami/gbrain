@@ -248,9 +248,6 @@ test('applyForwardReferenceBootstrap covers every forward reference declared in 
       ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_source_slug_key;
       ALTER TABLE pages ADD CONSTRAINT pages_slug_key UNIQUE (slug);
       DROP INDEX IF EXISTS idx_pages_source_id;
-      -- The v230 trust generation trigger's WHEN reads pages.source_id, slug and
-      -- deleted_at; a pre-v0.18 brain predates it (v230 recreates it).
-      DROP TRIGGER IF EXISTS trust_generation_update ON pages;
       ALTER TABLE pages DROP COLUMN IF EXISTS source_id;
       DROP TABLE IF EXISTS sources CASCADE;
 
@@ -414,9 +411,6 @@ test('after bootstrap, PGLITE_SCHEMA_SQL replays without crashing on missing for
       ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_source_slug_key;
       ALTER TABLE pages ADD CONSTRAINT pages_slug_key UNIQUE (slug);
       DROP INDEX IF EXISTS idx_pages_source_id;
-      -- The v230 trust generation trigger's WHEN reads pages.source_id, slug and
-      -- deleted_at; a pre-v0.18 brain predates it (v230 recreates it).
-      DROP TRIGGER IF EXISTS trust_generation_update ON pages;
       ALTER TABLE pages DROP COLUMN IF EXISTS source_id;
       DROP TABLE IF EXISTS sources CASCADE;
       DROP INDEX IF EXISTS idx_links_source;
@@ -865,13 +859,6 @@ test('every CREATE INDEX column in PGLITE_SCHEMA_SQL is covered by CREATE TABLE 
 // ─────────────────────────────────────────────────────────────────
 
 const COLUMN_EXEMPTIONS = new Set<string>([
-  // page_aliases origin / case_sensitive / alias_text (entity mention index,
-  // migration v206): page_aliases is a PGLite bootstrap table and a
-  // Postgres migration-only table; no schema blob references these columns
-  // (no index or view reads them), so there is nothing to forward-reference.
-  'page_aliases.origin',
-  'page_aliases.case_sensitive',
-  'page_aliases.alias_text',
   // takes.embedding: the takes table is migration-only (no CREATE TABLE in
   // PGLITE_SCHEMA_SQL / src/schema.sql), so there is no schema-blob forward
   // reference for the bootstrap to trip on. The column is created inline in
@@ -886,33 +873,6 @@ const COLUMN_EXEMPTIONS = new Set<string>([
   // columns from the migration chain.
   'takes.embedding_model',
   'takes.embedded_text_hash',
-  // Spend meter budget owner (v205): mcp_spend_reservations and mcp_spend_log
-  // are migration-only tables (no CREATE TABLE in the schema blob), so there is
-  // no blob forward reference; the migration chain adds the column and index.
-  'mcp_spend_reservations.budget_key',
-  'mcp_spend_log.budget_key',
-  // Spend fence columns (v205): migration-only, appended after every earlier
-  // migration-added column so fresh and upgraded catalogs agree. No blob index
-  // references them; the blob's queue-protocol trigger reads them only on a
-  // claim, after the migration chain has run.
-  'minion_jobs.spend_authorization',
-  'minion_jobs.spend_claim_token',
-  // E-B (wave 0) content_chunks.embedding_pending_since (migration
-  // chunk_embedding_pending_since): deliberately migration-only so fresh and
-  // upgraded catalogs keep the same column order (test/pglite-upgrade-replay);
-  // the schema blob carries a comment, no CREATE TABLE column and no index
-  // reads it, so there is no forward reference for the bootstrap to trip on.
-  'content_chunks.embedding_pending_since',
-  // #5504 (wave 14 P4.1) open_loops.counterparty_source_id (migration
-  // open_loops_counterparty_source): same posture as embedding_pending_since,
-  // migration-only so fresh and upgraded brains share column ordinals; the
-  // partial index is built by the migration handler, never by the blob.
-  'open_loops.counterparty_source_id',
-  // #6202 oauth_clients.registered_via (migration oauth_client_registered_via):
-  // migration-only like min_trust, so fresh and upgraded catalogs keep the same
-  // column order; no blob statement or index reads it, and the DCR insert falls
-  // back to the unmarked insert while the column is missing.
-  'oauth_clients.registered_via',
   // T7 — search_telemetry rank-1 drift columns (migration v111). search_telemetry
   // is created entirely by migration v57 (not in the schema blob), so the v57+v111
   // chain handles fresh + upgrade; no CREATE INDEX references these columns, so
@@ -983,10 +943,6 @@ const COLUMN_EXEMPTIONS = new Set<string>([
   // brains is invisible to them). Migration is column-only, no FK,
   // no index — bootstrap probe would be pure overhead.
   'facts.event_type',
-  // migration v215 — speaker attribution. The facts table is migration-created
-  // (absent from PGLITE_SCHEMA_SQL), so no schema-blob forward reference can
-  // exist; nullable column only, no index or FK.
-  'facts.attributed_to',
   // v0.42.56.0 (migration v122, #2390) — Life Chronicle ontology columns.
   // Same precedent as facts.claim_metric et al: the `facts` table itself is
   // migration-created (absent from PGLITE_SCHEMA_SQL), so no schema-blob
@@ -1070,18 +1026,6 @@ const COLUMN_EXEMPTIONS = new Set<string>([
   // posture as v178: persistence_requests is migration-created on PGLite, no
   // index references the column, and every reader treats NULL as no detail.
   'persistence_requests.error_detail',
-  // #6176 (migration v217) — claim phase of a running request. Same posture
-  // as v178/v198: persistence_requests is migration-created on PGLite, no
-  // index references the column, and every reader treats NULL as no recorded phase.
-  'persistence_requests.claim_phase',
-  // #6278 (migration v220) — preparation attempt counter. Same posture as
-  // v178/v198/v217: migration-created on PGLite, no index references the
-  // column, and every reader treats a missing value as 0 attempts.
-  'persistence_requests.preparation_attempts',
-  // Cat 40 Hard F6 (migration v238) — the client's original request_id. Same
-  // posture as v178/v198: persistence_requests is migration-created on PGLite,
-  // no index references the column, and every reader treats NULL as "sent a UUID or nothing".
-  'persistence_requests.client_request_id',
   // #5455 (migration v183) — managed mode epoch. persistence_brain is
   // migration-created on PGLite; no index in either blob references it, and
   // pre-migration readers go through to_jsonb(persistence_brain)->'mode_epoch'.

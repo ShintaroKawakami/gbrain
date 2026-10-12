@@ -53,7 +53,6 @@ export const FACTS_ABSORB_REASONS = [
   'gateway_auth',
   'gateway_billing',
   'gateway_rate_limit',
-  'gateway_model_not_found',
   'write_refused',
 ] as const;
 
@@ -177,9 +176,7 @@ export async function writeFactsAbsorbFailure(
       ? 'gateway_billing'
       : globalClass === 'rate_limit'
         ? 'gateway_rate_limit'
-        : globalClass === 'model_not_found'
-          ? 'gateway_model_not_found'
-          : classifyFactsAbsorbError(err);
+        : classifyFactsAbsorbError(err);
   await writeFactsAbsorbLog(engine, ref, reason, `${reason.startsWith('gateway_') ? 'provider request failed' : 'extraction failed'} (${errorType})`, sourceId);
 }
 

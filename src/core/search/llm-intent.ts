@@ -56,7 +56,6 @@ export async function classifyModalityWithLLM(
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: query.slice(0, 500) }],
       maxTokens: 16,
-      thinking: 'off',
       abortSignal: controller.signal,
     });
     return parseModality(result.text, fallback);

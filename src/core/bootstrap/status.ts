@@ -35,7 +35,6 @@ import { binaryOnPath, detectExecutionEnvironment, type ExecutionEnvironment } f
 import { resolveGbrainHome } from '../gbrain-home.ts';
 import { githubOwnerRepoString, isProxyBlocked403 } from '../repo-visibility.ts';
 
-import { CODEX_PROJECT_CONFIG, adoptedConnectionState } from './adopted-connections.ts';
 import { BOOTSTRAP_TEMPLATES } from './assets.ts';
 import {
   readManifest,
@@ -50,7 +49,6 @@ import {
   GBRAIN_HOOK_MARKER_KEY,
   GBRAIN_HOOK_MARKER_VALUE,
 } from './host-specs.ts';
-import { gitChildEnv } from '../git-env.ts';
 
 // ---------------------------------------------------------------------------
 // The phase list [D5] — single TS source of truth
@@ -102,7 +100,6 @@ interface PhaseSpec {
 export function gitOriginUrl(ws: string): string | null {
   try {
     const out = execFileSync('git', ['-C', ws, 'remote', 'get-url', 'origin'], {
-      env: gitChildEnv(),
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 5_000,
     })
@@ -271,8 +268,7 @@ export const PHASES: PhaseSpec[] = [
       'gbrain bootstrap hooks --harness <claude-code|codex|opencode> — MCP scope consent applies on ' +
       'Claude Code and opencode (recorded during the interview, pre-confirm; opencode defaults to ' +
       'user-global — the sharing-safe choice, since it spawns project-config servers with no trust gate); ' +
-      'Codex registrations are always user-global (no scope flag); a project-scoped .codex/config.toml server ' +
-      'you manage yourself is adopted, never rewritten: `gbrain bootstrap hooks --adopt --harness codex` after a passing verify',
+      'Codex registrations are always user-global (no scope flag)',
     detect: (ws, ctx) => {
       const regs = ctx.receipt?.registrations ?? [];
       if (regs.length > 0) {
@@ -292,24 +288,6 @@ export const PHASES: PhaseSpec[] = [
         };
       }
       if (hooksInstalled(ws)) return { state: 'done', detail: 'hooks present in .claude/settings.local.json' };
-      // Operator-managed Codex project config (#4082): `.codex/config.toml`
-      // in the workspace, logged in with `codex mcp login`. Detected is
-      // PARTIAL (nothing proves it reaches the brain); adopted after a
-      // passing verify is DONE; a fingerprint drift is PARTIAL again.
-      const adopted = adoptedConnectionState(ws, ctx.gbrainHomeDir);
-      if (adopted.state === 'adopted') {
-        return { state: 'done', detail: `codex (project, adopted ${adopted.connection.adopted_at}): ${CODEX_PROJECT_CONFIG} mcp_servers.${adopted.connection.name}` };
-      }
-      if (adopted.state === 'drifted') {
-        return { state: 'partial', detail: `codex (project) adopted connection drifted — ${adopted.why}; re-run \`gbrain bootstrap verify\` then \`gbrain bootstrap hooks --adopt --harness codex\`` };
-      }
-      if (adopted.state === 'detected') {
-        return {
-          state: 'partial',
-          detail: `codex (project) detected, not verified: ${CODEX_PROJECT_CONFIG} defines mcp_servers.${adopted.detected.name} (${adopted.detected.transport}) — ` +
-            'run `gbrain bootstrap verify`, then `gbrain bootstrap hooks --adopt --harness codex` to adopt it (no user-global `codex mcp add` needed)',
-        };
-      }
       return { state: 'pending' };
     },
   },

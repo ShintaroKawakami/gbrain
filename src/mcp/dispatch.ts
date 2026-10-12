@@ -8,32 +8,20 @@
 
 import { affectsRecall } from '../core/types.ts';
 import type { BrainEngine } from '../core/engine.ts';
-import { operations, OperationError, enforceBoundClientOpAllowList, opError } from '../core/operations.ts';
+import { operations, OperationError, enforceBoundClientOpAllowList } from '../core/operations.ts';
 import type { OperationContext, AuthInfo } from '../core/operations.ts';
 import { loadConfig } from '../core/config.ts';
+import { classifyPgAccessError, formatDbAccessMarker, type PgAccessDiagnosis } from '../core/pg-access-classify.ts';
 import { resolveBrainId } from '../core/brain-resolver.ts';
-import { getCliOptions } from '../core/cli-options.ts';
+import { redactConnectionInfo } from '../core/audit/redact-connection-info.ts';
+import { redactUrlsInText } from '../core/url-redact.ts';
 import { VERB_NAMES, MEMORY_VERBS_VERSION } from '../core/verbs.ts';
-import { cliRenderContext, orderNotices, redactForTransport, renderNotice, toAgentError, toolErrorResult, toolResultWithNotices, type Notice, type RenderContext } from '../core/agent-output.ts';
-import { cliOnlyRefusal, isCallable } from '../core/ops/callable.ts';
-import { hostFix, scopeDeniedError } from '../core/ops/op-fix.ts';
-import { mutedNoticeCodes, processNoticeLedger, __resetProcessNoticeLedgerForTests, type NoticeLedger, type NoticeAudience } from '../core/notice-ledger.ts';
 import { logVerbUsage } from '../core/verbs/usage-log.ts';
-import { searchCountLine } from '../core/search/keyword-paging.ts';
-import { dateLabelLine } from '../core/search/date-labels.ts';
-import { localTranscriptsNotice, recallInteropNotices, wantsTranscriptHint } from '../core/interop-notices.ts';
-import { hiddenToolHint } from './hidden-tool-hint.ts';
-import { takePostUpgradeMcpNotice } from '../core/post-upgrade-notice.ts';
-import { takeHttpBehaviorNotice, takeLocalBehaviorNotice } from '../core/behavior-change-notice.ts';
-import { takeChatFallbackHopNotices } from '../core/ai/fallback-hop-queue.ts';
-import { mcpOnboardingNotices } from '../core/onboard/mcp-onboarding.ts';
-import { takeFactsDrainNotice } from '../core/facts/drain.ts';
 import { sourceGuardBlocksWrite } from '../core/source-resolver.ts';
 import { suggestNearest } from '../core/levenshtein.ts';
 import {
   normalizeOptionalParams,
-  findInvalidParam,
-  schemaInvalidParams,
+  validateParams,
   findUnknownParams,
   buildUnknownParamWarnBlock,
   resolveStrictParamsMode,
@@ -41,7 +29,6 @@ import {
 import { backupCheckDisabled, backupNagGate, backupNoticeText, loadBackupStatus } from '../core/backup/status-file.ts';
 import { maybeRefreshBackupStatusInProcess } from '../core/backup/coverage.ts';
 import { operationScopesAllowed } from '../core/scope.ts';
-import { enforceReadTrustFloor } from '../core/eligibility/registry.ts';
 import { invalidateHotMemoryForEngine } from '../core/facts/meta-hook.ts';
 import { admittedPendingReceipt, type WriteReceipt } from '../core/persistence/types.ts';
 import { currentVerifiedLocalWriter, readLocalWriter, verifyLocalWriter, withVerifiedLocalRegistration } from '../core/persistence/identity.ts';
@@ -66,14 +53,6 @@ function configuredDbUrlForClassify(): string | null {
   }
   return cachedClassifyUrl;
 }
-/** The brain this process serves: `serve --brain` / GBRAIN_BRAIN_ID / .gbrain-mount / host. */
-function servedBrainId(): string | undefined {
-  try {
-    return resolveBrainId(getCliOptions().brain);
-  } catch {
-    return undefined;
-  }
-}
 let cachedClassifyBrainId: string | null | undefined;
 function brainIdForClassify(): string | undefined {
   if (cachedClassifyBrainId === undefined) {
@@ -97,7 +76,6 @@ let backupNoticeCheckedMs = 0;
 export function __resetBackupNoticeForTests(): void {
   backupNoticeShown = false;
   backupNoticeCheckedMs = 0;
-  __resetProcessNoticeLedgerForTests();
 }
 
 /**
@@ -113,7 +91,7 @@ export function __resetBackupNoticeForTests(): void {
  * cli.ts startup rail owns that surface. The hourly recheck latch keeps the
  * healthy steady state at zero file reads per tool call.
  */
-function maybeBackupNotice(notices: Notice[], opts: DispatchOpts): void {
+function maybeAttachBackupNotice(out: ToolResult, opts: DispatchOpts): void {
   try {
     if (backupNoticeShown || opts.remote === false || opts.transport !== 'stdio') return;
     const now = Date.now();
@@ -126,10 +104,7 @@ function maybeBackupNotice(notices: Notice[], opts: DispatchOpts): void {
     if (!gate.show) return;
     const text = backupNoticeText(s, 'aggregate');
     if (!text) return;
-    notices.push({
-      code: 'backup_coverage', kind: 'coaching', why: text,
-      fix: { argv: ['gbrain', 'backup', 'status'], consent: [], actor: 'user', why: 'Lists each asset without a git remote and its fix command.', requires_exclusive: false },
-    });
+    out.content.push({ type: 'text', text });
     backupNoticeShown = true;
     gate.record();
   } catch {
@@ -145,12 +120,10 @@ export interface ToolResult {
    * The dispatcher injects `_meta.brain_hot_memory` here when an op succeeds
    * and the configured `metaHook` returns a payload.
    *
-   * Structured data for programmatic consumers only: MCP hosts generally do
-   * NOT show `_meta` to the model, so anything the agent must act on also
-   * rides a model-visible channel (the notice blocks; agent contract v1).
-   * NOT a wrapper around the result body — `content` stays the same shape it
-   * always had. Best-effort: any error in the meta hook is absorbed and the
-   * tool call still succeeds.
+   * Existing clients ignore unknown `_meta` fields; capable clients (Claude
+   * Code, Claude Desktop) read it. NOT a wrapper around the result body —
+   * `content` stays the same shape it always had. Best-effort: any error in
+   * the meta hook is absorbed and the tool call still succeeds.
    */
   _meta?: Record<string, unknown>;
 }
@@ -239,8 +212,6 @@ export interface DispatchOpts {
    * was replaced by dispatchToolCall.
    */
   auth?: AuthInfo;
-  /** Agent contract v1 (A6): HTTP's per-server notice ledger (ServeHttpContext); stdio uses the process ledger. */
-  noticeLedger?: NoticeLedger;
   /**
    * MEMORY_VERBS v1 surface enforcement [c2]. When set, a tool name outside
    * the set returns the unknown_tool envelope BEFORE resolution — fail-closed
@@ -265,10 +236,6 @@ export interface DispatchOpts {
    * treated as 'full'.
    */
   surfaceCeiling?: 'verbs' | 'starter' | 'full';
-  /** The stdio session surface (OperationContext.stdioSurface); its allow-set is the one `allowedOps` mirrors. */
-  stdioSurface?: OperationContext['stdioSurface'];
-  /** Threaded into OperationContext.revealTools (stdio session tool reveal). */
-  revealTools?: (names: string[]) => void;
   /** #5232: commit wait for coordinated writes (OperationContext.writeWaitMs); unset = agent default. */
   writeWaitMs?: number;
   /** C1: search/query row shape chosen by the transport (OperationContext.resultRows); unset = lean for remote callers. */
@@ -373,7 +340,7 @@ export function summarizeMcpParams(opName: string, params: unknown): ParamSummar
 /**
  * Model-visible notices the search/query ops attach to `_meta.retrieval`: the
  * D8 empty-retrieval diagnosis, a reconciled type filter, other names declared in the evidence, and saved
- * facts that match the query, search's keyword count line and the row-date label. Each rides as its own text block after the
+ * facts that match the query. Each rides as its own text block after the
  * results (content[0] stays the bare result array for thin clients).
  */
 export function retrievalNoticeBlocks(result: unknown, retrieval: unknown): string[] {
@@ -382,9 +349,7 @@ export function retrievalNoticeBlocks(result: unknown, retrieval: unknown): stri
   const r = retrieval as {
     type_filter_notice?: unknown;
     other_names?: Array<{ name: string; alias: string; slug: string }>;
-    saved_facts?: Array<{ fact: string; entity_slug: string | null; valid_from: string; source: string; linked_from?: string }>;
-    answer_id?: unknown;
-    feedback?: { rateable?: boolean; how_to_rate?: string };
+    saved_facts?: Array<{ fact: string; entity_slug: string | null; valid_from: string; source: string }>;
   };
   const blocks: string[] = empty ? [empty] : [];
   if (typeof r.type_filter_notice === 'string') blocks.push(r.type_filter_notice);
@@ -394,35 +359,17 @@ export function retrievalNoticeBlocks(result: unknown, retrieval: unknown): stri
     blocks.push(`${text}${more ? ` (+${more} more)` : ''}.`);
   }
   if (r.saved_facts?.length) {
-    const { text, more } = wholeItemsWithin('Saved facts (remember): about the entity this query names (newest first), then facts those point to, then matches for its words; recall returns more:\n',
-      r.saved_facts.map(f => `- ${f.fact} [entity: ${f.entity_slug ?? 'none'}; saved ${String(f.valid_from).slice(0, 10)}; provenance: ${f.source}${f.linked_from ? `; named in a saved fact about ${f.linked_from}` : ''}]`),
+    const { text, more } = wholeItemsWithin('Saved facts (remember) matching this query, newest first; recall returns more:\n',
+      r.saved_facts.map(f => `- ${f.fact} [entity: ${f.entity_slug ?? 'none'}; saved ${String(f.valid_from).slice(0, 10)}; provenance: ${f.source}]`),
       '\n', SAVED_FACTS_NOTICE_MAX_CHARS);
     blocks.push(more ? `${text}\n(+${more} more; recall returns them)` : text);
   }
-  // F2: which set the rows are and which set the keyword count covers, on every search call.
-  const countLine = searchCountLine(result, retrieval);
-  if (countLine) blocks.push(countLine);
-  // F4: what each row's effective_date is (document, event or fallback date), never contractual validity.
-  const dateLine = dateLabelLine(result);
-  if (dateLine) blocks.push(dateLine);
-  if (typeof r.answer_id === 'string' && r.feedback?.rateable === true) blocks.push(rateLine(r.answer_id, typeof r.feedback.how_to_rate === 'string'));
   return blocks;
-}
-
-/**
- * #6192: the rateable answer's id on the model-visible channel (hosts that
- * show only `content[]` never see `_meta`). Short on every rateable answer;
- * the fuller wording on the answers where the `how_to_rate` cadence fires.
- */
-function rateLine(answerId: string, coach: boolean): string {
-  const call = `rate_answer { answer_id: "${answerId}", rating: 1-5 }`;
-  return (coach ? `Rate this answer after you use it: ${call}. Ratings tune this brain's ranking.` : `Rate after use: ${call}`).slice(0, RATE_LINE_MAX_CHARS);
 }
 
 /** C4: character ceilings for the model-visible notice blocks (header included). */
 export const SAVED_FACTS_NOTICE_MAX_CHARS = 1_500;
 export const OTHER_NAMES_NOTICE_MAX_CHARS = 400;
-export const RATE_LINE_MAX_CHARS = 160;
 
 /**
  * Whole items after `head` while the block stays within `max` characters;
@@ -540,132 +487,20 @@ export function requestLogStatusForResult(result: ToolResult): RequestLogStatus 
  * gate state is unknown here, and a suggestion naming a hidden/gated op
  * would be the exact existence oracle this envelope exists to prevent.
  */
-export function unknownToolEnvelope(name: string, opts: DispatchOpts, legacyError?: 'unknown_operation'): ToolResult {
-  const allowedOps = opts.allowedOps;
+function unknownToolEnvelope(name: string, allowedOps?: ReadonlySet<string>): ToolResult {
   const candidates = operations
     .filter(op => !op.localOnly && !op.publishGateKey && (allowedOps ? allowedOps.has(op.name) : true))
     .map(op => op.name);
   const nearest = suggestNearest(name, candidates);
-  const hint = hiddenToolHint(operations.find(o => o.name === name), opts, dispatchRenderContext(opts).isCallable('request_tools') && opts.stdioSurface?.widenAllowed !== false); // F6: owner's stdio pipe only
-  const suggestion = hint?.suggestion ?? (nearest
-    ? `Did you mean "${nearest}"?`
-    : 'List the tools this connection can call (tools/list) and use one of those names.');
-  return errorResult(opError('unknown_tool', legacyError ? `Unknown: ${name}` : `Unknown tool: ${name}`, suggestion,
-    { ...(legacyError ? { legacy_error: legacyError } : {}), ...(hint ? { fix: hint.fix } : {}) }), opts);
-}
-
-/**
- * Agent contract v1 render context for a dispatch caller: a fix names an MCP
- * tool only when the same predicate behind tools/list says this caller can
- * call it. Preapprovals never apply over MCP (they are a CLI consent path).
- */
-export function dispatchRenderContext(opts: DispatchOpts): RenderContext {
-  const transport = opts.transport === 'stdio' ? 'stdio' : opts.remote === false ? 'cli' : 'http';
-  const surface = opts.surface ?? 'full';
-  const byName = new Map(operations.map(op => [op.name, op]));
-  // A1: CLI fixes name the served brain and the request's source (ids only; the HTTP pass strips paths).
-  const brain = servedBrainId();
-  const routing = { ...(brain ? { brain } : {}), ...(opts.sourceId ? { source: opts.sourceId } : {}) };
-  return {
-    routing,
-    transport,
-    surface,
-    isCallable: (opName: string) => {
-      const op = byName.get(opName);
-      return !!op && isCallable(op, {
-        transport, surface, scopes: opts.auth?.scopes ?? [], publishGates: {}, allowedOps: opts.allowedOps,
-      });
-    },
-    preapproved: () => false,
-    ...(opts.auth?.clientId ? { principal: opts.auth.clientId } : {}),
+  const envelope = {
+    error: 'unknown_tool',
+    message: `Unknown tool: ${name}`,
+    ...(nearest ? { suggestion: `Did you mean "${nearest}"?` } : {}),
   };
-}
-
-/** `gbrain call`'s failure envelope: same normaliser, CLI render context, the op's own effect tags. */
-export function localCallErrorEnvelope(tool: string, e: unknown) {
-  const op = operations.find(o => o.name === tool);
-  return toAgentError(e, {
-    transport: 'cli', op: tool, mutating: op?.mutating === true, idempotent: op?.idempotent === true,
-    outcome: op?.mutating ? 'unknown' : 'failed', render: cliRenderContext(),
-    db: { url: configuredDbUrlForClassify(), brainId: brainIdForClassify() },
-  });
-}
-
-/**
- * A6 dedupe/budget/mute: the stdio ledger is per process; HTTP passes its
- * ServeHttpContext ledger. Session identity is the transport-resolved id only.
- * Fail-open: a ledger fault delivers every notice.
- */
-function noticeAudience(opts: DispatchOpts): NoticeAudience {
-  return { transport: opts.transport === 'stdio' ? 'stdio' : opts.remote === false ? 'cli' : 'http', principal: opts.auth?.clientId, sessionId: opts.sessionId };
-}
-
-function admitNotices(notices: Notice[], opts: DispatchOpts): Notice[] {
-  if (notices.length === 0) return notices;
-  try {
-    const audience = noticeAudience(opts);
-    return (opts.noticeLedger ?? processNoticeLedger()).admit(notices, audience,
-      mutedNoticeCodes(audience.principal ?? (audience.transport === 'stdio' ? 'stdio' : undefined)));
-  } catch {
-    return notices;
-  }
-}
-
-/**
- * Cat 40 R0: a search/query whose reranker failed counts toward this
- * session's reranker-degraded calls, and its own `_meta.retrieval` records
- * the reason, the fallback and that count (no `fields: "full"` needed).
- * Returns the session count, or undefined when the reranker did not fail.
- */
-function recordRerankDegradation(responseMeta: Record<string, unknown>, opts: DispatchOpts): number | undefined {
-  try {
-    const retrieval = responseMeta.retrieval as { degraded?: Array<{ stage?: string; reason?: string }> } | undefined;
-    const failed = retrieval?.degraded?.find(d => d.stage === 'rerank_failed');
-    if (!retrieval || !failed) return undefined;
-    const calls = (opts.noticeLedger ?? processNoticeLedger()).tally(noticeAudience(opts), 'rerank_failed');
-    responseMeta.retrieval = { ...retrieval, rerank_degraded: { reason: failed.reason ?? 'provider_error', fallback: 'fused_order', calls_this_session: calls } };
-    return calls;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * The one-time `behavior_changes` disclosure (stdio: once per brain; HTTP:
- * once per authenticated client, remote view) and the first
- * `chat_fallback_hop` of this process (stdio only: it names models). Rides
- * success and failure results alike. Never throws.
- */
-async function sessionSafetyNotices(engine: BrainEngine, opts: DispatchOpts, config: OperationContext['config']): Promise<Notice[]> {
-  const out: Notice[] = [];
-  try {
-    if (opts.transport === 'stdio' && opts.remote !== false) {
-      const behavior = await takeLocalBehaviorNotice(engine, 'stdio', { cfg: config ?? null });
-      if (behavior) out.push(behavior);
-      out.push(...takeChatFallbackHopNotices());
-    } else if (opts.transport === 'http') {
-      const behavior = await takeHttpBehaviorNotice(engine, opts.auth?.clientId, { cfg: config ?? null });
-      if (behavior) out.push(behavior);
-    }
-  } catch { /* a notice never breaks a tool call */ }
-  return out;
-}
-
-/** The one error result path: toAgentError → exactly one content block. */
-export function errorResult(e: unknown, opts: DispatchOpts, extra: { op?: string; mutating?: boolean; idempotent?: boolean; notices?: Notice[] } = {}): ToolResult {
-  const carried = !!extra.notices?.length && e instanceof OperationError;
-  if (carried) e.notices = [...(e.notices ?? []), ...extra.notices!];
-  const render = dispatchRenderContext(opts);
-  const envelope = toAgentError(e, {
-    transport: render.transport, op: extra.op, mutating: extra.mutating, idempotent: extra.idempotent,
-    outcome: extra.mutating ? 'unknown' : 'failed', render,
-    db: { url: configuredDbUrlForClassify(), brainId: brainIdForClassify() },
-  });
-  if (!extra.notices?.length || carried) return toolErrorResult(envelope);
-  // Any other throw (a plain Error, a DB fault) still carries the notices the call collected (A6: one block, `notices` key).
-  const { contract_version, ...rest } = envelope;
-  const added = extra.notices.map(n => redactForTransport(renderNotice(n, render), render.transport));
-  return toolErrorResult({ ...rest, notices: orderNotices([...(envelope.notices ?? []), ...added]), contract_version });
+  return {
+    content: [{ type: 'text', text: JSON.stringify(envelope, null, 2) }],
+    isError: true,
+  };
 }
 
 const stderrLogger: OperationContext['logger'] = {
@@ -676,16 +511,6 @@ const stderrLogger: OperationContext['logger'] = {
 
 /** CX2-11: clamp an opaque session id to 256 chars (cache-key hygiene). */
 const SESSION_ID_MAX_CHARS = 256;
-
-/**
- * CX2-11: the request-level session — MCP carries `_meta.session_id` as a sibling of `arguments` in
- * `request.params`. Every transport threads it the same way, so a fact `remember`s the session over
- * HTTP exactly as over stdio. Non-string / empty values are ignored; dispatch clamps the length.
- */
-export function requestMetaSessionId(requestParams: unknown): string | undefined {
-  const raw = (requestParams as { _meta?: { session_id?: unknown } } | undefined)?._meta?.session_id;
-  return typeof raw === 'string' && raw.length > 0 ? raw : undefined;
-}
 
 /**
  * Read `_meta.session_id` out of the tool arguments when present. The MCP
@@ -730,8 +555,6 @@ export function buildOperationContext(
     ...(opts.localFederatedSourceIds ? { localFederatedSourceIds: opts.localFederatedSourceIds } : {}),
     ...(opts.explicitReadBinding ? { explicitReadBinding: opts.explicitReadBinding } : {}),
     ...(opts.surfaceCeiling ? { surfaceCeiling: opts.surfaceCeiling } : {}),
-    ...(opts.stdioSurface ? { stdioSurface: opts.stdioSurface } : {}),
-    ...(opts.revealTools ? { revealTools: opts.revealTools } : {}),
     ...(opts.writeWaitMs !== undefined ? { writeWaitMs: opts.writeWaitMs } : {}),
     ...(opts.resultRows ? { resultRows: opts.resultRows } : {}),
     auth: opts.auth,
@@ -771,7 +594,7 @@ export async function dispatchToolCall(
   // on every transport, not just unlisted. Same envelope as unknown ops so
   // the surface doesn't leak which names exist.
   if (opts.allowedOps && !opts.allowedOps.has(name)) {
-    return unknownToolEnvelope(name, opts);
+    return unknownToolEnvelope(name, opts.allowedOps);
   }
 
   const op = operations.find(o => o.name === name);
@@ -781,7 +604,7 @@ export async function dispatchToolCall(
     // plain `Error: ...` string here breaks the contract on every
     // unknown-op path and the resulting test failure looked like a
     // transport bug.
-    return unknownToolEnvelope(name, opts);
+    return unknownToolEnvelope(name, opts.allowedOps);
   }
 
   // localOnly backstop at the SHARED layer (WP1/D7): localOnly ops reach the
@@ -792,10 +615,8 @@ export async function dispatchToolCall(
   // serve-http path also filters these at list time; the legacy bearer
   // transport at surface 'full' had no gate at all before this line.
   if (op.localOnly && opts.transport !== 'stdio') {
-    return unknownToolEnvelope(name, opts);
+    return unknownToolEnvelope(name, opts.allowedOps);
   }
-  // F5: an owner-only op is never listed on MCP; a call gets the exact CLI command.
-  if (op.cliOnly && opts.remote !== false) return errorResult(cliOnlyRefusal(op), opts, { op: name });
 
   // --source-guard (plugin lanes): fail-closed write routing. A user-global
   // plugin serve has no per-workspace source binding, so an ambient-tier
@@ -810,29 +631,44 @@ export async function dispatchToolCall(
     const sentinelWrite = opts.sourceId === '__all__';
     if (sentinelWrite || (await sourceGuardBlocksWrite(engine, opts.sourceGuardTier))) {
       logVerb(false);
-      const refusal = opError('source_binding_required', sentinelWrite
+      const envelope = {
+        error: 'source_binding_required',
+        message: sentinelWrite
           ? 'GBRAIN_SOURCE=__all__ is a read-span sentinel, not a write target — a write cannot resolve to "all sources". ' +
             'Set GBRAIN_SOURCE to a concrete source id for writes.'
           : 'This brain has more than one source to choose from and the MCP server runs with --source-guard: ' +
           `write/admin operations need an explicit source binding so they cannot land in the wrong source (resolution tier: ${opts.sourceGuardTier}).`,
-        'Set GBRAIN_SOURCE=<source-id> in the environment that launches this MCP server ' +
+        suggestion:
+          'Set GBRAIN_SOURCE=<source-id> in the environment that launches this MCP server ' +
           '(plugin installs pass it through — the user-global stdio serve binds the source from the env, not a flag). ' +
           'List sources with `gbrain sources list`. Reads are unaffected.',
-        { fix: { argv: ['gbrain', 'sources', 'list'], consent: [], actor: 'user', why: 'Names the source id to bind with GBRAIN_SOURCE.', requires_exclusive: false } });
-      if (isVerb) refusal.protocolVersion = MEMORY_VERBS_VERSION;
-      return errorResult(refusal, opts, { op: name });
+        ...(isVerb ? { protocol_version: MEMORY_VERBS_VERSION } : {}),
+      };
+      return {
+        content: [{ type: 'text', text: JSON.stringify(envelope, null, 2) }],
+        isError: true,
+      };
     }
   }
 
   const safeParams = normalizeOptionalParams(op, params || {});
-  const validationFailure = findInvalidParam(op, safeParams);
-  if (validationFailure) {
+  const validationError = validateParams(op, safeParams);
+  if (validationError) {
     logVerb(false);
-    // [c7] verb validation errors speak the protocol envelope (protocol_version);
-    // B3: every op's suggestion names the param's type, choices and an example.
-    const invalid = schemaInvalidParams(op, validationFailure, { remote: opts.remote, transport: dispatchRenderContext(opts).transport === 'http' ? 'http' : 'stdio' }, safeParams);
-    if (isVerb) invalid.protocolVersion = MEMORY_VERBS_VERSION;
-    return errorResult(invalid, opts, { op: name });
+    // [c7] verb validation errors speak the protocol envelope (suggestion +
+    // protocol_version); non-verb ops keep the pre-existing shape untouched.
+    const envelope = isVerb
+      ? {
+          error: 'invalid_params',
+          message: validationError,
+          suggestion: 'Check the tool schema — required params and types are declared there.',
+          protocol_version: MEMORY_VERBS_VERSION,
+        }
+      : { error: 'invalid_params', message: validationError };
+    return {
+      content: [{ type: 'text', text: JSON.stringify(envelope, null, 2) }],
+      isError: true,
+    };
   }
 
   // WP3 strict/warn unknown-argument validation. Runs on the NORMALIZED
@@ -840,11 +676,10 @@ export async function dispatchToolCall(
   // `dry_run` are allowlisted inside findUnknownParams. The mode resolves
   // dual-plane (DB > file > 'warn') once per dispatch, and only when an
   // unknown key actually exists — the all-declared common case pays no
-  // config read. #5970: a write (`op.mutating`) rejects in every mode; the
-  // warn grace period would commit a row with the misnamed field dropped.
+  // config read.
   const unknownParamWarnings = findUnknownParams(op, safeParams);
   if (unknownParamWarnings.length > 0) {
-    const strictMode = op.mutating === true ? 'reject' : await resolveStrictParamsMode(engine, opts.config ?? loadConfig());
+    const strictMode = await resolveStrictParamsMode(engine, opts.config ?? loadConfig());
     if (strictMode === 'reject') {
       logVerb(false);
       // Privacy (amendment 11): the raw unknown key rides `suggestion` ONLY.
@@ -857,11 +692,16 @@ export async function dispatchToolCall(
           ? `Unknown parameter "${w.param}" — did you mean "${w.suggestion}"?`
           : `Unknown parameter "${w.param}".`)
         .join(' ');
-      const strict = new OperationError('invalid_params',
-        `${n} unknown parameter${n === 1 ? '' : 's'} not declared in the ${name} tool schema (${op.mutating === true ? 'write operations always reject unknown parameters; nothing was written' : 'mcp.strict_params=reject'}). See suggestion for the submitted name${n === 1 ? '' : 's'}.`,
-        suggestion);
-      if (isVerb) strict.protocolVersion = MEMORY_VERBS_VERSION;
-      return errorResult(strict, opts, { op: name });
+      const envelope = {
+        error: 'invalid_params',
+        message: `${n} unknown parameter${n === 1 ? '' : 's'} not declared in the ${name} tool schema (mcp.strict_params=reject). See suggestion for the submitted name${n === 1 ? '' : 's'}.`,
+        suggestion,
+        ...(isVerb ? { protocol_version: MEMORY_VERBS_VERSION } : {}),
+      };
+      return {
+        content: [{ type: 'text', text: JSON.stringify(envelope, null, 2) }],
+        isError: true,
+      };
     }
   }
 
@@ -874,16 +714,10 @@ export async function dispatchToolCall(
   // #1924 / #1371. Trusted local callers (remote === false) keep the
   // historical fallback via buildOperationContext.
   if ((opts.remote ?? true) && !opts.sourceId) {
-    const viaClient = opts.transport !== 'stdio' && !!opts.auth?.clientId;
-    return errorResult(opError('missing_source_scope',
-      `Remote tool call '${name}' carries no resolved sourceId; refusing the shared 'default' source fallback. Pass an explicit sourceId resolved from the caller's grant.`,
-      viaClient
-        ? `This connection has no source grant. The brain host operator binds one to this client (gbrain auth rescope-client ${opts.auth!.clientId} --source <source-id>), then the call works.`
-        : 'This MCP server resolved no source. Set GBRAIN_SOURCE to a registered source id in the environment that launches it, then restart it.',
-      { fix: hostFix({ remote: true, transport: viaClient ? 'http' : 'stdio' },
-        viaClient ? ['gbrain', 'auth', 'clients', '--json'] : ['gbrain', 'sources', 'list'],
-        viaClient ? 'Shows each OAuth client\'s write source; the operator binds this client to one with `gbrain auth rescope-client`.'
-          : 'Lists the source ids GBRAIN_SOURCE can name.') }), opts, { op: name });
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ error: 'missing_source_scope', message: `Remote tool call '${name}' carries no resolved sourceId; refusing the shared 'default' source fallback. Pass an explicit sourceId resolved from the caller's grant.` }, null, 2) }],
+      isError: true,
+    };
   }
 
   const ctx = buildOperationContext(engine, safeParams, opts);
@@ -904,12 +738,6 @@ export async function dispatchToolCall(
     ctx.emitResponseMeta('warnings', unknownParamWarnings);
   }
 
-  // Agent contract v1 (A6): the model-visible notice channel. Producers call
-  // ctx.emitNotice; success renders prefixed extra blocks + _meta.gbrain_notices,
-  // failure renders the envelope's `notices` key (one block).
-  const notices: Notice[] = [];
-  ctx.emitNotice = (n) => { if (n) notices.push(n); };
-
   try {
     if (ctx.remote !== false && op.requiredScopes?.length) {
       let scopes = ctx.auth?.scopes;
@@ -918,8 +746,8 @@ export async function dispatchToolCall(
         scopes = verified.remote ? verified.grant.scopes : [];
       }
       if (!operationScopesAllowed(scopes ?? [], op)) {
-        throw scopeDeniedError({ op: name, required: op.requiredScopes, auth: ctx.auth ? { ...ctx.auth, scopes: scopes ?? [] } : { clientId: '', scopes: scopes ?? [] },
-          transport: ctx.transport === 'stdio' ? 'stdio' : 'http', message: 'This operation requires an explicit shared-skills grant.', legacy_error: 'permission_denied' });
+        throw new OperationError('permission_denied', 'This operation requires an explicit shared-skills grant.',
+          `Ask the brain owner to grant ${op.requiredScopes.join(', ')} for this connection.`);
       }
     }
     // Fail-closed gate for slug-bound OAuth clients, applied here because
@@ -927,8 +755,6 @@ export async function dispatchToolCall(
     // run inside the handlers; this stops an unfenced write op from being
     // a silent hole. See CLIENT_FENCED_WRITE_OPS in operations.ts.
     enforceBoundClientOpAllowList(ctx.auth, op);
-    // #5575 CEO-18: a floored connection only reaches read ops that enforce its floor.
-    enforceReadTrustFloor(ctx.auth, op);
     const sharedStdio = ctx.transport === 'stdio' && !ctx.auth &&
       (op.requiredScopes?.length || ['list_skills', 'get_skill', 'get_skill_asset', 'list_brain_skillpack'].includes(name));
     let registration: Awaited<ReturnType<typeof readLocalWriter>> | undefined;
@@ -940,10 +766,7 @@ export async function dispatchToolCall(
     }
     const result = registration
       ? await withVerifiedLocalRegistration(engine, registration, async verified => {
-        if (!verified.remote) throw opError('permission_denied', 'This registration is not an agent-facing connection.',
-          `${name} on this stdio connection needs the agent-facing stdio writer registration, which only the user can create in a terminal on the brain host.`,
-          { fix: hostFix(ctx, ['gbrain', 'auth', 'local-writer', 'register', 'stdio', '--dry-run', '--json'],
-            'Previews the agent-facing stdio registration; the user reruns it without --dry-run (with --replace and the complete grant when a registration exists).') });
+        if (!verified.remote) throw new OperationError('permission_denied', 'This registration is not an agent-facing connection.');
         return op.handler(ctx, safeParams);
       })
       : await op.handler(ctx, safeParams);
@@ -961,46 +784,27 @@ export async function dispatchToolCall(
         ...(name === 'remember' && typeof r?.status === 'string' ? { remember_status: r.status } : {}),
       });
     }
+    // C2: compact JSON. Every result stays in the agent's context and is
+    // re-sent on each later turn; indentation was about a fifth of a search
+    // result. Error envelopes below stay indented (small and rare).
+    const out: ToolResult = { content: [{ type: 'text', text: JSON.stringify(result) }] };
     // D8: model-visible loudness for empty retrievals. The body stays a bare
-    // array (D3 — deployed thin-clients parse content[0] only); the diagnosis
-    // rides the notice channel (its text kept as the `why:` line). Structured
+    // array (D3 — deployed thin-clients parse content[0] only), and a SECOND
+    // text block carries the diagnosis the model actually sees. Structured
     // consumers read the same facts from _meta.retrieval below.
-    const emptyBlock = Array.isArray(result) && result.length === 0 && responseMeta.retrieval
-      ? buildEmptyRetrievalBlock(responseMeta.retrieval) : null;
-    if (emptyBlock) notices.push({ code: 'empty_retrieval', kind: emptyBlock.includes('degraded:') ? 'degraded' : 'info', why: emptyBlock });
-    // Cat 40 (#5932) evidence blocks (type-filter notice, other names, saved facts) are retrieval
-    // data, not advice: they stay plain extra text blocks right after content[0], as measured.
-    const evidenceBlocks = retrievalNoticeBlocks(result, responseMeta.retrieval).slice(emptyBlock ? 1 : 0);
-    // WP3/D8: warn-mode unknown-param notices ride the same channel, so the
-    // grace period actually corrects clients (old thin-clients read content[0]
-    // only — skew-safe). One notice per ignored parameter.
-    for (const w of unknownParamWarnings) {
-      notices.push({ code: 'unknown_param', kind: 'info', why: buildUnknownParamWarnBlock([w]) });
+    for (const text of retrievalNoticeBlocks(result, responseMeta.retrieval)) out.content.push({ type: 'text', text });
+    // WP3/D8: warn-mode unknown-param notices ride the same model-visible
+    // extra-block mechanism, so the grace period actually corrects clients
+    // (old thin-clients read content[0] only — skew-safe).
+    if (unknownParamWarnings.length > 0) {
+      out.content.push({ type: 'text', text: buildUnknownParamWarnBlock(unknownParamWarnings) });
     }
-    // Lane F (F3): degraded recall and a source binding that narrowed an empty read.
-    const rerankDegradedCalls = recordRerankDegradation(responseMeta, opts);
-    notices.push(...recallInteropNotices(name, result, responseMeta, safeParams,
-      { config: ctx.config, transport: dispatchRenderContext(opts).transport, binding: ctx.explicitReadBinding, rerankDegradedCalls }));
-    // Monthly backup-coverage: one AGGREGATE notice per process (counts only —
-    // never a local path or source id). The refresher runs on the stdio
-    // transport ONLY — the WP1/D7 locality axis localOnly ops use; 'http' or
-    // an UNSET marker never probes (fail-closed).
-    // F5 follow-up: local transcripts exist but their reader is not callable on this stdio connection.
-    if (opts.transport === 'stdio' && opts.remote !== false && !dispatchRenderContext(opts).isCallable('get_recent_transcripts')
-      && wantsTranscriptHint(name, safeParams, result)) {
-      try {
-        const { recentTranscriptPresence } = await import('../core/transcripts.ts');
-        const hint = localTranscriptsNotice(await recentTranscriptPresence(engine));
-        if (hint) notices.push(hint);
-      } catch { /* a pointer, never a failure */ }
-    }
-    maybeBackupNotice(notices, opts);
-    if (opts.transport === 'stdio' && opts.remote !== false) { const up = takePostUpgradeMcpNotice(); if (up) notices.push(up); } // F7
-    if (opts.transport === 'stdio' && opts.remote !== false) notices.push(...await mcpOnboardingNotices({ engine, op: name, result, meta: responseMeta, config: ctx.config, render: dispatchRenderContext(opts) }));
-    if (opts.transport === 'stdio' && opts.remote !== false) { const drain = takeFactsDrainNotice(); if (drain) notices.push(drain); } // Lane D facts drain
-    notices.push(...await sessionSafetyNotices(engine, opts, ctx.config));
-    const out: ToolResult = toolResultWithNotices(result, admitNotices(notices, opts), dispatchRenderContext(opts));
-    if (evidenceBlocks.length > 0) out.content.splice(1, 0, ...evidenceBlocks.map(text => ({ type: 'text' as const, text })));
+    // Monthly backup-coverage: one AGGREGATE model-visible block per process
+    // (counts only — never a local path or source id), riding the same
+    // extra-block mechanism (content[0] untouched, D3/D8 skew rule). The
+    // refresher runs on the stdio transport ONLY — the WP1/D7 locality axis
+    // localOnly ops use; 'http' or an UNSET marker never probes (fail-closed).
+    maybeAttachBackupNotice(out, opts);
     if (opts.transport === 'stdio') {
       maybeRefreshBackupStatusInProcess(engine);
     }
@@ -1010,7 +814,7 @@ export async function dispatchToolCall(
     // failure can never drop the retrieval channel. Per-key merge, never
     // wholesale assignment. See docs/protocol/MCP_META_CHANNELS.md.
     if (Object.keys(responseMeta).length > 0) {
-      out._meta = { ...(out._meta ?? {}), ...responseMeta };
+      out._meta = { ...responseMeta };
     }
     // v0.31 (eD3 + eE4): best-effort _meta.brain_hot_memory injection.
     // The hook is wrapped in its own try/catch — any DB blip / cache miss /
@@ -1029,11 +833,62 @@ export async function dispatchToolCall(
   } catch (e: unknown) {
     logVerb(false);
     if (op.mutating) invalidateHotMemoryForEngine(engine); // a failed write may have committed part of its work
-    // Agent contract v1 (A1): every failure — OperationError, classified DB
-    // access errors, uncaught throws — goes through the one total normaliser,
-    // which redacts raw messages, keeps verbs on their frozen v1 codes, and
-    // never tells a mutating op with an unknown outcome to retry.
-    notices.push(...await sessionSafetyNotices(engine, opts, ctx.config));
-    return errorResult(e, opts, { op: name, mutating: op.mutating === true, idempotent: op.idempotent === true, notices: admitNotices(notices, opts) });
+    if (e instanceof OperationError) {
+      return { content: [{ type: 'text', text: JSON.stringify(e.toJSON(), null, 2) }], isError: true };
+    }
+    // Non-OperationError (uncaught throws) — wrap in the same shape so
+    // every error response is JSON-parseable. The pre-v0.31 path emitted
+    // plain `Error: ${msg}` strings here, which broke any caller that
+    // tried JSON.parse(content).
+    const msg = e instanceof Error ? e.message : String(e);
+    // db-availability loop: raw pg errors used to land here VERBATIM —
+    // unredacted DSNs/hosts/IPs into agent transcripts, no remediation.
+    // Redact ALL branches; classify DB-access failures into an envelope the
+    // bundled skills/db-repair skill literal-matches (GBRAIN_DB_ACCESS).
+    // Both steps are wrapped: a classifier/redactor bug must degrade to the
+    // prior generic shape, never a worse error.
+    let redactedMsg = msg;
+    let dbDiag: PgAccessDiagnosis | null = null;
+    try {
+      redactedMsg = redactUrlsInText(redactConnectionInfo(msg));
+      const d = classifyPgAccessError(e, { url: configuredDbUrlForClassify(), brainId: brainIdForClassify() });
+      if (d.reason !== 'unknown') dbDiag = d;
+    } catch { /* fall through to the generic envelope */ }
+
+    if (dbDiag && dbDiag.reason === 'schema_missing') {
+      // Mid-operation relation/column errors are usually CODE SKEW, not an
+      // access failure (and connectEngine already runs pending migrations on
+      // every connect) — the withRelationGuard treatment, generalized. No
+      // db-repair marker from this layer; connect-time surfaces own that.
+      const suggestion = 'Run gbrain apply-migrations on the brain host, then retry.';
+      const envelope = isVerb
+        ? { error: 'unavailable', message: dbDiag.message, suggestion, detail: 'schema_missing', protocol_version: MEMORY_VERBS_VERSION }
+        : { error: 'unavailable', message: dbDiag.message, suggestion };
+      return { content: [{ type: 'text', text: JSON.stringify(envelope, null, 2) }], isError: true };
+    }
+
+    if (dbDiag) {
+      const suggestion = `${formatDbAccessMarker(dbDiag)}. ${dbDiag.remediation} Run: gbrain db-repair`;
+      // Verbs keep the FROZEN v1 code set ('unavailable' + reason in detail);
+      // non-verb ops get the first real use of the declared 'database_error'.
+      const envelope = isVerb
+        ? { error: 'unavailable', message: dbDiag.message, suggestion, detail: dbDiag.reason, protocol_version: MEMORY_VERBS_VERSION }
+        : { error: 'database_error', message: dbDiag.message, suggestion };
+      return { content: [{ type: 'text', text: JSON.stringify(envelope, null, 2) }], isError: true };
+    }
+
+    // [c7] verbs speak the protocol envelope even for uncaught throws.
+    const envelope = isVerb
+      ? {
+          error: 'internal',
+          message: redactedMsg,
+          suggestion: 'This is a server-side failure, not a caller mistake. Retry once; if it persists, run `gbrain doctor`.',
+          protocol_version: MEMORY_VERBS_VERSION,
+        }
+      : { error: 'internal_error', message: redactedMsg };
+    return {
+      content: [{ type: 'text', text: JSON.stringify(envelope, null, 2) }],
+      isError: true,
+    };
   }
 }

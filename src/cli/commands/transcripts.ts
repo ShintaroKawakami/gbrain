@@ -5,9 +5,8 @@
  * src/cli/command-table.ts.
  */
 import type { BrainEngine } from '../../core/engine.ts';
-import type { CliDispatchContext } from '../command-table.ts';
 
-export async function run(engine: BrainEngine, args: string[], ctx: CliDispatchContext): Promise<void> {
+export async function run(engine: BrainEngine, args: string[]): Promise<void> {
   const { runTranscripts } = await import('../../commands/transcripts.ts');
-  await runTranscripts(engine, args, { makeContext: ctx.makeContext });
+  await runTranscripts(engine, args);
 }

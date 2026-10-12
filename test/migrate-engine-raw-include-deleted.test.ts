@@ -36,7 +36,6 @@ describe('copyPageToTarget — raw_data read opts', () => {
     ];
     const source = {
       getChunksWithEmbeddings: async () => [],
-      executeRaw: async () => [], // #6286: the copier reads the source row's origin and provenance columns
       getTags: async () => [],
       getTimeline: async () => [],
       getRawData: async (slug: string, rawSource: unknown, opts: unknown) => {
@@ -47,7 +46,6 @@ describe('copyPageToTarget — raw_data read opts', () => {
     const target = {
       putPage: async () => fakePage(),
       executeRaw: async () => [],
-      setPageAliases: async () => {}, // #6286: frontmatter aliases travel with the page
       putRawData: async (slug: string, rawSource: string, data: unknown, opts: unknown) => {
         putRawDataCalls.push({ slug, rawSource, data, opts });
       },

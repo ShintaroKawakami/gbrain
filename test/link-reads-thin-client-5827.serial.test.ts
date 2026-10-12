@@ -47,7 +47,7 @@ mock.module('../src/core/mcp-client.ts', () => ({
   },
 }));
 
-const { __testing } = await import('../src/cli/main.ts');
+const { __testing } = await import('../src/cli.ts');
 
 class ExitSignal extends Error {
   constructor(readonly code: number) { super(`process.exit(${code})`); }

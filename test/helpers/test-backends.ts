@@ -9,15 +9,12 @@ export function requirePostgresTestDatabase(env: Record<string, string | undefin
   return env.DATABASE_URL;
 }
 
-/** `postgres` (registerPostgresTests) and the E2E backend matrix passes (scripts/run-e2e.sh: direct and PgBouncer) select the Postgres arm only. */
-const POSTGRES_ONLY_BACKENDS = new Set(['postgres', 'postgres-direct', 'pgbouncer']);
-
 export function testBackends(env: Record<string, string | undefined> = process.env): TestBackend[] {
-  if (env.GBRAIN_TEST_BACKEND !== undefined && POSTGRES_ONLY_BACKENDS.has(env.GBRAIN_TEST_BACKEND)) {
+  if (env.GBRAIN_TEST_BACKEND === 'postgres') {
     requirePostgresTestDatabase(env);
     return ['postgres'];
   }
-  if (env.GBRAIN_TEST_BACKEND !== undefined) throw new Error('Unknown GBRAIN_TEST_BACKEND; expected postgres, postgres-direct, pgbouncer or unset');
+  if (env.GBRAIN_TEST_BACKEND !== undefined) throw new Error('Unknown GBRAIN_TEST_BACKEND; expected postgres or unset');
   return env.DATABASE_URL ? ['pglite', 'postgres'] : ['pglite'];
 }
 

@@ -22,8 +22,6 @@ import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { invalidateBackupStatus } from '../core/backup/status-file.ts';
 import { existsSync } from 'fs';
 import { join } from 'path';
-import { FAILED_EXIT_CODE } from '../core/exit-codes.ts';
-import { opError, type OperationError } from '../core/ops/contract.ts';
 
 interface SourceRow { id: string; local_path: string | null; config: unknown; }
 
@@ -43,14 +41,6 @@ function configHost(config: unknown): string | null {
   return null;
 }
 
-const HARDEN_USAGE = 'gbrain sources harden <id|--all> [--pat-file <p>] [--branch <b>] [--no-cron] [--no-verify] [--dry-run] [--json]';
-
-/** A3/D4: a missing source id is a caller mistake (exit 2): the usage, an example, and where the ids come from. */
-function hardenUsageError(): OperationError {
-  return opError('invalid_params', 'gbrain sources harden needs a source id or --all.',
-    `Usage: ${HARDEN_USAGE}. Example: gbrain sources harden wiki --pat-file ~/.config/gbrain/pat --dry-run (\`gbrain sources list\` shows the ids).`);
-}
-
 async function loadSourceRows(engine: BrainEngine, id: string | undefined, all: boolean): Promise<SourceRow[]> {
   if (all) {
     // #3880: `--all` skips archived sources (v34 legacy fallback, house
@@ -64,7 +54,7 @@ async function loadSourceRows(engine: BrainEngine, id: string | undefined, all: 
       return engine.executeRaw<SourceRow>(`SELECT id, local_path, config FROM sources WHERE local_path IS NOT NULL ORDER BY id`);
     }
   }
-  if (!id) throw hardenUsageError();
+  if (!id) throw new Error('Usage: gbrain sources harden <id|--all> [--pat-file <p>] [--branch <b>] [--no-cron] [--no-verify] [--dry-run] [--json]');
   return engine.executeRaw<SourceRow>(`SELECT id, local_path, config FROM sources WHERE id = $1`, [id]);
 }
 
@@ -74,7 +64,6 @@ export async function runHarden(engine: BrainEngine, args: string[]): Promise<vo
   const all = args.includes('--all');
   const id = all ? undefined : args.find(a => !a.startsWith('--')
     && a !== flagVal(args, '--pat-file') && a !== flagVal(args, '--branch'));
-  if (!all && !id) throw hardenUsageError();
   const json = args.includes('--json');
   const dryRun = args.includes('--dry-run');
   const installCron = !args.includes('--no-cron');
@@ -127,7 +116,7 @@ export async function runHarden(engine: BrainEngine, args: string[]): Promise<vo
   // Non-zero exit if any source needs attention, so cron/automation notices.
   // Route through setCliExitVerdict — a raw process.exitCode write is zeroed by
   // the owned-verdict flush-exit (#2084 / PGLite-Emscripten pollution defense).
-  if (reports.some(r => r.needs_attention.length > 0)) setCliExitVerdict(FAILED_EXIT_CODE);
+  if (reports.some(r => r.needs_attention.length > 0)) setCliExitVerdict(3);
 }
 
 function renderReport(r: DurabilityReport): void {
@@ -178,7 +167,7 @@ export async function runPull(engine: BrainEngine | null, args: string[]): Promi
     case 'skipped_dirty': console.log(`skipped — working tree dirty (${branch})`); break;
     case 'conflict_aborted':
       console.error(`[gbrain] ${outcome.detail}`);
-      process.exit(FAILED_EXIT_CODE);
+      process.exit(3);
   }
 }
 

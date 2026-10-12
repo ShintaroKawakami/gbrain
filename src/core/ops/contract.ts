@@ -6,26 +6,10 @@
  * this entire surface, so existing importers are unchanged.
  */
 
-import type { WriteInference } from './write-inference.ts';
 import type { BrainEngine } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
 import { MEMORY_VERBS_VERSION } from '../verbs.ts';
 import { publicWriteReceipt, type WriteErrorCode, type WriteReceipt } from '../persistence/types.ts';
-// Type-only: this module sits in the PGLite snapshot-schema import closure
-// (via persistence/digest.ts), so it must not pull agent-output's runtime
-// graph (version.ts, the DB classifier) in. agent-output registers the wire
-// renderer below when it loads.
-import type { Action, Notice } from '../agent-output.ts';
-import type { RegistryCode } from '../error-registry.ts';
-import type { WriteAuthority } from '../persistence/model.ts';
-import type { TrustTier } from '../trust/tier.ts';
-import type { StdioSurfaceState } from '../../mcp/surface.ts';
-
-/** Agent contract v1: the wire renderer for `fix`/`notices` in toJSON(), registered by agent-output.ts on load. */
-interface OperationErrorWireRenderer { fix(a: Action): unknown; notice(n: Notice): unknown }
-let wireRenderer: OperationErrorWireRenderer | null = null;
-/** @internal agent-output.ts only. Unregistered (agent-output never loaded) → the stored Action is emitted as-is. */
-export function __registerOperationErrorRenderer(r: OperationErrorWireRenderer): void { wireRenderer = r; }
 
 // --- Types ---
 
@@ -76,32 +60,6 @@ export class OperationError extends Error {
   public protocolVersion?: number;
   public writeRequest?: WriteReceipt;
   public writeError?: WriteErrorCode;
-  /** Agent contract v1 (A1): which cause, when one code covers several. */
-  public reason?: string;
-  /** Agent contract v1: why it happened, for the agent to explain and weigh. */
-  public why?: string;
-  /** Agent contract v1: the one next step. Rendered (`next`, `command`) only at serialization. */
-  public fix?: Action;
-  /** Site-level override of the code's class-derived `retryable` (#6278: `owner_unavailable` / `host_mismatch` is never worth a retry). */
-  public retryable?: boolean;
-  /** Agent contract v1: advice that rides the error (rendered into the envelope's `notices`). */
-  public notices?: Notice[];
-  /** #6188 (D16, D18): a fence refusal's location and its blocking issues; location and class only, never a cell value. */
-  public fence?: Record<string, unknown>;
-  public fenceIssues?: Array<Record<string, unknown>>;
-  /** Set to 1 by opError(); toJSON() emits `contract_version` only when set. */
-  public contractVersion?: 1;
-  /**
-   * Canonical registry code when this site keeps a frozen legacy `error`
-   * value (A1 frozen pairs, e.g. `error: invalid_params`, `code: not_found`).
-   */
-  public canonical?: RegistryCode;
-  /**
-   * Agent contract v1 (B4): the journal row's own fields on a write-receipt
-   * error, never serialized. toAgentError fills the registry's fix template
-   * from them and picks the principal-correct receipt channel.
-   */
-  public receiptFields?: { operation: string; source_id: string; slug: string | null; principal_kind: string; principal_id: string };
 
   constructor(
     public code: ErrorCode,
@@ -113,31 +71,9 @@ export class OperationError extends Error {
     this.name = 'OperationError';
   }
 
-  /**
-   * The canonical registry code (`code` on the wire); `this.code` stays the
-   * frozen `error` value. Registry-wide legacy aliases are applied by
-   * toAgentError / the thin client (canonicalCodeFor), not here.
-   */
-  get canonicalCode(): string {
-    return this.canonical ?? this.code;
-  }
-
-  /**
-   * The explicit escape from opError()'s required suggestion: a refusal whose
-   * next step genuinely cannot be named at the throw site. `reason` is
-   * required so the registry default fix can still be selected.
-   */
-  static bare(code: RegistryCode, message: string, reason: string): OperationError {
-    const e = new OperationError(code, message);
-    e.reason = reason;
-    e.contractVersion = 1;
-    return e;
-  }
-
   toJSON() {
     return {
       error: this.code,
-      code: this.canonicalCode,
       message: this.message,
       suggestion: this.suggestion,
       docs: this.docs,
@@ -145,48 +81,8 @@ export class OperationError extends Error {
       protocol_version: this.protocolVersion,
       ...(this.writeRequest ? { write_request: publicWriteReceipt(this.writeRequest) } : {}),
       ...(this.writeError ? { write_error: this.writeError } : {}),
-      ...(this.reason !== undefined ? { reason: this.reason } : {}),
-      ...(this.why !== undefined ? { why: this.why } : {}),
-      ...(this.fix ? { fix: wireRenderer ? wireRenderer.fix(this.fix) : this.fix } : {}),
-      ...(this.notices?.length ? { notices: this.notices.map(n => wireRenderer ? wireRenderer.notice(n) : n) } : {}),
-      ...(this.fence ? { fence: this.fence } : {}),
-      ...(this.fenceIssues?.length ? { fence_issues: this.fenceIssues } : {}),
-      ...(this.contractVersion !== undefined ? { contract_version: this.contractVersion } : {}),
     };
   }
-}
-
-export interface OpErrorOpts {
-  reason?: string;
-  why?: string;
-  fix?: Action;
-  docs?: string;
-  detail?: string;
-  /** Overrides the class-derived `retryable` on the envelope for this site. */
-  retryable?: boolean;
-  /**
-   * The frozen v1 `error` wire value when this site historically threw a
-   * different code (A1 frozen pairs). `error` keeps this value; `code` is the
-   * canonical registry code passed to opError().
-   */
-  legacy_error?: string;
-}
-
-/**
- * Agent contract v1 error constructor (mirrors verbError): `suggestion` is
- * positional and required. Use `OperationError.bare()` only when no next step
- * can be named at the throw site.
- */
-export function opError(code: RegistryCode, message: string, suggestion: string, opts: OpErrorOpts = {}): OperationError {
-  const e = new OperationError(opts.legacy_error ?? code, message, suggestion, opts.docs);
-  if (opts.legacy_error !== undefined) e.canonical = code;
-  if (opts.reason !== undefined) e.reason = opts.reason;
-  if (opts.why !== undefined) e.why = opts.why;
-  if (opts.fix !== undefined) e.fix = opts.fix;
-  if (opts.detail !== undefined) e.detail = opts.detail;
-  if (opts.retryable !== undefined) e.retryable = opts.retryable;
-  e.contractVersion = 1;
-  return e;
 }
 
 /**
@@ -203,14 +99,10 @@ export async function withRelationGuard<T>(fn: () => Promise<T>, what: string): 
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (/relation .* does not exist|no such table/i.test(msg)) {
-      // The cause is not knowable here (pending migrations, or a dropped table), so the fix is the
-      // registry's diagnostic read (doctor on the brain host); the prose names no other command and the
-      // envelope appends the rendered fix, so suggestion and fix always agree.
-      throw opError(
+      throw new OperationError(
         'unavailable',
         `${what} is unavailable on this brain: a required table is missing.`,
-        'The brain is missing a table this gbrain expects (usually pending schema migrations). Doctor on the brain host reports what is missing and the command that repairs it.',
-        { reason: 'schema_missing' },
+        'Run gbrain apply-migrations on the brain host, then retry.',
       );
     }
     throw err;
@@ -243,8 +135,6 @@ export interface ParamDef {
   items?: ParamDef;
   /** Object members (O-DX-3); a member with `required: true` lands in the schema's `required`. */
   properties?: Record<string, ParamDef>;
-  /** Advertised on the full MCP surface only (keeps the starter tool list inside its size budget). */
-  fullSurfaceOnly?: boolean;
 }
 
 export interface Logger {
@@ -281,8 +171,6 @@ export interface AuthInfo {
   grantRevision?: number;
   grantProfile?: string | null;
   grantRepairReasons?: string[];
-  /** The client's stored access-token lifetime override (`oauth_clients.token_ttl`); null = server default. */
-  tokenTtlSeconds?: number | null;
   delegatedSlugPrefixes?: string[] | null;
   /** Missing grant projection on a profile client is fail-closed. */
   grantProjectionDegraded?: boolean;
@@ -378,14 +266,6 @@ export interface AuthInfo {
    * projection degraded, or the brain predates migration v127.
    */
   surface?: string;
-  /**
-   * #5575 (CEO-18): the token's read floor (`oauth_clients.min_trust` /
-   * `access_tokens.min_trust`), set only by the local CLI (`gbrain auth create
-   * --min-trust`, `gbrain auth set-min-trust`). Every read op applies
-   * max(this floor, the caller's `min_trust` param), so a client can raise it
-   * but never lower it. Undefined = no floor (or a brain before the column).
-   */
-  minTrust?: TrustTier;
   /** Current transport ceiling applied to this authenticated request. */
   effectiveSurface?: 'verbs' | 'starter' | 'full';
   /**
@@ -455,13 +335,6 @@ export interface OperationContext {
    */
   emitResponseMeta?: (key: string, value: unknown) => void;
   /**
-   * Agent contract v1 (A6): model-visible advice. MCP dispatch renders each
-   * notice as a prefixed extra text block plus `_meta.gbrain_notices` on
-   * success, and into the error envelope's `notices` key on failure. Unset
-   * on callers that have no notice channel; producers call it optionally.
-   */
-  emitNotice?: (n: Notice) => void;
-  /**
    * WP4 (D2): the SERVER surface ceiling for this transport (force-clamped),
    * threaded by the MCP dispatch layer. Consumed by `request_tools`: the
    * catalog never names ops above the ceiling, and the persist branch
@@ -470,14 +343,6 @@ export interface OperationContext {
    * treated as 'full'.
    */
   surfaceCeiling?: 'verbs' | 'starter' | 'full';
-  /** The stdio session's surface (stdio MCP only): `request_tools` widens it for this session, `whoami` reports it. */
-  stdioSurface?: StdioSurfaceState;
-  /**
-   * Set by transports that can widen a session's listed tools (stdio): when
-   * `request_tools` returns schemas, the named tools join this session's
-   * tools/list and the client is notified (tools/list_changed).
-   */
-  revealTools?: (names: string[]) => void;
   /**
    * Subagent runtime context (v0.16+). Set by the subagent tool dispatcher when
    * dispatching an op as a tool call from an LLM loop. Used to enforce per-op
@@ -507,17 +372,6 @@ export interface OperationContext {
    * v0.15 behavior; pure addition, no regression).
    */
   allowedSlugPrefixes?: string[];
-  /**
-   * #5994: the stored authority of a failed write that `gbrain repair
-   * failed-writes` replays. Set only by that trusted local repair lane; no
-   * transport, dispatcher or job hydrates it. Admission reuses it as the
-   * write's authority ceiling (principal, delegation, source incarnation,
-   * autoLinkTrusted), re-authorized against the live grant, instead of
-   * deriving local authority from the replay context. The subagent fence
-   * accepts a missing `subagentId` only with this marker and a non-empty
-   * allow-list equal to the stored delegated prefixes.
-   */
-  replayAuthority?: WriteAuthority;
   /**
    * #4216 — defer chunk embeddings on put_page writes: importFromContent runs
    * noEmbed and the standing embed machinery (embed phase / phase-end
@@ -698,18 +552,6 @@ export interface Operation {
   outputRedaction: OutputRedactionPolicy;
   mutating?: boolean;
   /**
-   * What model work this write may do and when (`src/core/ops/write-inference.ts`).
-   * Unset resolves through OP_WRITE_INFERENCE, then to `'none'`.
-   */
-  writeInference?: WriteInference;
-  /**
-   * Agent contract v1 (A2): repeating the call with the same arguments (and,
-   * for journaled writes, the same request identity) has the same effect as
-   * calling it once. Drives `idempotentHint` and whether an unknown-outcome
-   * failure may say `retryable: true`.
-   */
-  idempotent?: boolean;
-  /**
    * Capability scope required to invoke this op over an authenticated
    * transport. v0.28 added `sources_admin` (manage federated sources) and
    * `users_admin` (reserved). The hierarchy lives in src/core/scope.ts —
@@ -724,13 +566,6 @@ export interface Operation {
   scope?: 'read' | 'write' | 'admin' | 'sources_admin' | 'users_admin' | 'agent';
   requiredScopes?: readonly string[];
   localOnly?: boolean;
-  /**
-   * Agent contract v1 (F5): the handler refuses every agent-facing caller,
-   * stdio included; only the trusted local CLI runs it. `isCallable` never
-   * lists it on MCP, and a call returns `cli_only` whose fix is this exact
-   * command (`<name>` tokens are inputs the agent fills from its call).
-   */
-  cliOnly?: { argv: readonly string[] };
   /**
    * WP1 honest catalog: the op is callable by remote callers only when this
    * config gate resolves true (dual-plane, DB > file > absent=false). Network
@@ -755,8 +590,8 @@ export interface Operation {
    * ARE NON-CONTRACTUAL: they exist so an agent can scan ~20 groups instead
    * of ~100 flat names; renaming/regrouping is never a breaking change.
    * Required (by the CI walker in test/mcp-tool-defs.test.ts) on every
-   * non-localOnly op; populated centrally via OP_AREAS in
-   * src/core/operation-load.ts.
+   * non-localOnly op; populated centrally via OP_AREAS at the bottom of
+   * this file.
    */
   area?: string;
   /**
@@ -790,22 +625,4 @@ export interface Operation {
     stdin?: string;
     hidden?: boolean;
   };
-}
-
-/**
- * Everything about an operation except its handler: the data tools/list,
- * surface filtering, publish gates and CLI arg parsing read. Checked in as
- * src/core/operation-manifest.generated.ts so `gbrain serve` and the CLI
- * dispatcher can answer without loading every handler module.
- */
-export type OperationMeta = Omit<Operation, 'handler'>;
-
-/**
- * An op that declares its own `source` param (timeline-add, ontology-add,
- * takes add/update/supersede, raw data) takes `--source` as that param, e.g.
- * provenance. Every CLI route (direct, delegated to a resident serve, thin
- * client) then leaves it out of source scoping and passes it to the handler.
- */
-export function opOwnsSource(op: Pick<Operation, 'params'>): boolean {
-  return 'source' in op.params;
 }

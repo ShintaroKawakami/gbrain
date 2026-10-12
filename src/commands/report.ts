@@ -10,9 +10,8 @@
  *   gbrain report --type enrichment-sweep --dir /path/to/brain
  */
 
-import { writeFileSync, mkdirSync } from 'fs';
+import { writeFileSync, mkdirSync, readFileSync } from 'fs';
 import { join } from 'path';
-import { readStdinPayload } from '../core/stdin-read.ts';
 
 export async function runReport(args: string[]) {
   const typeIdx = args.indexOf('--type');
@@ -42,13 +41,7 @@ export async function runReport(args: string[]) {
   // Read content from --content arg or stdin
   let content = contentIdx >= 0 ? args[contentIdx + 1] : null;
   if (!content && !process.stdin.isTTY) {
-    // Async, bounded read: SIGTERM still works and an open-but-silent pipe times out (C5).
-    const read = await readStdinPayload('echo "report body" | gbrain report --type <name>');
-    if (!read.ok) {
-      console.error(`gbrain report: ${read.message}`);
-      process.exit(1);
-    }
-    content = read.text;
+    content = readFileSync('/dev/stdin', 'utf-8');
   }
 
   if (!content?.trim()) {

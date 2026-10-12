@@ -26,7 +26,6 @@ import {
   buildAdvisory,
   detectInstalledSlugs,
   printAdvisoryIfRecommended,
-  initSkillsScaffold,
 } from '../src/core/skillpack/post-install-advisory.ts';
 import { currentRecommendedSet } from '../src/core/advisor/recommended-set.ts';
 
@@ -232,7 +231,7 @@ describe('buildAdvisory — agent-readable framing', () => {
   });
 });
 
-describe('initSkillsScaffold — init\'s optional skills_scaffold decision; upgrade keeps the full banner', () => {
+describe('printAdvisoryIfRecommended — compact init pointer vs full upgrade banner', () => {
   function captureStderr(fn: () => void): string {
     const orig = process.stderr.write;
     let out = '';
@@ -248,25 +247,40 @@ describe('initSkillsScaffold — init\'s optional skills_scaffold decision; upgr
     return out;
   }
 
-  it('all skills missing → every slug and the --all scaffold argv', () => {
+  it('context init with all skills missing prints the compact human-voiced pointer', () => {
     const { workspace, skillsDir } = scratchWorkspace([]);
-    const scaffold = initSkillsScaffold({ targetWorkspace: workspace, targetSkillsDir: skillsDir })!;
-    expect(scaffold.missing).toEqual(currentRecommendedSet().map((s) => s.slug));
-    expect(scaffold.argv).toEqual(['gbrain', 'skillpack', 'scaffold', '--all']);
+    const out = captureStderr(() =>
+      printAdvisoryIfRecommended({
+        version: '0.25.1',
+        context: 'init',
+        targetWorkspace: workspace,
+        targetSkillsDir: skillsDir,
+      }),
+    );
+    const names = currentRecommendedSet().map((s) => s.slug);
+    expect(out).toContain('recommended skill(s) not installed yet');
+    // Preview truncates at 4 slugs + ellipsis; the 5th slug never appears
+    // (the scaffold command is --all when everything is missing).
+    expect(out).toContain(`(${names.slice(0, 4).join(', ')}, …)`);
+    expect(out).not.toContain(names[4]);
+    expect(out).toContain('gbrain advisor');
+    // The compact init pointer is human-voiced — no agent stage directions.
+    expect(out).not.toContain('ACTION FOR THE AGENT');
+    expect(out).not.toContain('[AGENT]');
   });
 
-  it('some skills installed → only the missing slugs, named in the argv', () => {
-    const all = currentRecommendedSet().map((s) => s.slug);
-    const { workspace, skillsDir } = scratchWorkspace(all.slice(1));
-    const scaffold = initSkillsScaffold({ targetWorkspace: workspace, targetSkillsDir: skillsDir })!;
-    expect(scaffold.missing).toEqual([all[0]]);
-    expect(scaffold.argv).toEqual(['gbrain', 'skillpack', 'scaffold', all[0]]);
-  });
-
-  it('everything installed → null (no decision)', () => {
+  it('context init with everything installed prints NOTHING', () => {
     const allSlugs = currentRecommendedSet().map((s) => s.slug);
     const { workspace, skillsDir } = scratchWorkspace(allSlugs);
-    expect(initSkillsScaffold({ targetWorkspace: workspace, targetSkillsDir: skillsDir })).toBeNull();
+    const out = captureStderr(() =>
+      printAdvisoryIfRecommended({
+        version: '0.25.1',
+        context: 'init',
+        targetWorkspace: workspace,
+        targetSkillsDir: skillsDir,
+      }),
+    );
+    expect(out).toBe('');
   });
 
   it('context upgrade with missing skills keeps the full agent-addressed banner', () => {

@@ -1,5 +1,4 @@
 /** `performSync`: the library entrypoint (dispatch, filesystem lock, writer lock). */
-import { serr } from '../../core/console-prefix.ts';
 import {
   assertSyncDispatchActive,
   resolveSyncPersistenceMode,
@@ -17,7 +16,6 @@ import { refreshProjectionStatistics } from '../../core/search/projection-statis
 import { withRefreshingLock, LockUnavailableError, LockStolenError, syncLockId } from '../../core/db-lock.ts';
 import { readSyncAnchor } from '../../core/sync-anchor.ts';
 import { recordUpstreamObservation } from '../../core/sync-upstream.ts';
-import { assertSyncApplicable } from '../../core/sync-applicability.ts';
 import { SyncLockBusyError, formatLockBusyMessage, buildPartialResult } from '../../core/sync-lock.ts';
 import type { SyncOpts, SyncResult } from '../sync.ts';
 import { runConnectorSync } from './connector.ts';
@@ -27,12 +25,11 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
   assertSyncDispatchActive();
   const inheritedSignal = currentSourceFilesystemSignal();
   if (inheritedSignal) opts = { ...opts, signal: opts.signal ? AbortSignal.any([opts.signal, inheritedSignal]) : inheritedSignal };
-  await assertSyncApplicable(engine, opts);
   const managed = await resolveSyncPersistenceMode(engine, opts);
   const finish = async (result: SyncResult, refresh = false): Promise<SyncResult> => {
     assertSyncDispatchActive();
     if (refresh && (result.pagesAffected.length > 0 || result.deleted > 0)) {
-      await refreshProjectionStatistics(engine, result.pagesAffected.length + result.deleted);
+      await refreshProjectionStatistics(engine);
     }
     if (refresh && !opts.dryRun) await recordUpstreamObservation(engine, opts.sourceId ?? 'default', opts.repoPath);
     return result;
@@ -58,23 +55,8 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
   }
   if (opts.signal?.aborted) return finish(await interruptedBeforeWork());
   if (managed) {
-    let result = opts.drain
-      ? await (await import('../../core/persistence/sync-drain.ts')).drainManagedSync(engine, opts, true)
-      : await (await import('../../core/persistence/sync-run.ts')).performManagedSync(engine, opts);
-    // #6349: a delta past the cursor bound syncs in stages; a drain takes the next stage from where the last one landed
-    // until it reaches HEAD (each stage freezes its own bounded manifest, and a stop resumes at the stored cursor).
-    while (opts.drain && result.staged && result.drain?.outcome === 'synced' && !opts.dryRun && !opts.signal?.aborted) {
-      serr(`[sync] staged catch-up: synced to ${result.staged.target.slice(0, 12)}, short of HEAD ${result.staged.head.slice(0, 12)} (the delta exceeds the cursor bound); taking the next stage.`);
-      const next = await (await import('../../core/persistence/sync-drain.ts')).drainManagedSync(engine, opts, true);
-      const stages = (result.staged.stages ?? 1) + 1, d = result.drain, n = next.drain;
-      result = { ...next, fromCommit: result.fromCommit, added: result.added + next.added, modified: result.modified + next.modified, deleted: result.deleted + next.deleted,
-        renamed: result.renamed + next.renamed, chunksCreated: result.chunksCreated + next.chunksCreated,
-        ...(next.staged ? { staged: { ...next.staged, stages } } : {}),
-        ...(n ? { drain: { ...n, passes: d.passes + n.passes, processed: d.processed + n.processed, written: d.written + n.written, waived: d.waived + n.waived } } : {}) };
-      if (!next.staged) serr(`[sync] staged catch-up reached HEAD after ${stages} stages.`);
-    }
+    const result = await (await import('../../core/persistence/sync-run.ts')).performManagedSync(engine, opts);
     if (!opts.dryRun) await recordUpstreamObservation(engine, opts.sourceId ?? 'default', opts.repoPath);
-    if (!opts.dryRun && ['synced', 'first_sync', 'up_to_date'].includes(result.status)) await clearSettledFailures(engine, opts.sourceId ?? 'default');
     return result;
   }
   const filesystemRoot = opts.repoPath || await readSyncAnchor(engine, opts.sourceId, 'repo_path');
@@ -117,13 +99,4 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
     }
     throw err;
   }
-}
-
-/** #6288: a successful managed sync clears this source's recorded failures its imported commit already settles; best effort. */
-async function clearSettledFailures(engine: BrainEngine, sourceId: string): Promise<void> {
-  try {
-    const { clearSettledManagedSyncFailures, readManagedSyncImported } = await import('../../core/persistence/sync-failures.ts');
-    const imported = await readManagedSyncImported(engine, sourceId);
-    if (imported) await clearSettledManagedSyncFailures(engine, imported);
-  } catch { }
 }

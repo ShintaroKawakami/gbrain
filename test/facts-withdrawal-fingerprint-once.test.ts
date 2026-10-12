@@ -65,9 +65,7 @@ for (const backend of testBackends()) {
         `| # | claim | kind | confidence | visibility | notability | valid_from | valid_until | source | context |\n` +
         `|---|-------|------|------------|------------|------------|------------|-------------|--------|---------|\n` +
         `| 1 | Prefers email | preference | 1.0 | ${visibility} | medium | 2026-01-01 |  | chat |  |\n`;
-      // #6188 (E6): the wire code stays invalid_params; the canonical code is the typed fence refusal.
-      await expect(assertPreparedFactWithdrawals(engine, 'default', unbalanced('world'), '', SUBJECT)).rejects.toMatchObject({ code: 'invalid_params', canonical: 'invalid_fence',
-        reason: 'withdrawn_claim_in_malformed_fence' });
+      await expect(assertPreparedFactWithdrawals(engine, 'default', unbalanced('world'), '', SUBJECT)).rejects.toMatchObject({ code: 'invalid_params' });
       await expect(assertPreparedFactWithdrawals(engine, 'default', unbalanced('private'), '', SUBJECT)).resolves.toBeUndefined();
       await expect(assertPreparedFactWithdrawals(engine, 'default', unbalanced('world'), '', 'people/bob-example')).resolves.toBeUndefined();
     } finally { await close(); }

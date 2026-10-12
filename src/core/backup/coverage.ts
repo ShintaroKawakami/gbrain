@@ -37,7 +37,6 @@ import {
   saveBackupStatus,
   currentBackupEvidence,
   isVerifiedRecoverable,
-  assetBlocksRecovery,
   BACKUP_VERIFICATION_MAX_AGE_MS,
   BACKUP_RECOVERY_SCOPE,
   type BackupAssetVerdict,
@@ -103,23 +102,6 @@ function yieldLoop(): Promise<void> {
 }
 
 /** null = the count could not be established (engine down / schema quirk). */
-/** E7: live pages + active facts, and the brain's first source/page timestamp. Null when unreadable. */
-async function brainMaturity(engine: BrainEngine): Promise<BackupStatus['maturity'] | undefined> {
-  try {
-    const [row] = await engine.executeRaw<{ pages: number; facts: number; since: string | Date | null }>(
-      `SELECT (SELECT COUNT(*)::int FROM pages WHERE deleted_at IS NULL) AS pages,
-              (SELECT COUNT(*)::int FROM facts WHERE expired_at IS NULL) AS facts,
-              LEAST((SELECT MIN(created_at) FROM sources), (SELECT MIN(created_at) FROM pages)) AS since`,
-    );
-    const items = Number(row?.pages) + Number(row?.facts);
-    if (!row || !Number.isFinite(items)) return undefined;
-    const sinceMs = row.since ? new Date(row.since).getTime() : NaN;
-    return { items, since: Number.isFinite(sinceMs) ? new Date(sinceMs).toISOString() : null };
-  } catch {
-    return undefined;
-  }
-}
-
 async function countLivePages(engine: BrainEngine): Promise<number | null> {
   try {
     const rows = await engine.executeRaw<{ n: number }>(
@@ -390,7 +372,6 @@ export async function computeBackupCoverage(
     recoverable_repos: assets.filter(isVerifiedRecoverable).length,
     pages_at_risk: pagesAtRisk,
   };
-  const maturity = assets.some(assetBlocksRecovery) ? await brainMaturity(engine) : undefined;
 
   return currentBackupEvidence({
     schema_version: BACKUP_STATUS_SCHEMA_VERSION,
@@ -404,7 +385,6 @@ export async function computeBackupCoverage(
     ...(degraded ? { degraded: true } : {}),
     ...(remoteBudget ? { remote_check_at: now.toISOString() } : {}),
     recovery_scope: BACKUP_RECOVERY_SCOPE,
-    ...(maturity ? { maturity } : {}),
   }, now.getTime());
 }
 

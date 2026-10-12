@@ -21,8 +21,6 @@ import { resolveHardExcludes, DEFAULT_HARD_EXCLUDES } from '../../../core/search
 import { escapeLikePattern, buildVisibilityClause } from '../../../core/search/sql-ranking.ts';
 import { safeChunksFilter } from '../../../core/search/safe-chunks.ts';
 import type { Check } from '../../doctor.ts';
-import { checkError, doctorVerify } from '../check-fix.ts';
-import { pricingSetArgv } from '../../../core/budget/no-pricing.ts';
 
 // --- v0.36.1.0 calibration doctor checks (T12) ---
 
@@ -130,7 +128,11 @@ export async function checkContextualRetrievalCoverage(
       details,
     };
   } catch (e) {
-    return checkError('contextual_retrieval_coverage', 'check contextual retrieval coverage', e);
+    return {
+      name: 'contextual_retrieval_coverage',
+      status: 'warn',
+      message: `Could not check contextual retrieval coverage: ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
 }
 
@@ -216,7 +218,11 @@ export async function checkHiddenBySearchPolicy(engine: BrainEngine): Promise<Ch
       details: { prefixes, counts },
     };
   } catch (e) {
-    return checkError(name, 'check hidden-by-search-policy', e);
+    return {
+      name,
+      status: 'warn',
+      message: `Could not check hidden-by-search-policy: ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
 }
 
@@ -361,7 +367,11 @@ export async function checkAbandonedThreads(engine: BrainEngine): Promise<Check>
       message: `${count} high-conviction take(s) older than 12 months and never revisited — see \`gbrain calibration\` for details`,
     };
   } catch (e) {
-    return checkError('abandoned_threads', 'check abandoned threads', e);
+    return {
+      name: 'abandoned_threads',
+      status: 'warn',
+      message: `Could not check abandoned threads: ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
 }
 
@@ -405,7 +415,11 @@ export async function checkCalibrationFreshness(engine: BrainEngine): Promise<Ch
       message: `Calibration profile generated ${ageDays}d ago`,
     };
   } catch (e) {
-    return checkError('calibration_freshness', 'check calibration freshness', e);
+    return {
+      name: 'calibration_freshness',
+      status: 'warn',
+      message: `Could not check calibration freshness: ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
 }
 
@@ -445,7 +459,11 @@ export async function checkGradeConfidenceDrift(engine: BrainEngine): Promise<Ch
       message: `${applied} auto-applied verdicts; drift math arrives in v0.37+`,
     };
   } catch (e) {
-    return checkError('grade_confidence_drift', 'check grade confidence drift', e);
+    return {
+      name: 'grade_confidence_drift',
+      status: 'warn',
+      message: `Could not check grade confidence drift: ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
 }
 
@@ -548,8 +566,7 @@ export async function checkVoiceGateHealth(engine: BrainEngine): Promise<Check> 
       return {
         name: 'voice_gate_health',
         status: 'warn',
-        message: `Voice gate failed ${failures}/${total} (${Math.round(failRate * 100)}%) in last 7 days: the calibration voice gate rejects most generated profiles. That is a gbrain quality issue, not something to change locally; report it with \`gbrain doctor --json\` output.`,
-        fix_unavailable_reason: 'operator_judgement',
+        message: `Voice gate failed ${failures}/${total} (${Math.round(failRate * 100)}%) in last 7 days. Review src/core/calibration/voice-gate.ts rubric.`,
       };
     }
     return {
@@ -558,7 +575,11 @@ export async function checkVoiceGateHealth(engine: BrainEngine): Promise<Check> 
       message: `Voice gate ${failures}/${total} failed in last 7 days (${Math.round(failRate * 100)}%)`,
     };
   } catch (e) {
-    return checkError('voice_gate_health', 'check voice gate health', e);
+    return {
+      name: 'voice_gate_health',
+      status: 'warn',
+      message: `Could not check voice gate health: ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
 }
 
@@ -669,27 +690,7 @@ export async function checkRerankerHealth(engine: BrainEngine, now: Date = new D
       return {
         name: 'reranker_health',
         status: 'warn',
-        message: `${budgetFails.length} reranker budget/pricing failure(s) in last 7 days: ${model} has no registered price, so capped searches skip reranking. Register its per-token rate (look it up on the provider's pricing page) or drop --max-cost.`,
-        fix: {
-          argv: pricingSetArgv(model, 'rerank'), consent: [], actor: 'agent', requires_exclusive: false,
-          why: `Registers ${model}'s price so spend caps can account for reranking.`,
-          inputs: [
-            { name: 'usd-per-1M-tokens', how: `Look up ${model}'s price per 1M tokens on the provider's pricing page (for example by web search).` },
-            { name: 'pricing-page-url', how: 'The URL you read the price from.' },
-          ],
-          verify: doctorVerify('reranker_health'),
-        },
-      };
-    }
-
-    // Cat 40 R0: no HTTP response at all is a configuration or network fault
-    // (a stale base URL fails every call), not a provider outage.
-    const unreachableFails = failures.filter((f) => f.reason === 'unreachable');
-    if (unreachableFails.length >= 3) {
-      return {
-        name: 'reranker_health',
-        status: 'warn',
-        message: `${unreachableFails.length} reranker call(s) in the last 7 days could not reach the ${model} endpoint (connection refused, DNS or network error), so those searches kept their fused order. Fix: check the reranker base URL (\`provider_base_urls.${model.split(':')[0]}\` in the gbrain config, or the provider default) and that the brain host can reach it, then run \`gbrain models doctor\`.`,
+        message: `${budgetFails.length} reranker budget/pricing failure(s) in last 7 days. Fix: add rerank pricing to src/core/embedding-pricing.ts or drop --max-cost.`,
       };
     }
 
@@ -747,6 +748,10 @@ export async function checkRerankerHealth(engine: BrainEngine, now: Date = new D
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return checkError('reranker_health', 'check reranker audit', msg);
+    return {
+      name: 'reranker_health',
+      status: 'warn',
+      message: `Could not check reranker audit: ${msg}`,
+    };
   }
 }

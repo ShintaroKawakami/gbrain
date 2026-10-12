@@ -37,7 +37,6 @@ import {
   removeHarnessBridge,
   verifySlugsServable,
   assertDestNotSymlink,
-  ownedBridgeSlugs,
   type BridgeHarness,
 } from '../../core/skillpack/harness-bridge.ts';
 import {
@@ -510,8 +509,7 @@ export async function cmdScaffoldHarness(args: string[]): Promise<void> {
           `prefer one lane per machine.`,
       );
       if (!a.dryRun && result.summary.wroteNew > 0) {
-        const target = `${a.dest ? ` --dest ${a.dest}` : ''}${a.scope === 'project' ? ' --scope project' : ''}${a.workspace ? ` --workspace ${a.workspace}` : ''}`;
-        console.log(`\nUpdate lens: gbrain skillpack reference --harness ${a.harness}${target} | remove: gbrain skillpack remove --harness ${a.harness}${target}`);
+        console.log(`\nUpdate lens: gbrain skillpack reference --harness ${a.harness} | remove: gbrain skillpack remove --harness ${a.harness}`);
       }
     }
     process.exit(0);
@@ -554,8 +552,8 @@ export async function cmdReferenceHarness(args: string[]): Promise<void> {
       ? [positional]
       : a.skills.length > 0
         ? a.skills
-        : ownedBridgeSlugs(entry).length > 0
-          ? ownedBridgeSlugs(entry)
+        : entry && Object.keys(entry.written).length > 0
+          ? Object.keys(entry.written).sort()
           : resolveSlugs(gbrainRoot, a).slugs;
 
     if (a.applyCleanHunks) {
@@ -706,7 +704,9 @@ export function collectBridgesStatus(gbrainRoot: string): BridgesStatusEntry[] {
   const state = loadBridgeState();
   const out: BridgesStatusEntry[] = [];
   for (const entry of state.entries) {
-    const slugs = ownedBridgeSlugs(entry);
+    const slugs = Object.keys(entry.written)
+      .filter(s => s !== '_shared')
+      .sort();
     let identical = 0;
     let differs = 0;
     let missing = 0;

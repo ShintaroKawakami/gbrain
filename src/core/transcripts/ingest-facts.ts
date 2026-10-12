@@ -27,7 +27,6 @@ import {
 
 export interface IngestFactsResult {
   pages: number;
-  pagesFailed: number;
   spentUsd?: number;
   skippedDisabled?: boolean;
 }
@@ -43,7 +42,7 @@ export async function runIngestFacts(
           '(facts.extraction_enabled=false) — pages imported, facts skipped',
       );
     }
-    return { pages: 0, pagesFailed: 0, skippedDisabled: true };
+    return { pages: 0, skippedDisabled: true };
   }
 
   const pricingOverrides = await loadPricingOverrides(engine);
@@ -52,12 +51,12 @@ export async function runIngestFacts(
     label: 'transcripts-ingest-facts',
     pricingOverrides,
   });
-  const result = await withBudgetTracker(tracker, () =>
+  await withBudgetTracker(tracker, () =>
     runExtractConversationFactsCore(engine, {
       sourceId: opts.sourceId,
       slugs: opts.slugs,
       budgetTracker: tracker,
     }),
   );
-  return { pages: opts.slugs.length, pagesFailed: result.pages_failed, spentUsd: tracker.totalSpent };
+  return { pages: opts.slugs.length, spentUsd: tracker.totalSpent };
 }

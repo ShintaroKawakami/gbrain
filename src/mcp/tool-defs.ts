@@ -1,4 +1,4 @@
-import type { OperationMeta, ParamDef } from '../core/ops/contract.ts';
+import type { Operation, ParamDef } from '../core/operations.ts';
 
 export interface McpToolDef {
   name: string;
@@ -65,7 +65,7 @@ export function paramDefToSchema(p: ParamDef): Record<string, unknown> {
  * the server. Declared only when the op doesn't already declare them
  * (several ops carry a real `dry_run` param).
  */
-function strictPassthroughProperties(op: OperationMeta): Record<string, unknown> {
+function strictPassthroughProperties(op: Operation): Record<string, unknown> {
   return {
     ...('_meta' in op.params ? {} : {
       _meta: {
@@ -78,19 +78,18 @@ function strictPassthroughProperties(op: OperationMeta): Record<string, unknown>
 }
 
 /**
- * #5037 / agent contract A2: annotation-driven hosts need to tell reads from
- * writes. An op's curated `annotations` win as written. Otherwise derive only
- * what the op's required metadata states (every op declares `mutating` and
- * `idempotent`; test/ops-mutation-tags.test.ts): `readOnlyHint: true` iff
- * `mutating === false`; `readOnlyHint: false` iff `mutating === true`, plus
- * `idempotentHint: true` when the write is also `idempotent`.
- * `destructiveHint` and `openWorldHint` keep the MCP defaults (no metadata
- * separates additive from destructive writes yet).
+ * #5037: annotation-driven hosts need to tell reads from writes. An op's
+ * curated `annotations` win as written. Otherwise derive only what existing
+ * metadata states: `readOnlyHint: true` for a read-scope op explicitly
+ * tagged `mutating: false`, `readOnlyHint: false` for an op tagged
+ * `mutating: true` (its destructiveHint keeps the MCP default, true: no
+ * metadata separates additive from destructive writes). An untagged op
+ * stays unannotated.
  */
-export function toolAnnotations(op: OperationMeta): McpToolDef['annotations'] | undefined {
+export function toolAnnotations(op: Operation): McpToolDef['annotations'] | undefined {
   if (op.annotations) return op.annotations;
-  if (op.mutating === false) return { readOnlyHint: true };
-  if (op.mutating === true) return op.idempotent === true ? { readOnlyHint: false, idempotentHint: true } : { readOnlyHint: false };
+  if (op.mutating === true) return { readOnlyHint: false };
+  if (op.mutating === false && op.scope === 'read') return { readOnlyHint: true };
   return undefined;
 }
 
@@ -104,7 +103,7 @@ export function toolAnnotations(op: OperationMeta): McpToolDef['annotations'] | 
  * the schema with `additionalProperties: false`, keeping client-side
  * validation aligned with the server's reject posture.
  */
-export function buildToolDefs(ops: OperationMeta[], opts?: { strictParams?: boolean }): McpToolDef[] {
+export function buildToolDefs(ops: Operation[], opts?: { strictParams?: boolean }): McpToolDef[] {
   const strict = opts?.strictParams === true;
   return ops.map(op => {
     const annotations = toolAnnotations(op);

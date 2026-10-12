@@ -5,8 +5,7 @@
  * scope param, and the ambient-narrowing hint for empty thin-client reads.
  */
 import type { Operation } from '../core/operations.ts';
-import { opOwnsSource } from '../core/ops/contract.ts';
-import { ignoredRemoteParams } from '../core/remote-mcp-error.ts';
+import { ignoredRemoteParams } from '../core/mcp-client.ts';
 
 /** Where an ambient (not flag-supplied) thin-client source scope came from. */
 export type AmbientSourceBinding = { sourceId: string; via: 'GBRAIN_SOURCE' | '.gbrain-source' };
@@ -17,7 +16,7 @@ export type AmbientSourceBinding = { sourceId: string; via: 'GBRAIN_SOURCE' | '.
  * Ops that own a `source` param are exempt: their --source is not scope.
  */
 export function assertSingleSourceScopeFlag(op: Operation, params: Record<string, unknown>): void {
-  if (opOwnsSource(op)) return;
+  if ('source' in op.params) return;
   const explicit = typeof params.source === 'string' && params.source.length > 0;
   if (explicit && (params.source_id !== undefined || params.all_sources === true)) {
     throw new Error('Pass either --source or --source-id/--all-sources, not both.');

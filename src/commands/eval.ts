@@ -114,9 +114,7 @@ export async function runEvalCommand(engine: BrainEngine, args: string[]): Promi
   // v0.32.3 search-lite — per-mode orchestrator + comparison report.
   if (sub === 'run-all') {
     const { runEvalRunAll } = await import('./eval-run-all.ts');
-    const { setCliExitVerdict } = await import('../core/cli-force-exit.ts');
-    setCliExitVerdict(await runEvalRunAll(engine, args.slice(1)));
-    return;
+    return runEvalRunAll(engine, args.slice(1));
   }
   if (sub === 'compare') {
     const { runEvalCompare } = await import('./eval-compare.ts');
@@ -424,7 +422,7 @@ SUBCOMMANDS (#3686 — each has its own flag surface)
   retrieval-quality          Retrieval-quality suite over the calibration corpus
   gate                       CI pass/fail gate over a saved baseline
   compare                    Compare two saved eval runs
-  run-all                    Run the wired suites (brainbench); names the per-suite commands for the rest
+  run-all                    Orchestrate every suite (works with no brain configured)
   brainbench                 Cross-harness memory conformance suite (hermetic)
   longmemeval                LongMemEval benchmark (brings its own in-memory brain)
   cross-modal                Cross-modal quality gate (pure API calls, no DB)

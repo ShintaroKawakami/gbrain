@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { PostgresEngine } from '../src/core/postgres-engine.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
 import { operationsByName } from '../src/core/operations.ts';
@@ -17,10 +18,9 @@ import { waitFor } from './helpers/wait-for.ts';
 import { publishMutation } from '../src/core/persistence/coordinator.ts';
 import { configureGateway, resetGateway, __setEmbedTransportForTests } from '../src/core/ai/gateway.ts';
 import { LEGACY_EMBEDDING_CONFIG } from './helpers/legacy-embedding-config.ts';
-import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
+import { assertSafeE2eDatabaseUrl } from './helpers/db-guard.ts';
 
 const engines: BrainEngine[] = [];
-let closePostgres: (() => Promise<void>) | undefined;
 const sourceId = 'managed-memory-concurrency-test';
 const context = (engine: BrainEngine, remote = false): OperationContext => ({ engine, remote, sourceId,
   config: { engine: engine.kind }, dryRun: false, logger: { info() {}, warn() {}, error() {} } });
@@ -36,7 +36,8 @@ beforeAll(async () => {
   configureGateway({ ...LEGACY_EMBEDDING_CONFIG, env: {} });
   const lite = new PGLiteEngine(); await lite.connect({}); await lite.initSchema(); engines.push(lite);
   if (process.env.DATABASE_URL) {
-    const pg = await isolatedPersistencePostgres(process.env.DATABASE_URL); engines.push(pg.engine); closePostgres = pg.close;
+    assertSafeE2eDatabaseUrl(process.env.DATABASE_URL);
+    const pg = new PostgresEngine(); await pg.connect({ database_url: process.env.DATABASE_URL, poolSize: 4 }); await pg.initSchema(); engines.push(pg);
   }
   for (const engine of engines) {
     await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
@@ -53,7 +54,6 @@ afterAll(async () => {
     await engine.executeRaw('DELETE FROM sources WHERE id=$1', [sourceId]);
     await engine.disconnect();
   }
-  await closePostgres?.();
   resetGateway();
 });
 
@@ -177,53 +177,6 @@ describe('journaled memory publication, both engines', () => {
     }
   }, 120_000);
 
-  test('a remember prepared against a stale page re-prepares; every committed receipt is readable at acknowledgement', async () => {
-    let held = 0;
-    let gate = Promise.withResolvers<void>();
-    configureGateway({ ...LEGACY_EMBEDDING_CONFIG, env: { OPENAI_API_KEY: 'sk-test' } });
-    __setEmbedTransportForTests((async (opts: { values: string[] }) => {
-      if (opts.values.some(v => v.endsWith('stale 99')) && ++held === 1) await gate.promise;
-      // Orthogonal vectors: no two facts are semantic duplicates of each other.
-      return { embeddings: opts.values.map(v => { const e = new Array(1536).fill(0); e[Number(/(\d+)$/.exec(v)?.[1] ?? 0) + 1] = 1; return e; }) };
-    }) as never);
-    try {
-      for (const engine of engines) {
-        const slug = 'people/stale-preparation-example';
-        held = 0;
-        gate = Promise.withResolvers<void>();
-        await setupPage(engine, slug, upsertFactRow('Biography', { claim: 'Seed fact', kind: 'fact', visibility: 'world', confidence: 1, notability: 'medium' }).body);
-        const claims = async () => parseFactsFence((await engine.readPageSnapshot(slug, { sourceId }))!.page.compiled_truth).facts.map(f => f.claim);
-        const stale = submitRememberMutation(context(engine), { fact: 'Held stale 99', provenance: 'test', entity: slug, request_id: randomUUID() }, 30_000);
-        await waitFor(() => held === 1, { label: `${engine.kind}: stale remember holding inside preparation` });
-        // A coordinated writer reads and rewrites the page under its guard, as the coordinator's own publication does.
-        await engine.transaction(tx => withCoordinatedWrite(tx, [sourceId], async () => {
-          await tx.lockPageKeys([{ sourceId, slug }]);
-          const s = (await tx.readPageSnapshot(slug, { sourceId }))!;
-          await tx.putPage(slug, { ...pageInput(upsertFactRow(s.page.compiled_truth, { claim: 'Out of journal 50', kind: 'fact', visibility: 'world',
-            confidence: 1, notability: 'medium' }).body), timeline: s.page.timeline }, { sourceId });
-        }, TEST_WRITE_ATTRIBUTION));
-        gate.resolve();
-        expect((await stale).state).toBe('committed');
-        expect(held).toBe(2);
-        expect(await claims()).toEqual(['Seed fact', 'Out of journal 50', 'Held stale 99']);
-        const unreadable: string[] = [];
-        const receipts = await Promise.all(Array.from({ length: 6 }, async (_, i) => {
-          const fact = `Concurrent preference ${i}`;
-          const receipt = await submitRememberMutation(context(engine, i % 2 === 0), { fact, provenance: 'test', entity: slug, request_id: randomUUID() }, 30_000);
-          if (!(await claims()).includes(fact)) unreadable.push(fact);
-          return receipt;
-        }));
-        expect(receipts.map(r => r.state)).toEqual(Array(6).fill('committed'));
-        expect(unreadable).toEqual([]);
-        const facts = parseFactsFence((await engine.readPageSnapshot(slug, { sourceId }))!.page.compiled_truth).facts;
-        expect(facts).toHaveLength(9);
-        expect(new Set(facts.map(f => f.rowNum)).size).toBe(9);
-        await waitFor(async () => (await engine.executeRaw(`SELECT 1 FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id
-          WHERE r.source_id=$1 AND e.state IN ('queued','running')`, [sourceId])).length === 0, { label: `${engine.kind}: ${sourceId} effects settled` });
-      }
-    } finally { gate.resolve(); __setEmbedTransportForTests(null); configureGateway({ ...LEGACY_EMBEDDING_CONFIG, env: {} }); }
-  }, 120_000);
-
   test('concurrent identical request IDs allocate exactly one fact and one receipt', async () => {
     for (const engine of engines) {
       const p = { fact: 'A subjectless stable memory', provenance: 'test conversation', request_id: randomUUID() };
@@ -246,8 +199,6 @@ describe('journaled memory publication, both engines', () => {
     try {
       for (const engine of engines) {
         const slug = 'people/supersede-example';
-        // Calibrate the fixed test embedder: an uncalibrated model never supersedes by cosine (supersession-threshold.ts).
-        await engine.setConfig('facts.supersession_thresholds', JSON.stringify({ 'openai:text-embedding-3-small@1536': 0.95 }));
         await setupPage(engine, slug);
         const privateMemory = await submitRememberMutation(context(engine), { fact: 'Confidential unrelated claim',
           provenance: 'test', entity: slug, visibility: 'private' }, 30_000);
@@ -259,11 +210,6 @@ describe('journaled memory publication, both engines', () => {
         const params = { fact: 'Left acme-example', provenance: 'test', entity: slug, request_id: randomUUID() };
         const next = await submitRememberMutation(context(engine, true), params, 30_000);
         expect(next.status).toBe('superseded');
-        // Every effect in the source settles, not only this page's: an earlier test's page keeps an embedding
-        // effect queued until a provider is configured, and its calls must not land inside the replay window.
-        await waitFor(async () => (await engine.executeRaw(`SELECT 1 FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id
-          WHERE r.source_id=$1 AND e.state IN ('queued','running')`, [sourceId])).length === 0,
-        { label: `${engine.kind}: ${sourceId} effects settled before the replay count` });
         const callsBeforeReplay = providerCalls;
         expect(await submitRememberMutation(context(engine, true), params)).toEqual(next);
         expect(providerCalls).toBe(callsBeforeReplay);

@@ -33,7 +33,6 @@
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { spawn, spawnSync } from 'child_process';
-import { freePort } from '../helpers/serve-http.ts';
 import {
   cpSync,
   mkdirSync,
@@ -492,11 +491,10 @@ describe('WAL-repair wave — corrupt persistent brain, auto-repair off: owned e
 
 describe('v0.41.8.0 — daemon survival (regression guard for narrow force-exit)', () => {
   test('gbrain serve --http stays alive past the timeout window', async () => {
-    // A port the kernel reports free (a taken one would also exit early,
-    // and read as this regression). We're testing "still alive
+    // Pick a likely-free ephemeral port. We're testing "still alive
     // 3 seconds after startup" — if the force-exit guard misfired
     // on 'serve', the process would die immediately after binding.
-    const port = await freePort();
+    const port = 31000 + Math.floor(Math.random() * 1000);
     const child = spawn(
       SHIM_PATH,
       ['serve', '--http', '--port', String(port), '--token-ttl', '60'],

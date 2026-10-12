@@ -29,8 +29,7 @@ export const collectUsageShape: AdvisorCollector = {
 
     try {
       const health = await ctx.engine.getHealth();
-      // A keyless-by-choice brain has no vectors by design; `embed --all` refuses there (setup-smells covers it).
-      if (health.embed_coverage < 0.7 && health.missing_embeddings > 0 && ctx.config?.embedding_disabled !== true) {
+      if (health.embed_coverage < 0.7 && health.missing_embeddings > 0) {
         findings.push({
           id: 'low_embed_coverage',
           severity: 'warn',

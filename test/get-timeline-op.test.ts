@@ -62,7 +62,6 @@ describe('get_timeline op', () => {
         after: '2026-01-01',
         before: '2026-03-31',
         limit: 7,
-        eligibility: {},
       },
     }]);
   });

@@ -125,23 +125,18 @@ describe('classifyBrainAudience — declaration beats heuristics', () => {
 });
 
 describe('runWritebackNudge — one-time ask, never auto-enables, never throws', () => {
-  test('personal + unset → [AGENT] ask with a relay; the sentinel is stamped on the ANSWER, not the print (F7)', async () => {
+  test('personal + unset → [AGENT] ask printed once, sentinel stamped, mode NOT set; second call silent', async () => {
     await withEnv({ GBRAIN_HOME: tmp, GBRAIN_NO_ONBOARD_NUDGE: undefined, GBRAIN_BRAIN_ID: undefined }, async () => {
       const out = await captureLog(() => runWritebackNudge(engine, { context: 'init' }));
-      expect(out).toContain('[AGENT]');
-      expect(out).toContain('ask: Enable ambient memory writeback');
-      expect(out).toContain('if_yes: gbrain config set memory.auto_writeback salient');
-      expect(out).toContain('if_no: gbrain config set memory.auto_writeback off');
-      expect(out).toContain('[SHOW USER]');
+      expect(out).toContain('[AGENT] One-time ask');
+      expect(out).toContain('gbrain config set memory.auto_writeback salient');
       expect(out).toContain('Off switch');
-      expect(await engine.getConfig(AUTO_WRITEBACK_NOTICE_KEY)).toBeNull();
+      expect(await engine.getConfig(AUTO_WRITEBACK_NOTICE_KEY)).toBe('true');
       // NEVER auto-enabled — the ask is the only output.
       expect(await engine.getConfig(AUTO_WRITEBACK_KEY)).toBeNull();
 
-      // Unanswered → the next init/post-upgrade asks again; an answer stops it.
-      expect(await captureLog(() => runWritebackNudge(engine))).toContain('[AGENT]');
-      await engine.setConfig(AUTO_WRITEBACK_KEY, 'off');
-      expect(await captureLog(() => runWritebackNudge(engine))).toBe('');
+      const out2 = await captureLog(() => runWritebackNudge(engine));
+      expect(out2).toBe('');
     });
   });
 
@@ -175,7 +170,7 @@ describe('runWritebackNudge — one-time ask, never auto-enables, never throws',
   });
 });
 
-describe('collectWritebackConsent — pending until answered, reaches MCP callers, never apply-able', () => {
+describe('collectWritebackConsent — reminder role, never the first ask, never apply-able', () => {
   function ctx(overrides: Partial<AdvisorContext> = {}): AdvisorContext {
     return {
       engine, config: { engine: 'pglite' } as GBrainConfig, version: 'test',
@@ -184,7 +179,12 @@ describe('collectWritebackConsent — pending until answered, reaches MCP caller
     };
   }
 
-  test('personal + unanswered → one info finding, ask_user, NO dispatch_id, null argv (sentinel not required, F7)', async () => {
+  test('before the sentinel → nothing (the advisor never fires the first consent ask)', async () => {
+    expect(await collectWritebackConsent.collect(ctx())).toEqual([]);
+  });
+
+  test('after the sentinel, personal + unset → one info finding, ask_user, NO dispatch_id, null argv', async () => {
+    await engine.setConfig(AUTO_WRITEBACK_NOTICE_KEY, 'true');
     const found = await collectWritebackConsent.collect(ctx());
     expect(found.length).toBe(1);
     expect(found[0].severity).toBe('info');
@@ -193,8 +193,9 @@ describe('collectWritebackConsent — pending until answered, reaches MCP caller
     expect(found[0].fix.dispatch_id).toBeUndefined();
   });
 
-  test('returned to MCP (remote) callers; suppressed for answered and shared brains', async () => {
-    expect((await collectWritebackConsent.collect(ctx({ remote: true }))).length).toBe(1);
+  test('suppressed for remote callers, decided brains, and shared brains', async () => {
+    await engine.setConfig(AUTO_WRITEBACK_NOTICE_KEY, 'true');
+    expect(await collectWritebackConsent.collect(ctx({ remote: true }))).toEqual([]);
     await engine.setConfig(AUTO_WRITEBACK_KEY, 'salient');
     expect(await collectWritebackConsent.collect(ctx())).toEqual([]);
     await engine.unsetConfig(AUTO_WRITEBACK_KEY);

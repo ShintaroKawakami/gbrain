@@ -29,7 +29,6 @@ import { isAbsolute, join, resolve } from 'path';
 import { gbrainPath } from '../config.ts';
 import { GIT_SSRF_FLAGS, RemoteUrlError, cloneRepo, parseRemoteUrl } from '../git-remote.ts';
 import { extractTarball, fileSha256 } from './tarball.ts';
-import { gitChildEnv } from '../git-env.ts';
 
 /** Kinds of third-party source we accept. */
 export type ResolvedSourceKind = 'git' | 'tarball' | 'local';
@@ -150,7 +149,7 @@ function resolveRemoteHead(url: string, branch: string | undefined): string {
   try {
     const output = execFileSync('git', argv, {
       encoding: 'utf-8',
-      env: gitChildEnv({ GIT_TERMINAL_PROMPT: '0' }),
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
       timeout: 60_000,
     });
     const firstLine = output.split('\n').find((l) => l.trim().length > 0);
@@ -238,7 +237,6 @@ function resolveGitSource(
   let cloneSha: string;
   try {
     cloneSha = execFileSync('git', ['rev-parse', 'HEAD'], {
-      env: gitChildEnv(),
       cwd: stageDir,
       encoding: 'utf-8',
       timeout: 30_000,

@@ -30,7 +30,7 @@ import type { GBrainConfig } from '../config.ts';
 import type { PageSnapshot } from '../page-state/types.ts';
 import type { PreparedMutation } from '../persistence/coordinator.ts';
 import type { WriteRequest } from '../persistence/model.ts';
-import { OperationError, opError } from '../ops/contract.ts';
+import { OperationError } from '../ops/contract.ts';
 import { computeContentHash } from '../ingestion/types.ts';
 import { serializeMarkdown } from '../markdown.ts';
 import { digest } from '../persistence/digest.ts';
@@ -40,11 +40,6 @@ import { maintenancePreflight, submitDatabaseMaintenanceIntent, type Maintenance
 import { preparePageMutation } from '../persistence/page-prepare.ts';
 import { effectiveVisibility, type Visibility } from '../search/private-visibility.ts';
 import type { ChronicleEventProposal } from './extract-events.ts';
-import { resolveChronicleEventSlugs } from './event-identity.ts';
-import { declareDerivation, declaredWriteTrust, deriveTrust, derivedMaintenanceTransaction, readDerivationDeclaration } from '../trust/taint.ts';
-import { derivedGateConfig, derivedGateInput, timelineRowAllowed } from '../trust/derived-gate.ts';
-import { assessTimelineForGate, type WriteGateAssessment } from '../write-gate.ts';
-import { recordWriteGateReceipt } from '../write-gate-store.ts';
 
 export const CHRONICLE_RETIRED_BY = 'life-chronicle';
 export const CHRONICLE_EVENT_INTENT = 'managed_maintenance_chronicle_event';
@@ -99,7 +94,7 @@ export interface BuiltChronicleEvent {
   summary: string;
 }
 
-/** Event identity is content-addressed on (who, what, depth): a re-run upserts the same page. Same-day collisions are resolved at publication (event-identity.ts). */
+/** Event identity is content-addressed on (who, what, depth): a re-run upserts the same page. */
 export function buildChronicleEvent(ev: ChronicleEventProposal, ctx: {
   depthSlug: string; attendees: string[]; effectiveDate: string | null; tz: string; visibility: Visibility; depthHash: string;
   isoDay: (when: string, tz: string) => string; normalizeKind: (kind: string) => string;
@@ -146,8 +141,7 @@ function requestIdFor(value: unknown): string {
 }
 
 function supersededError(reason: string): OperationError {
-  return opError('revision_conflict', `chronicle_superseded: ${reason}. The depth page, its privacy or its writer grant changed after it was judged; nothing from this generation is published.`,
-    'Nothing to do: the newer revision carries its own extraction decision, and the next chronicle cycle judges it.');
+  return new OperationError('revision_conflict', `chronicle_superseded: ${reason}. The depth page, its privacy or its writer grant changed after it was judged; nothing from this generation is published.`);
 }
 
 /** A publication failure that means the judged generation no longer applies. */
@@ -178,40 +172,30 @@ export async function publishChronicleGeneration(engine: BrainEngine, opts: {
   const abort = () => { if (opts.signal?.aborted) { const e = new Error('aborted'); e.name = 'AbortError'; throw e; } };
   const broken = await depthPinBroken(engine, sourceId, pin, opts.decisionRequestId);
   if (broken) return { ...result, superseded: broken };
-  const events = await resolveChronicleEventSlugs(engine, sourceId, opts.events);
-  // #5575 I2: the judge read only the depth page, so its events carry that page's tier (capped at agent_written).
-  const derivation = await deriveTrust(engine, [{ table: 'pages', id: pin.pageId }], { channel: 'derive:chronicle' });
-  const gateCfg = await derivedGateConfig(engine);
 
-  for (const ev of events) {
+  for (const ev of opts.events) {
     abort();
     const existing = await engine.readPageSnapshot(ev.slug, { sourceId, includeDeleted: true });
     const verdict = judgeTarget(existing, owned);
     if (!verdict.write) { result.protected.push({ slug: ev.slug, reason: verdict.reason }); continue; }
     const content = serializeMarkdown(ev.frontmatter, ev.compiledTruth, '', { type: 'event', title: ev.title, tags: [] });
-    // #5575 B3: the event's summary lands on the depth page's timeline; a quarantined or rejected one projects nothing.
-    const projectionGate = assessTimelineForGate({ summary: ev.summary, source: `life-chronicle:event:${ev.slug}` }, derivedGateInput(derivation.trust), gateCfg);
-    const projection = timelineRowAllowed(projectionGate) ? { depth_slug: pin.slug, date: ev.day, summary: ev.summary } : undefined;
+    const projection = { depth_slug: pin.slug, date: ev.day, summary: ev.summary };
     try {
       if (maintenance) {
         const intent = { kind: CHRONICLE_EVENT_INTENT, content, expected_revision: verdict.expectedRevision,
           restore_retired: verdict.restore, depth: pin, decision_request_id: opts.decisionRequestId,
-          owned_hashes: [...owned], ...(projection ? { event_projection: projection } : {}), derivation: declareDerivation(derivation.trust, derivation.inputs) };
+          owned_hashes: [...owned], event_projection: projection };
         await submitDatabaseMaintenanceIntent(engine, maintenance, ev.slug, intent,
           requestIdFor({ writer: maintenance.writer.principal, slug: ev.slug, intent }));
       } else {
-        await derivedMaintenanceTransaction(engine, derivation, async (tx) => {
+        await maintenanceTransaction(engine, async (tx) => {
           const reason = await depthPinBroken(tx, sourceId, pin, null);
           if (reason) throw supersededError(reason);
           const again = judgeTarget(await tx.readPageSnapshot(ev.slug, { sourceId, includeDeleted: true }), owned);
           if (!again.write) throw supersededError(again.reason);
-          const page = await tx.putPage(ev.slug, { type: 'event', title: ev.title, compiled_truth: ev.compiledTruth,
+          await tx.putPage(ev.slug, { type: 'event', title: ev.title, compiled_truth: ev.compiledTruth,
             frontmatter: { type: 'event', ...ev.frontmatter }, effective_date: safeDate(ev.when) }, { sourceId });
-          if (projection) {
-            await tx.upsertEventProjection({ depthSlug: pin.slug, eventSlug: ev.slug, date: ev.day, summary: ev.summary, sourceId });
-            await recordProjectionFlag(tx, projectionGate, page.id, ev.day, sourceId);
-          }
-          return { result: undefined, rows: [{ table: 'pages', id: page.id, sourceId }] };
+          await tx.upsertEventProjection({ depthSlug: pin.slug, eventSlug: ev.slug, date: ev.day, summary: ev.summary, sourceId });
         });
       }
     } catch (error) {
@@ -225,7 +209,7 @@ export async function publishChronicleGeneration(engine: BrainEngine, opts: {
     }
   }
 
-  const keep = new Set(events.map((e) => e.slug));
+  const keep = new Set(opts.events.map((e) => e.slug));
   const stale = await engine.executeRaw<{ slug: string; revision: string; content_hash: string }>(
     `SELECT slug, knowledge_revision::text AS revision, content_hash FROM pages
       WHERE source_id=$1 AND type='event' AND deleted_at IS NULL AND frontmatter->'event'->>'depth'=$2
@@ -283,8 +267,7 @@ interface ChronicleIntent extends Record<string, unknown> {
 export async function prepareChronicleMutation(engine: BrainEngine, row: WriteRequest, config: GBrainConfig): Promise<PreparedMutation> {
   const p = row.intent as ChronicleIntent | null;
   if (!p || !p.depth || !Array.isArray(p.owned_hashes) || row.authority.remote) {
-    throw opError('invalid_params', 'Unsupported Life Chronicle maintenance intent.',
-      'Life Chronicle maintenance is submitted only by the chronicle phase on the brain host; let `gbrain dream --phase chronicle` resubmit it rather than replaying this request.');
+    throw new OperationError('invalid_params', 'Unsupported Life Chronicle maintenance intent.');
   }
   const owned = new Set(p.owned_hashes);
   const retire = p.kind === CHRONICLE_RETIRE_INTENT;
@@ -315,20 +298,6 @@ export async function prepareChronicleMutation(engine: BrainEngine, row: WriteRe
       if (!projection) return outcome;
       const { projected } = await tx.upsertEventProjection({ depthSlug: projection.depth_slug, eventSlug: row.slug,
         date: projection.date, summary: projection.summary, sourceId: row.source_id });
-      const declaration = readDerivationDeclaration(p.derivation);
-      if (projected && declaration) {
-        const assessment = assessTimelineForGate({ summary: projection.summary, source: `life-chronicle:event:${row.slug}` },
-          derivedGateInput(declaredWriteTrust(declaration), row.id), await derivedGateConfig(tx));
-        const [event] = await tx.executeRaw<{ id: number }>('SELECT id FROM pages WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL', [row.source_id, row.slug]);
-        if (event) await recordProjectionFlag(tx, assessment, Number(event.id), projection.date, row.source_id, row.id);
-      }
       return { ...outcome, event_projected: projected };
     } };
-}
-
-/** A flagged event projection's receipt on its timeline row (found by its event page and date). */
-async function recordProjectionFlag(tx: BrainEngine, assessment: WriteGateAssessment, eventPageId: number, date: string, sourceId: string, requestId?: string): Promise<void> {
-  if (assessment.verdict !== 'flag') return;
-  const [entry] = await tx.executeRaw<{ id: number }>('SELECT id FROM timeline_entries WHERE event_page_id=$1 AND date=$2::date', [eventPageId, date]);
-  if (entry) await recordWriteGateReceipt(tx, { targetTable: 'timeline_entries', targetId: Number(entry.id), sourceId, assessment, requestId });
 }

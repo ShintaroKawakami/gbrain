@@ -58,13 +58,10 @@ test('mid-run steal → structured partial report, no further phases, successor 
     yieldBetweenPhases: async () => {
       if (stole) return;
       stole = true;
-      // Simulate a successor taking the row: a new acquisition identity.
-      // Since v152 every acquisition mints a fresh acquisition_token and
-      // that token IS the fence (#6028); acquired_at moves with it.
+      // Simulate a successor taking the row: new acquisition identity.
       await engine.executeRaw(
         `UPDATE gbrain_cycle_locks
-            SET acquisition_token = gen_random_uuid(),
-                acquired_at = acquired_at + INTERVAL '1 millisecond',
+            SET acquired_at = acquired_at + INTERVAL '1 millisecond',
                 ttl_expires_at = NOW() + INTERVAL '5 minutes',
                 last_refreshed_at = NOW()
           WHERE id = $1`,

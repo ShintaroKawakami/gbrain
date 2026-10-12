@@ -16,8 +16,6 @@
 
 import type { BrainEngine } from '../core/engine.ts';
 import type { EvalCandidate } from '../core/types.ts';
-import { jsonGuardActive, jsonRequested, writeNdjsonLine } from '../core/cli-force-exit.ts';
-import { usageError, writeCliRefusal } from '../cli/cli-error.ts';
 
 const SCHEMA_VERSION = 1;
 
@@ -60,8 +58,8 @@ function parseArgs(args: string[]): ExportOpts {
         if (ms !== null) {
           opts.since = new Date(Date.now() - ms);
         } else {
-          process.exit(writeCliRefusal(usageError(`Invalid --since value: ${next} (use like 7d, 1h, 30m)`,
-            'Example: gbrain eval export --since 7d'), 'eval', { json: jsonRequested(args) }));
+          console.error(`Invalid --since value: ${next} (use like 7d, 1h, 30m)`);
+          process.exit(1);
         }
         i++;
         break;
@@ -74,8 +72,8 @@ function parseArgs(args: string[]): ExportOpts {
         if (next === 'query' || next === 'search') {
           opts.tool = next;
         } else if (next) {
-          process.exit(writeCliRefusal(usageError(`Invalid --tool value: ${next} (use 'query' or 'search')`,
-            'Example: gbrain eval export --tool query'), 'eval', { json: jsonRequested(args) }));
+          console.error(`Invalid --tool value: ${next} (use 'query' or 'search')`);
+          process.exit(1);
         }
         i++;
         break;
@@ -144,13 +142,6 @@ export async function runEvalExport(engine: BrainEngine, args: string[]): Promis
 
   let written = 0;
   for (const row of rows) {
-    // D2: under the --json guard each row is one NDJSON line on fd 1.
-    if (jsonGuardActive()) {
-      await writeNdjsonLine({ schema_version: SCHEMA_VERSION, ...row });
-      written++;
-      progress.tick();
-      continue;
-    }
     // Prefix every line with schema_version:1 so gbrain-evals can detect
     // schema drift before parsing the rest of the fields.
     const line = JSON.stringify({ schema_version: SCHEMA_VERSION, ...row });

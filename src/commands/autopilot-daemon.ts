@@ -40,6 +40,11 @@ export interface AutopilotDaemonState {
   inflightInlineCycle: Promise<unknown> | null;
   consecutiveErrors: number;
   /**
+   * Parser-probe fixture warning is once-per-process, not once-per-cycle
+   * (compiled-binary installs have no source tree; don't spam the log).
+   */
+  parserProbeFixtureWarned: boolean;
+  /**
    * #2608: once-per-process no-chat-provider warning. A keyless daemon used
    * to run every cycle "green" while all LLM phases silently no-op'd
    * (chronicle reported no_events, propose_takes skipped, …) — the operator
@@ -136,6 +141,7 @@ export async function runAutopilotDaemon(engine: BrainEngine, args: string[]): P
     stopping: false,
     inflightInlineCycle: null,
     consecutiveErrors: 0,
+    parserProbeFixtureWarned: false,
     noChatProviderWarned: false,
     autopilotReconnectFails: 0,
     noWorkerConsecutiveIdle: 0,
@@ -335,8 +341,8 @@ export async function runAutopilotDaemon(engine: BrainEngine, args: string[]): P
       }
     }
 
-    await runNightlyQualityProbeStep(engine, cfg);
-    await runParserProbeStep(engine, cfg);
+    await runNightlyQualityProbeStep(engine, cfg, repoPath);
+    await runParserProbeStep(engine, cfg, state);
 
     // Wait for next cycle
     await new Promise(r => setTimeout(r, interval * 1000));

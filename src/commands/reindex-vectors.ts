@@ -11,7 +11,6 @@
  */
 import type { BrainEngine } from '../core/engine.ts';
 import { quoteIdentifier } from '../core/search/embedding-column.ts';
-import { withHnswBuildMemory } from '../core/vector-index.ts';
 
 export const REINDEX_VECTORS_COMMAND = 'gbrain reindex --vectors';
 
@@ -23,17 +22,13 @@ export interface ReindexVectorsResult {
 
 export async function runReindexVectors(engine: BrainEngine, args: string[]): Promise<ReindexVectorsResult> {
   const dryRun = args.includes('--dry-run');
-  const rows = (await engine.executeRaw<{ table: string; index: string; column: string }>(
-    `SELECT p.tablename AS table, p.indexname AS index, a.attname AS column FROM pg_indexes p
-       JOIN pg_index i ON i.indexrelid = to_regclass(quote_ident(p.indexname))
-       JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
-      WHERE p.schemaname = current_schema() AND p.indexdef ~* 'USING hnsw' ORDER BY p.tablename, p.indexname`));
-  const indexes = rows.map(({ table, index }) => ({ table, index }));
+  const indexes = (await engine.executeRaw<{ table: string; index: string }>(
+    `SELECT tablename AS table, indexname AS index FROM pg_indexes
+      WHERE schemaname = current_schema() AND indexdef ~* 'USING hnsw' ORDER BY tablename, indexname`));
   let rebuilt = 0;
-  for (const { table, index, column } of dryRun ? [] : rows) {
+  for (const { table, index } of dryRun ? [] : indexes) {
     if (!args.includes('--json')) process.stderr.write(`[reindex] rebuilding ${table}.${index}\n`);
-    await withHnswBuildMemory(engine, table, column, () =>
-      engine.executeRaw(`REINDEX INDEX ${engine.kind === 'postgres' ? 'CONCURRENTLY ' : ''}${quoteIdentifier(index)}`));
+    await engine.executeRaw(`REINDEX INDEX ${engine.kind === 'postgres' ? 'CONCURRENTLY ' : ''}${quoteIdentifier(index)}`);
     rebuilt++;
   }
   const result = { indexes, rebuilt, dry_run: dryRun };

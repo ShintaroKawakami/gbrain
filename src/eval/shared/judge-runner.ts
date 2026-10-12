@@ -151,7 +151,6 @@ export async function runJudge(opts: RunJudgeOpts): Promise<JudgeOutcome> {
         maxTokens: opts.maxTokens,
         temperature: opts.temperature,
         ...(opts.signal ? { abortSignal: opts.signal } : {}),
-        allowFallback: false,
       });
     } catch (err) {
       const cls = classifyJudgeTransportError(err);

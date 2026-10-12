@@ -6,10 +6,6 @@
  */
 import type { BrainEngine } from './engine.ts';
 import type { SyncResult } from '../commands/sync.ts';
-import { writeJsonDocument } from './cli-force-exit.ts';
-
-/** D2: under the `--json` guard only writeStdoutFinal reaches fd 1 (writeJsonDocument). */
-const emitJson = (text: string): void => { void writeJsonDocument(text); };
 
 /**
  * v0.42.x (#1794, Part B): typed lock-busy error so callers can distinguish a
@@ -93,7 +89,7 @@ export async function runBreakLock(
   try { snap = await inspectLock(engine, lockKey); }
   catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (opts.json) emitJson(JSON.stringify({ status: 'error', error: msg, lock: lockKey }));
+    if (opts.json) console.log(JSON.stringify({ status: 'error', error: msg, lock: lockKey }));
     else console.error(`Failed to inspect lock ${lockKey}: ${msg}`);
     return 1;
   }
@@ -112,13 +108,13 @@ export async function runBreakLock(
         `appears wedged, the cause is not a held lock; inspect checkpoint/resume ` +
         `state with \`gbrain sync --source ${sourceId}\` or \`gbrain doctor\`.`;
       if (opts.json) {
-        emitJson(JSON.stringify({ status: 'absent', lock: lockKey, source_id: sourceId, wedge_hint: wedgeHint }));
+        console.log(JSON.stringify({ status: 'absent', lock: lockKey, source_id: sourceId, wedge_hint: wedgeHint }));
       } else {
         console.log(wedgeHint);
       }
       return 0;
     }
-    if (opts.json) emitJson(JSON.stringify({ status: 'absent', lock: lockKey, source_id: sourceId }));
+    if (opts.json) console.log(JSON.stringify({ status: 'absent', lock: lockKey, source_id: sourceId }));
     else console.log(`Lock ${lockKey} is not held (nothing to break).`);
     return 0;
   }
@@ -136,7 +132,7 @@ export async function runBreakLock(
     // who need to clear a cross-host lock use --force-break-lock.
     if (snap.holder_host !== localHost) {
       if (opts.json) {
-        emitJson(JSON.stringify({
+        console.log(JSON.stringify({
           status: 'refused', reason: 'cross_host', lock: lockKey, source_id: sourceId,
           snapshot: snap, local_host: localHost,
         }));
@@ -150,7 +146,7 @@ export async function runBreakLock(
       engine, lockKey, snap.holder_pid, opts.maxAgeSeconds, snap.acquisition_token,
     );
     if (opts.json) {
-      emitJson(JSON.stringify({
+      console.log(JSON.stringify({
         status: deleted ? 'broken' : 'refused',
         reason: deleted ? 'max_age_breached' : 'within_max_age',
         lock: lockKey,
@@ -182,7 +178,7 @@ export async function runBreakLock(
   if (opts.force) {
     const { deleted } = await deleteLockRow(engine, lockKey, snap.holder_pid, snap.acquisition_token);
     if (opts.json) {
-      emitJson(JSON.stringify({
+      console.log(JSON.stringify({
         status: deleted ? 'force_broken' : 'race_already_cleared',
         lock: lockKey, source_id: sourceId, snapshot: snap,
       }));
@@ -198,7 +194,7 @@ export async function runBreakLock(
   // Safe path: must be local host AND (TTL-expired OR (PID-dead AND age >= 60s)).
   if (snap.holder_host !== localHost) {
     if (opts.json) {
-      emitJson(JSON.stringify({
+      console.log(JSON.stringify({
         status: 'refused',
         reason: 'cross_host',
         lock: lockKey, source_id: sourceId, snapshot: snap, local_host: localHost,
@@ -236,7 +232,7 @@ export async function runBreakLock(
 
   if (!safe) {
     if (opts.json) {
-      emitJson(JSON.stringify({
+      console.log(JSON.stringify({
         status: 'refused', reason, lock: lockKey, source_id: sourceId, snapshot: snap,
       }));
     } else {
@@ -253,7 +249,7 @@ export async function runBreakLock(
 
   const { deleted } = await deleteLockRow(engine, lockKey, snap.holder_pid, snap.acquisition_token);
   if (opts.json) {
-    emitJson(JSON.stringify({
+    console.log(JSON.stringify({
       status: deleted ? 'broken' : 'race_already_cleared',
       reason, lock: lockKey, source_id: sourceId, snapshot: snap,
     }));

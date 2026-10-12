@@ -10,15 +10,10 @@
  * Never import from '../operations.ts' here (cycle).
  */
 import type { BrainEngine } from '../engine.ts';
-import type { WriteAttributionView } from '../types.ts';
-import type { PageVersionMetadata } from '../page-state/version-types.ts';
+import type { AttributedPageVersion, PageVersion, WriteAttributionView } from '../types.ts';
 import { hasScope } from '../scope.ts';
-import { opError, type Operation, type OperationContext } from './contract.ts';
-import type { McpCall } from '../agent-output.ts';
-import { opTransport, paramUse, readFix } from './op-fix.ts';
+import { OperationError, type Operation, type OperationContext } from './contract.ts';
 import { readHolders, readPolicyOpts } from './context.ts';
-import { storedTrustTier, type TrustTier, type WriteOrigin } from '../trust/tier.ts';
-import { privateProvenanceFilterFragment } from '../search/private-visibility.ts';
 
 const DOCS = 'docs/mcp/ADMIN.md#write-attribution';
 
@@ -28,14 +23,6 @@ interface StoredAttribution {
   principal_id: string | null;
   /** The row's own timestamp for this write, used when no request records one. */
   at?: Date | string | null;
-}
-
-interface StoredTrust { trust_tier: string | null; write_origin: unknown }
-/** jsonb reads back as an object on both engines; a text-shaped value (a driver path that hands jsonb back undecoded) is parsed. */
-function originObject(value: unknown): WriteOrigin | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value === 'string') { try { return JSON.parse(value) as WriteOrigin; } catch { return null; } }
-  return typeof value === 'object' ? value as WriteOrigin : null;
 }
 
 const iso = (value: Date | string | null | undefined): string | null =>
@@ -82,14 +69,12 @@ export async function resolveWriteAttributions(engine: BrainEngine, stored: Stor
 }
 
 /** `get_versions` for trusted and admin callers: each snapshot with its origin and archiving writer. */
-export async function attributeVersions<V extends PageVersionMetadata>(
-  engine: BrainEngine, versions: V[],
-): Promise<Array<V & { written_by: WriteAttributionView; archived_by: WriteAttributionView; trust_tier: TrustTier }>> {
+export async function attributeVersions(engine: BrainEngine, versions: PageVersion[]): Promise<AttributedPageVersion[]> {
   if (!versions.length) return [];
   const rows = await engine.executeRaw<{ id: number; w_req: string | null; w_kind: string | null; w_id: string | null;
-    a_req: string | null; a_kind: string | null; a_id: string | null; trust_tier: string | null }>(
+    a_req: string | null; a_kind: string | null; a_id: string | null }>(
     `SELECT id, write_request_id::text AS w_req, write_principal_kind AS w_kind, write_principal_id AS w_id,
-            archived_write_request_id::text AS a_req, archived_principal_kind AS a_kind, archived_principal_id AS a_id, trust_tier
+            archived_write_request_id::text AS a_req, archived_principal_kind AS a_kind, archived_principal_id AS a_id
        FROM page_versions WHERE id = ANY($1::int[])`, [versions.map(v => v.id)]);
   const byId = new Map(rows.map(r => [Number(r.id), r]));
   const stored = versions.flatMap(v => {
@@ -100,44 +85,24 @@ export async function attributeVersions<V extends PageVersionMetadata>(
     ];
   });
   const views = await resolveWriteAttributions(engine, stored);
-  // ENG-10: a legacy snapshot (taken before tiers) reads as unknown.
-  return versions.map((v, i) => ({ ...v, written_by: views[2 * i], archived_by: views[2 * i + 1], trust_tier: storedTrustTier(byId.get(Number(v.id))?.trust_tier) }));
+  return versions.map((v, i) => ({ ...v, written_by: views[2 * i], archived_by: views[2 * i + 1] }));
 }
 
-const SLUG = /^[a-z0-9][a-z0-9/_.-]{0,254}$/i;
-
-const paramName = (ctx: OperationContext, param: string) => (opTransport(ctx) === 'cli' ? paramUse(ctx, param) : param);
-
-function positiveInt(ctx: OperationContext, value: unknown, param: 'fact' | 'take' | 'timeline'): number | undefined {
+function positiveInt(value: unknown, flag: string): number | undefined {
   if (value === undefined || value === null) return undefined;
   const n = Number(value);
-  if (!Number.isSafeInteger(n) || n < 1) {
-    const name = paramName(ctx, param);
-    throw opError('invalid_params', `${name} must be a positive integer, got '${String(value)}'.`,
-      `Pass ${name} as a row id from the page, for example ${paramUse(ctx, param, 1)}.`, { docs: DOCS });
-  }
+  if (!Number.isSafeInteger(n) || n < 1) throw new OperationError('invalid_params', `${flag} must be a positive integer, got '${String(value)}'.`, undefined, DOCS);
   return n;
 }
 
-function attributionCall(slug: string, row: { fact?: number; take?: number; timeline?: number }) {
-  const [key, id] = Object.entries(row).find(([, v]) => v !== undefined) as ['fact' | 'take' | 'timeline', number];
-  return readFix(`Attributes the ${key} you named on its own.`, {
-    argv: ['gbrain', 'attribution', slug, `--${key}`, String(id)],
-    mcp: { tool: 'get_write_attribution', arguments: { slug, [key]: id } },
-  });
-}
-
-type RowTarget = { kind: 'fact' | 'take' | 'timeline_entry'; label: string; sql: string; params: unknown[]; list: McpCall };
+type RowTarget = { kind: 'fact' | 'take' | 'timeline_entry'; label: string; sql: string; params: unknown[]; list: string };
 
 const get_write_attribution: Operation = {
   name: 'get_write_attribution',
-  mutating: false,
-  idempotent: true,
   outputRedaction: 'no_stored_text',
   description: 'Admin read: who created and who last changed a page, or one of its facts, takes or timeline entries. '
     + 'Each attribution names the request id, operation, principal (kind, id, current name), time and origin '
-    + '(request, maintenance or unrecorded), plus the row\'s trust_tier and write_origin (for derived rows, the inputs that set the tier). '
-    + 'Remote callers stay inside their source grant and see only world facts.',
+    + '(request, maintenance or unrecorded). Remote callers stay inside their source grant and see only world facts.',
   params: {
     slug: { type: 'string', required: true, description: 'Slug of the page to attribute (or the page that holds the fact, take or timeline entry).' },
     fact: { type: 'number', description: 'Attribute this fact id (a fact about or fenced on the page) instead of the page.' },
@@ -150,47 +115,39 @@ const get_write_attribution: Operation = {
   cliHints: { name: 'attribution', positional: ['slug'] },
   handler: async (ctx, p) => {
     const slug = p.slug as string;
-    const fact = positiveInt(ctx, p.fact, 'fact');
-    const take = positiveInt(ctx, p.take, 'take');
-    const timeline = positiveInt(ctx, p.timeline, 'timeline');
+    const fact = positiveInt(p.fact, '--fact');
+    const take = positiveInt(p.take, '--take');
+    const timeline = positiveInt(p.timeline, '--timeline');
     if ([fact, take, timeline].filter(v => v !== undefined).length > 1) {
-      throw opError('invalid_params', `Pass at most one of ${paramName(ctx, 'fact')}, ${paramName(ctx, 'take')} or ${paramName(ctx, 'timeline')}.`,
-        'Make one call per row; fix attributes the first row you named.',
-        { docs: DOCS, ...(SLUG.test(slug) ? { fix: attributionCall(slug, { fact, take, timeline }) } : {}) });
+      throw new OperationError('invalid_params', 'Pass at most one of --fact, --take or --timeline.',
+        `Run one call per row, for example: gbrain attribution ${slug} --fact ${fact ?? take ?? timeline}`, DOCS);
     }
     const policy = await readPolicyOpts(ctx);
     const page = await ctx.engine.getPage(slug, policy);
     if (!page?.id) {
-      throw opError('page_not_found', `No page '${slug}' is visible to this caller.`,
-        'Find the exact slug by searching (fix), then call again with it. Pages outside your source grant read as missing.',
-        { docs: DOCS, ...(SLUG.test(slug) ? { fix: readFix('Searches for pages near the slug you passed.', { argv: ['gbrain', 'search', slug], mcp: { tool: 'search', arguments: { query: slug } } }) } : {}) });
+      throw new OperationError('page_not_found', `No page '${slug}' is visible to this caller.`,
+        'Find the exact slug with `gbrain search "<words>"` (remote: the search tool), then retry. Pages outside your source grant read as missing.', DOCS);
     }
     const sourceId = page.source_id ?? 'default';
-    const [live] = await ctx.engine.executeRaw<{ revision: string; req: string | null; kind: string | null; pid: string | null } & StoredTrust>(
-      `SELECT knowledge_revision::text AS revision, revision_write_request_id::text AS req, revision_principal_kind AS kind, revision_principal_id AS pid,
-              trust_tier, write_origin FROM pages WHERE id = $1`, [page.id]);
+    const [live] = await ctx.engine.executeRaw<{ revision: string; req: string | null; kind: string | null; pid: string | null }>(
+      `SELECT knowledge_revision::text AS revision, revision_write_request_id::text AS req, revision_principal_kind AS kind, revision_principal_id AS pid
+         FROM pages WHERE id = $1`, [page.id]);
     const liveStored: StoredAttribution = { request_id: live?.req ?? null, principal_kind: live?.kind ?? null, principal_id: live?.pid ?? null };
 
     let target: Record<string, unknown> = { kind: 'page', slug: page.slug, source_id: sourceId, page_id: page.id };
     let created: StoredAttribution;
     let last: StoredAttribution;
-    let trust: StoredTrust = { trust_tier: live?.trust_tier ?? null, write_origin: live?.write_origin ?? null };
-    const row = rowTarget(ctx, page.id, page.slug, sourceId, { fact, take, timeline }, policy.excludePrivate === true);
+    const row = rowTarget(ctx, page.id, page.slug, sourceId, { fact, take, timeline });
     if (row) {
       const [found] = await ctx.engine.executeRaw<{ id: number; w_req: string | null; w_kind: string | null; w_id: string | null; created_at: Date | string | null;
-        l_req: string | null; l_kind: string | null; l_id: string | null; last_written_at: Date | string | null } & StoredTrust>(row.sql, row.params);
+        l_req: string | null; l_kind: string | null; l_id: string | null; last_written_at: Date | string | null }>(row.sql, row.params);
       if (!found) {
-        throw opError(row.kind === 'fact' ? 'fact_not_found' : 'not_found', `No ${row.label} is visible on page '${page.slug}'.`,
-          'List the page\'s rows (fix), then call again with an id from that list.', {
-            docs: DOCS,
-            fix: readFix(`Lists the ${row.kind === 'timeline_entry' ? 'timeline entries' : `${row.kind}s`} on page '${page.slug}' with their ids.`,
-              { argv: ['gbrain', 'call', '--source', sourceId, row.list.tool, JSON.stringify(row.list.arguments)], mcp: row.list }),
-          });
+        throw new OperationError(row.kind === 'fact' ? 'fact_not_found' : 'not_found', `No ${row.label} is visible on page '${page.slug}'.`,
+          `List the page's rows with \`${row.list}\`, then retry with an id from that list.`, DOCS);
       }
       target = { kind: row.kind, id: Number(found.id), ...(row.kind === 'take' ? { row_num: take } : {}), slug: page.slug, source_id: sourceId, page_id: page.id };
       created = { request_id: found.w_req, principal_kind: found.w_kind, principal_id: found.w_id, at: found.created_at };
       last = { request_id: found.l_req, principal_kind: found.l_kind, principal_id: found.l_id, at: found.last_written_at };
-      trust = { trust_tier: found.trust_tier, write_origin: found.write_origin };
     } else {
       const [oldest] = await ctx.engine.executeRaw<{ req: string | null; kind: string | null; pid: string | null }>(
         `SELECT write_request_id::text AS req, write_principal_kind AS kind, write_principal_id AS pid
@@ -201,12 +158,10 @@ const get_write_attribution: Operation = {
     const [createdView, lastView, liveView] = await resolveWriteAttributions(ctx.engine, [created, last, liveStored]);
     const versions = p.versions === true
       ? (await attributeVersions(ctx.engine, (await ctx.engine.getVersions(page.slug, policy)).filter(v => Number(v.page_id) === Number(page.id))))
-        .map(v => ({ id: v.id, knowledge_revision: v.knowledge_revision ?? null, snapshot_at: iso(v.snapshot_at), trust_tier: v.trust_tier, written_by: v.written_by, archived_by: v.archived_by }))
+        .map(v => ({ id: v.id, knowledge_revision: v.knowledge_revision ?? null, snapshot_at: iso(v.snapshot_at), written_by: v.written_by, archived_by: v.archived_by }))
       : undefined;
     return {
       target, created: createdView, last: lastView,
-      // CEO-1: the stored tier and its origin record (for a derived row, a bounded sample of the inputs that set it).
-      trust_tier: storedTrustTier(trust.trust_tier), write_origin: originObject(trust.write_origin),
       live_revision: { knowledge_revision: live?.revision ?? null, written_by: liveView },
       ...(versions ? { versions } : {}),
     };
@@ -214,23 +169,22 @@ const get_write_attribution: Operation = {
 };
 
 function rowTarget(ctx: OperationContext, pageId: number, slug: string, sourceId: string,
-  ids: { fact?: number; take?: number; timeline?: number }, excludePrivate: boolean): RowTarget | undefined {
+  ids: { fact?: number; take?: number; timeline?: number }): RowTarget | undefined {
   const cols = `write_request_id::text AS w_req, write_principal_kind AS w_kind, write_principal_id AS w_id, created_at,
-    last_write_request_id::text AS l_req, last_write_principal_kind AS l_kind, last_write_principal_id AS l_id, last_written_at,
-    trust_tier, write_origin`;
+    last_write_request_id::text AS l_req, last_write_principal_kind AS l_kind, last_write_principal_id AS l_id, last_written_at`;
   if (ids.fact !== undefined) {
-    return { kind: 'fact', label: `fact #${ids.fact}`, list: { tool: 'recall', arguments: { entity: slug } },
+    return { kind: 'fact', label: `fact #${ids.fact}`, list: `gbrain call recall '{"entity":"${slug}"}'`,
       sql: `SELECT id, ${cols} FROM facts WHERE id = $1 AND source_id = $2 AND (entity_slug = $3 OR source_markdown_slug = $3)
-        ${ctx.remote === false ? '' : "AND visibility = 'world'"} ${excludePrivate ? `AND ${privateProvenanceFilterFragment('facts')}` : ''}`, params: [ids.fact, sourceId, slug] };
+        ${ctx.remote === false ? '' : "AND visibility = 'world'"}`, params: [ids.fact, sourceId, slug] };
   }
   if (ids.take !== undefined) {
     const holders = readHolders(ctx);
-    return { kind: 'take', label: `take at row ${ids.take}`, list: { tool: 'takes_list', arguments: { page_slug: slug } },
+    return { kind: 'take', label: `take at row ${ids.take}`, list: `gbrain call takes_list '{"page_slug":"${slug}"}'`,
       sql: `SELECT id, ${cols} FROM takes WHERE page_id = $1 AND row_num = $2 ${holders ? 'AND holder = ANY($3::text[])' : ''}`,
       params: holders ? [pageId, ids.take, holders] : [pageId, ids.take] };
   }
   if (ids.timeline !== undefined) {
-    return { kind: 'timeline_entry', label: `timeline entry #${ids.timeline}`, list: { tool: 'get_timeline', arguments: { slug } },
+    return { kind: 'timeline_entry', label: `timeline entry #${ids.timeline}`, list: `gbrain call get_timeline '{"slug":"${slug}"}'`,
       sql: `SELECT id, ${cols} FROM timeline_entries WHERE id = $1 AND page_id = $2`, params: [ids.timeline, pageId] };
   }
   return undefined;

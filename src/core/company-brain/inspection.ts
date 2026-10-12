@@ -6,9 +6,8 @@ import { extractEntityRefs, LINK_EXTRACTOR_VERSION_TS, unwrapWikilink } from '..
 import { normalizeAliasList } from '../search/alias-normalize.ts';
 import { buildSourceLocalReferenceIndex, frontmatterReferenceHints } from '../source-local-reference-index.ts';
 import { slugifyPath } from '../sync.ts';
-import { opError, OperationError } from '../ops/contract.ts';
+import { OperationError } from '../ops/contract.ts';
 import { QUARANTINE_KEY } from '../quarantine.ts';
-import { QUARANTINE_OVERRIDE_KEY } from '../quarantine-override.ts';
 import { EMBED_SKIP_KEY } from '../embed-skip.ts';
 import { loadResolvedPackByName } from '../schema-pack/load-active.ts';
 import { invalidatePackCache, type ResolvedPack } from '../schema-pack/registry.ts';
@@ -30,28 +29,22 @@ function canonical(value: unknown, maxBytes = COMPANY_BRAIN_MAX_METADATA_BYTES):
   let nodes = 0;
   let bytes = 0;
   const visit = (item: unknown, depth: number): unknown => {
-    if (++nodes > 2_000_000 || depth > 40) throw opError('request_too_large', 'Metadata is too deeply nested or complex.',
-      'The plan or page metadata nests deeper than 40 levels or holds more than 2,000,000 values. Simplify the frontmatter or inspect a smaller selection so the plan stays within bounds.');
+    if (++nodes > 2_000_000 || depth > 40) throw new OperationError('request_too_large', 'Metadata is too deeply nested or complex.');
     if (item === null || typeof item === 'boolean' || (typeof item === 'number' && Number.isFinite(item))) return item;
     if (typeof item === 'string') {
       bytes += Buffer.byteLength(item);
-      if (bytes > maxBytes) {
-        throw opError('request_too_large', 'Metadata exceeds its byte limit.',
-          `Metadata text passed its ${maxBytes}-byte limit. Narrow the selection with --include or --exclude on gbrain sources inspect, or split the repository.`);
-      }
+      if (bytes > maxBytes) throw new OperationError('request_too_large', 'Metadata exceeds its byte limit.');
       return item;
     }
     if (item instanceof Date) return item.toISOString();
-    if (typeof item !== 'object' || item === null || seen.has(item)) throw opError('invalid_params', 'Metadata must be finite, acyclic JSON data.',
-      'Use plain JSON data with no NaN, Infinity, functions, or cycles; pass a plan exactly as gbrain sources inspect --json wrote it.');
+    if (typeof item !== 'object' || item === null || seen.has(item)) throw new OperationError('invalid_params', 'Metadata must be finite, acyclic JSON data.');
     seen.add(item);
     let result: unknown;
     if (Array.isArray(item)) result = item.map(value => visit(value, depth + 1));
     else {
       const output: Record<string, unknown> = Object.create(null);
       for (const key of Object.keys(item).sort()) {
-        if (key === '__proto__' || key === 'constructor' || key === 'prototype') throw opError('invalid_params', 'Unsafe metadata key.',
-          'Remove __proto__, constructor, and prototype keys from the frontmatter or plan; they are refused to prevent prototype pollution.');
+        if (key === '__proto__' || key === 'constructor' || key === 'prototype') throw new OperationError('invalid_params', 'Unsafe metadata key.');
         bytes += Buffer.byteLength(key);
         output[key] = visit((item as Record<string, unknown>)[key], depth + 1);
       }
@@ -61,10 +54,7 @@ function canonical(value: unknown, maxBytes = COMPANY_BRAIN_MAX_METADATA_BYTES):
     return result;
   };
   const encoded = JSON.stringify(visit(value, 0));
-  if (Buffer.byteLength(encoded) > maxBytes) {
-    throw opError('request_too_large', 'Metadata exceeds its byte limit; narrow selection.',
-      `The encoded metadata passed its ${maxBytes}-byte limit. Narrow the selection with --include or --exclude on gbrain sources inspect, or split the repository.`);
-  }
+  if (Buffer.byteLength(encoded) > maxBytes) throw new OperationError('request_too_large', 'Metadata exceeds its byte limit; narrow selection.');
   return encoded;
 }
 
@@ -80,8 +70,7 @@ function patterns(values: string[] | undefined): string[] {
   if (values === undefined) return [];
   if (!Array.isArray(values) || values.length > 256 || values.some(value => typeof value !== 'string' || value.length > 1024 ||
     !safeRepositoryPath(value.replace(/\/$/, '')) || value.startsWith('!'))) {
-    throw opError('invalid_params', 'Selection must use bounded repository-relative globs without traversal or negation.',
-      'Pass --include and --exclude as repository-relative globs such as docs/** (no leading /, no . or .. or .git segments, no ! negation, no backslashes), at most 256 patterns of up to 1024 characters each.');
+    throw new OperationError('invalid_params', 'Selection must use bounded repository-relative globs without traversal or negation.');
   }
   return [...new Set(values.map(value => value.endsWith('/') ? `${value}**` : value))].sort();
 }
@@ -110,7 +99,7 @@ function readPage(content: string, entry: InspectionEntry, plan: CompanyBrainPla
   const path = entry.path;
   const raw = parseDataFrontmatter(content).data;
   canonical(raw, Math.min(plan.limits.maxMetadataBytes, 256 * 1024));
-  if (Object.hasOwn(raw, QUARANTINE_KEY) || Object.hasOwn(raw, EMBED_SKIP_KEY) || Object.hasOwn(raw, QUARANTINE_OVERRIDE_KEY)) {
+  if (Object.hasOwn(raw, QUARANTINE_KEY) || Object.hasOwn(raw, EMBED_SKIP_KEY)) {
     entry.disposition = 'unsupported';
     entry.reason = 'hidden_input';
     finding(plan, 'error', 'hidden_input', 'A reserved search-hiding marker is present. Review it or exclude this file before connecting; markers are never cleared automatically.', path);
@@ -259,9 +248,7 @@ function resolveReferences(plan: CompanyBrainPlan, pack: ResolvedPack | null): v
 }
 
 export async function inspectCompanyBrain(options: InspectCompanyBrainOptions): Promise<CompanyBrainPlan> {
-  if (options.profile !== undefined && options.profile !== COMPANY_BRAIN_PROFILE) {
-    throw opError('invalid_params', 'Only the company-brain profile is supported.', 'Pass --profile company-brain or omit --profile; it is the only supported profile.');
-  }
+  if (options.profile !== undefined && options.profile !== COMPANY_BRAIN_PROFILE) throw new OperationError('invalid_params', 'Only the company-brain profile is supported.');
   const limits = inspectionLimits(options.limits);
   const include = patterns(options.include);
   const exclude = patterns(options.exclude);
@@ -327,10 +314,7 @@ export async function inspectCompanyBrain(options: InspectCompanyBrainOptions): 
       }
       plan.manifest.push(entry);
       metadataBytes += Buffer.byteLength(JSON.stringify(entry));
-      if (metadataBytes > limits.maxMetadataBytes) {
-        throw opError('request_too_large', 'Selection metadata exceeds its limit; narrow selection.',
-          `Selection metadata passed ${limits.maxMetadataBytes} bytes. Inspect ${options.path} again with narrower --include globs or more --exclude globs, or split the repository.`);
-      }
+      if (metadataBytes > limits.maxMetadataBytes) throw new OperationError('request_too_large', 'Selection metadata exceeds its limit; narrow selection.');
     }
     plan.uncommitted = await inspectUncommitted(plan.revision, entries, path => policy(path) === null && /\.mdx?$/i.test(path), limits);
     if (plan.uncommitted.some(item => item.eligible)) finding(plan, 'error', 'source_not_ready', 'Eligible files have uncommitted changes; commit or exclude them and inspect again. Only committed bytes were inspected.');

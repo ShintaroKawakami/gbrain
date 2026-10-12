@@ -27,8 +27,6 @@ import { privatePagesFilterFragment } from '../search/private-visibility.ts';
 import { jsonbParam, type SqlExecutor } from './executor.ts';
 import type { LegacyUnscopedRead } from './brands.ts';
 import { sqlFragment, trustedSql } from './fragment.ts';
-import { projectionEligibleSql } from '../eligibility/sql.ts';
-import type { ReadEligibility } from '../eligibility/policy.ts';
 
 /** The engine's batch retry wrapper (audit JSONL + backoff + reconnect live on the engine). */
 export type BatchRetry = <T>(
@@ -281,11 +279,6 @@ export async function sweepContradictionCache(exec: SqlExecutor): Promise<number
     return result.affectedRows;
   }
 
-/** #5575: the read-eligibility predicate over the takes alias `t` when a read op passes a policy. */
-function takeEligibility(policy: ReadEligibility | undefined) {
-  return policy ? sqlFragment` AND ${trustedSql(projectionEligibleSql('takes', 't', policy))}` : sqlFragment``;
-}
-
 export async function listTakes(exec: LegacyUnscopedRead, opts: TakesListOpts = {}): Promise<Take[]> {
     const limit = clampSearchLimit(opts.limit, 100, 500);
     const offset = Math.max(0, Math.floor(opts.offset ?? 0));
@@ -318,7 +311,7 @@ export async function listTakes(exec: LegacyUnscopedRead, opts: TakesListOpts = 
           ${opts.takesHoldersAllowList ?? null}::text[] IS NULL
           OR t.holder = ANY(${opts.takesHoldersAllowList ?? null}::text[])
         )
-        ${sourceFilter}${takeEligibility(opts.eligibility)}
+        ${sourceFilter}
       ORDER BY
         CASE WHEN ${opts.sortBy ?? 'created_at'} = 'weight'      THEN t.weight     END DESC NULLS LAST,
         CASE WHEN ${opts.sortBy ?? 'created_at'} = 'since_date'  THEN t.since_date END DESC NULLS LAST,
@@ -328,7 +321,7 @@ export async function listTakes(exec: LegacyUnscopedRead, opts: TakesListOpts = 
     return rows.map((r) => takeRowToTake(r as Record<string, unknown>));
   }
 
-export async function searchTakes(exec: LegacyUnscopedRead, query: string, opts: SearchOpts & { takesHoldersAllowList?: string[]; sourceId?: string; sourceIds?: string[]; eligibility?: ReadEligibility } = {}): Promise<TakeHit[]> {
+export async function searchTakes(exec: LegacyUnscopedRead, query: string, opts: SearchOpts & { takesHoldersAllowList?: string[]; sourceId?: string; sourceIds?: string[] } = {}): Promise<TakeHit[]> {
     const limit = clampSearchLimit(opts.limit, 30, 100);
     const sourceFilter = opts.sourceIds && opts.sourceIds.length > 0
       ? sqlFragment`AND p.source_id = ANY(${opts.sourceIds}::text[])`
@@ -348,7 +341,7 @@ export async function searchTakes(exec: LegacyUnscopedRead, query: string, opts:
           ${opts.takesHoldersAllowList ?? null}::text[] IS NULL
           OR t.holder = ANY(${opts.takesHoldersAllowList ?? null}::text[])
         )
-        ${sourceFilter}${takeEligibility(opts.eligibility)}
+        ${sourceFilter}
       ORDER BY score DESC, t.weight DESC
       LIMIT ${limit}
     `)).rows;
@@ -361,7 +354,7 @@ export async function searchTakes(exec: LegacyUnscopedRead, query: string, opts:
 export async function searchTakesVector(
   exec: LegacyUnscopedRead,
     embedding: Float32Array,
-    opts: SearchOpts & { takesHoldersAllowList?: string[]; sourceId?: string; sourceIds?: string[]; eligibility?: ReadEligibility } = {},
+    opts: SearchOpts & { takesHoldersAllowList?: string[]; sourceId?: string; sourceIds?: string[] } = {},
   ): Promise<TakeHit[]> {
     const limit = clampSearchLimit(opts.limit, 30, 100);
     const vec = `[${Array.from(embedding).join(',')}]`;
@@ -383,7 +376,7 @@ export async function searchTakesVector(
           ${opts.takesHoldersAllowList ?? null}::text[] IS NULL
           OR t.holder = ANY(${opts.takesHoldersAllowList ?? null}::text[])
         )
-        ${sourceFilter}${takeEligibility(opts.eligibility)}
+        ${sourceFilter}
       ORDER BY t.embedding <=> ${vec}::vector
       LIMIT ${limit}
     `)).rows;

@@ -4,12 +4,10 @@ import { dirname, join } from 'node:path';
 import { configPath, gbrainPath, isThinClient, loadConfigFileOnly } from '../config.ts';
 import { privateWrite, readFileConfigState } from './state.ts';
 
-/** `onInvalid` lets init's `--json` writer report the refusal (agent contract v1 D2). */
-export function readInitConfigState(json: boolean, onInvalid?: (message: string) => never) {
+export function readInitConfigState(json: boolean) {
   const state = readFileConfigState(configPath());
   if (state.kind === 'invalid') {
     const message = `Existing configuration at ${configPath()} is unreadable or malformed. Preserve and repair it before initialization; it will not be overwritten.`;
-    if (onInvalid) onInvalid(message);
     if (json) console.log(JSON.stringify({ status: 'error', reason: 'invalid_existing_config', message }));
     else console.error(message);
     process.exit(1);

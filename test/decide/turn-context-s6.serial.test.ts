@@ -24,7 +24,7 @@ import { drainShadow } from '../../src/core/ai/decide/runtime.ts';
 import { packShape } from '../../src/core/ai/decide/pack.ts';
 import { resetDecideSearchCache } from '../../src/core/search/decide-stage.ts';
 import { assembleTurnContext, type TurnContextResult } from '../../src/core/context/turn-context.ts';
-import { applyRecallNeeded, startRecallNeeded, RECALL_NEEDED_DEADLINE_MS, __setRecallDeadlinesForTests } from '../../src/core/context/recall-needed.ts';
+import { applyRecallNeeded, startRecallNeeded, RECALL_NEEDED_DEADLINE_MS } from '../../src/core/context/recall-needed.ts';
 import {
   ensureIpcSecret, requestTurnContext, resolveSocketPath, startResolveIpcServer, TURN_CONTEXT_SERVER_BUDGET_MS, type TurnContextResponse,
 } from '../../src/core/context/resolve-ipc.ts';
@@ -150,13 +150,6 @@ describe('all slots off', () => {
 });
 
 describe('S6 on', () => {
-  // These cases pin what S6 decides, not how fast: wide windows keep a loaded
-  // runner from turning a decision into `late`. The fail directions (timeout,
-  // the late fire) run on the production deadlines.
-  let restoreDeadlines = () => {};
-  beforeEach(() => { restoreDeadlines = __setRecallDeadlinesForTests({ decisionMs: 5_000, serverBudgetMs: 5_150 }); });
-  afterEach(() => restoreDeadlines());
-
   test('fires one keyword-only search when the reflex was silent; world pages only; receipt fire', async () => {
     transport({ p: 0.9 });
     await setConfig(S6_ON);
@@ -326,8 +319,6 @@ describe('through the IPC server (the serve handler shape the hook talks to)', (
     for (const d of dirs) rmSync(d, { recursive: true, force: true });
   });
 
-  /** Server-side spans of the budgeted assembly (the handler the server's budget races), in ms. */
-  const spans: number[] = [];
   async function serve(): Promise<{ sock: string; secret: string }> {
     const dir = mkdtempSync(join(tmpdir(), 'gbrain-s6-ipc-'));
     dirs.push(dir);
@@ -335,14 +326,7 @@ describe('through the IPC server (the serve handler shape the hook talks to)', (
     const sock = resolveSocketPath(dir);
     const server = await startResolveIpcServer(sock, {
       resolve: async () => null,
-      turn_context: async (req) => {
-        const started = performance.now();
-        try {
-          return await assembleTurnContext(engine, { sourceId: 'default', window: req.window ?? [], priorContextText: req.priorContextText, sessionId: req.sessionId, maxBytes: req.maxBytes });
-        } finally {
-          spans.push(performance.now() - started);
-        }
-      },
+      turn_context: (req) => assembleTurnContext(engine, { sourceId: 'default', window: req.window ?? [], priorContextText: req.priorContextText, sessionId: req.sessionId, maxBytes: req.maxBytes }),
     }, { secret, boundSourceId: 'default' });
     servers.push(server!);
     return { sock, secret };
@@ -352,14 +336,9 @@ describe('through the IPC server (the serve handler shape the hook talks to)', (
     transport({ p: 0.01, delayMs: 5000 });
     await setConfig(S6_ON);
     const { sock, secret } = await serve();
-    spans.length = 0;
-    const pending = requestTurnContext(sock, { secret, window: [{ role: 'user', text: SURNAME }], sessionId: 's6-ipc' });
-    // The client and the runner can stall before the server has the request; that time is not the server's budget.
-    const stallUntil = performance.now() + 200;
-    while (performance.now() < stallUntil) { /* hold the event loop before the request reaches the server */ }
-    const res = await pending as TurnContextResponse;
-    expect(spans).toHaveLength(1);
-    expect(spans[0]!).toBeLessThan(TURN_CONTEXT_SERVER_BUDGET_MS);
+    const t0 = Date.now();
+    const res = await requestTurnContext(sock, { secret, window: [{ role: 'user', text: SURNAME }], sessionId: 's6-ipc' }) as TurnContextResponse;
+    expect(Date.now() - t0).toBeLessThan(TURN_CONTEXT_SERVER_BUDGET_MS);
     expect(res.ok).toBe(true);
     expect(res.degradedReason).toBeUndefined();
     expect(res.block?.pointers.map((p) => p.slug)).toEqual(['people/mateo-glimmerton']);

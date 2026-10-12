@@ -27,7 +27,6 @@ import { parseSourceConfig, type SourceRow } from './sources-load.ts';
 import { isSourceUnchangedSinceSync } from './git-head.ts';
 import { resolveHoursEnv } from './env-number.ts';
 import { isSyncDisabledConfig } from './sync-policy.ts';
-import { gitChildEnv } from './git-env.ts';
 
 export interface SourceMetrics {
   source_id: string;
@@ -124,7 +123,6 @@ export function newestCommitMs(localPath: string | null): number | null {
   if (!localPath) return null;
   try {
     const out = execFileSync('git', ['-C', localPath, 'log', '-1', '--format=%ct'], {
-      env: gitChildEnv(),
       encoding: 'utf8',
       timeout: 10_000,
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -153,7 +151,6 @@ export function commitTimeMs(localPath: string | null, sha: string | null): numb
   if (!localPath || !sha) return null;
   try {
     const out = execFileSync('git', ['-C', localPath, 'show', '-s', '--format=%ct', sha], {
-      env: gitChildEnv(),
       encoding: 'utf8',
       timeout: 10_000,
       stdio: ['ignore', 'pipe', 'ignore'],

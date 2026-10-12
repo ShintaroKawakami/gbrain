@@ -17,7 +17,7 @@ import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { createHash } from 'crypto';
 import { startHttpTransport } from '../src/mcp/http-transport.ts';
 import { RateLimiter } from '../src/mcp/rate-limit.ts';
-import { contractFor } from './helpers/instructions-parity.ts';
+import { GBRAIN_MCP_INSTRUCTIONS } from '../src/mcp/instructions.ts';
 
 type SqlResult = unknown[] | unknown;
 type SqlHandler = (query: string, values: unknown[]) => SqlResult | Promise<SqlResult>;
@@ -237,16 +237,7 @@ describe('http-transport: auth', () => {
     expect(body.jsonrpc).toBe('2.0');
   });
 
-  async function listedTools(url: string): Promise<string[]> {
-    const r = await fetch(`${url}/mcp`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${VALID_TOKEN}`, 'Content-Type': 'application/json' },
-      body: rpc('tools/list', {}),
-    });
-    return ((await r.json()) as { result: { tools: Array<{ name: string }> } }).result.tools.map(t => t.name);
-  }
-
-  test('initialize returns the contract generated for this token (F1)', async () => {
+  test('initialize returns the same canonical agent contract as stdio', async () => {
     const r = await fetch(`${srv.url}/mcp`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${VALID_TOKEN}`, 'Content-Type': 'application/json' },
@@ -258,8 +249,7 @@ describe('http-transport: auth', () => {
     });
     expect(r.status).toBe(200);
     const body = await r.json() as { result?: { instructions?: string } };
-    // F1: the contract for exactly this token's tools/list.
-    expect(body.result?.instructions).toStartWith(contractFor(await listedTools(srv.url)));
+    expect(body.result?.instructions).toBe(GBRAIN_MCP_INSTRUCTIONS);
   });
 
   test('initialize appends the deployment identity to the canonical contract (#4748)', async () => {
@@ -281,7 +271,7 @@ describe('http-transport: auth', () => {
       const body = await r.json() as { result?: { instructions?: string } };
       // Append-only: the canonical safety contract is preserved verbatim
       // and the identity rides UNDER it.
-      expect(body.result?.instructions).toStartWith(contractFor(await listedTools(identityServer.url)));
+      expect(body.result?.instructions).toStartWith(GBRAIN_MCP_INSTRUCTIONS);
       expect(body.result?.instructions).toEndWith(
         'Deployment identity:\nCOMPANY BRAIN — shared business memory.',
       );

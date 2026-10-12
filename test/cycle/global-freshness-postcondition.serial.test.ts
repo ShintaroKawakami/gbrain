@@ -21,8 +21,7 @@ mock.module('../../src/commands/embed.ts', () => ({
   runEmbedCore: async (engine: BrainEngine, opts: { signal?: AbortSignal }) => {
     if (stealDuringEmbed) {
       await engine.executeRaw(
-        `UPDATE gbrain_cycle_locks SET acquired_at = acquired_at + INTERVAL '1 millisecond',
-             acquisition_token = gen_random_uuid()
+        `UPDATE gbrain_cycle_locks SET acquired_at = acquired_at + INTERVAL '1 millisecond'
          WHERE id = 'gbrain-cycle'`,
       );
       await new Promise<void>(resolve => {

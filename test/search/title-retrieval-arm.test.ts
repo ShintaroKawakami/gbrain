@@ -34,7 +34,7 @@ import {
   boundWebsearchQuery,
   buildOrFallbackWebsearchQuery,
 } from '../../src/core/search/sql-ranking.ts';
-import { configureGateway, resetGateway } from '../../src/core/ai/gateway.ts';
+import { configureGateway } from '../../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
 
@@ -55,9 +55,12 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await engine.disconnect();
-  // R5: restore the preload baseline for sibling files in this shard; resetGateway()
-  // re-applies the registered baseline factory, so it cannot drift from it.
-  resetGateway();
+  // Restore the preload-equivalent gateway for sibling files in this shard.
+  configureGateway({
+    embedding_model: 'openai:text-embedding-3-large',
+    embedding_dimensions: DIM,
+    env: { ...process.env },
+  });
 });
 
 beforeEach(async () => {

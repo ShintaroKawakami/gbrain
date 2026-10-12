@@ -3,10 +3,8 @@ import { formatJobDetail, hasFlag, rehydrateJobDates, type JobsCommandContext } 
 import { isThinClient, loadConfig } from '../../core/config.ts';
 import type { MinionJob } from '../../core/minions/types.ts';
 import { callRemoteTool, unpackToolResult } from '../../core/mcp-client.ts';
-import { spendBasis } from '../../core/minions/spend-record.ts';
-import { jobGroupAmounts } from '../../core/minions/spend-authorization.ts';
 
-export async function runJobsGet({ args, queue, engine }: JobsCommandContext): Promise<void> {
+export async function runJobsGet({ args, queue }: JobsCommandContext): Promise<void> {
   const id = parseInt(args[1], 10);
   if (isNaN(id)) { console.error('Error: job ID required. Usage: gbrain jobs get <id>'); process.exit(1); }
 
@@ -35,9 +33,7 @@ export async function runJobsGet({ args, queue, engine }: JobsCommandContext): P
   if (!job) { console.error(`Job #${id} not found.`); process.exit(1); }
   // #3685: same machine-readable contract as `list --json` above.
   if (hasFlag(args, '--json')) {
-    const { basis, why } = spendBasis(job);
-    const group = job.spend_authorization && !isThinClient(cfg) ? await jobGroupAmounts(engine, job.spend_authorization) : undefined;
-    console.log(JSON.stringify({ ...job, spend_basis: basis, spend_why: why, ...(group ? { spend_group: group } : {}) }, null, 2));
+    console.log(JSON.stringify(job, null, 2));
     return;
   }
   console.log(formatJobDetail(job));

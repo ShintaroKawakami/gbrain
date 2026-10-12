@@ -1,3 +1,0 @@
-[
-  { "id": "groq", "unpriced_models": ["model-no-touchpoint-lists"], "touchpoints": { "chat": { "models": [] } } }
-]

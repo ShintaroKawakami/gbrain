@@ -162,18 +162,18 @@ describe('dream --drain failure summary (#4730)', () => {
 });
 
 describe('dream --drain wiring and exit codes (#1678)', () => {
-  test('exits 11 (resumable stop; A3 reserves 3 for confirmation_required) while backlog remains or the final count is unknown', async () => {
+  test('exits 3 while backlog remains or the final count is unknown', async () => {
     for (const remaining of [4, null]) {
       nextResult = baseResult({ remaining });
-      expect((await runDrainCaptured([])).exitCode, String(remaining)).toBe(11);
+      expect((await runDrainCaptured([])).exitCode, String(remaining)).toBe(3);
     }
   });
 
-  test('a held cycle lock reports cycle_already_running and exits 11', async () => {
+  test('a held cycle lock reports cycle_already_running and exits 3', async () => {
     nextResult = new LockUnavailableError('gbrain-cycle');
     const r = await runDrainCaptured(['--json']);
-    expect(JSON.parse(r.stdout.join('\n'))).toEqual({ phase: 'extract_atoms', status: 'skipped', reason: 'cycle_already_running', resume_command: 'gbrain dream --drain --window 300' });
-    expect(r.exitCode).toBe(11);
+    expect(JSON.parse(r.stdout.join('\n'))).toEqual({ phase: 'extract_atoms', status: 'skipped', reason: 'cycle_already_running' });
+    expect(r.exitCode).toBe(3);
   });
 
   test('--window sets the drain budget (default 300 s) and --source reaches the shared helper', async () => {
@@ -196,25 +196,25 @@ describe('dream --drain wiring and exit codes (#1678)', () => {
   });
 });
 
-// #5809 / #5832 stop contract: every stop that is not `drained` exits 11 (was 3; A3),
+// #5809 / #5832 stop contract: every stop that is not `drained` keeps exit 3,
 // prints the drain JSON, and names the exact rerun command on stderr.
 describe('dream --drain stop contract (#5809)', () => {
   test.each([
     { stopped: 'window' as const, remaining: 12 },
     { stopped: 'deadline' as const, remaining: 30 },
     { stopped: 'lock_lost' as const, remaining: 8 },
-  ])('a $stopped stop prints the JSON, exits 11 and names the rerun command', async ({ stopped, remaining }) => {
+  ])('a $stopped stop prints the JSON, exits 3 and names the rerun command', async ({ stopped, remaining }) => {
     nextResult = baseResult({ stopped, remaining, extracted: 4, batches: 2 });
     const r = await runDrainCaptured(['--json', '--window', '90']);
-    expect(JSON.parse(r.stdout.join('\n'))).toMatchObject({ stopped, remaining, extracted: 4, batches: 2, resume_command: 'gbrain dream --drain --window 90' });
-    expect(r.exitCode).toBe(11);
+    expect(JSON.parse(r.stdout.join('\n'))).toMatchObject({ stopped, remaining, extracted: 4, batches: 2 });
+    expect(r.exitCode).toBe(3);
     expect(r.stderr).toContain(`[drain] stopped: ${stopped}; ${remaining} page(s) remaining. Rerun: gbrain dream --drain --window 90`);
   });
 
-  test('a provider_failure stop with an empty final recount still exits 11 (only drained exits 0)', async () => {
+  test('a provider_failure stop with an empty final recount still exits 3 (only drained exits 0)', async () => {
     nextResult = baseResult({ status: 'provider_failure', stopped: 'provider_failure', remaining: 0 });
     const r = await runDrainCaptured([]);
-    expect(r.exitCode).toBe(11);
+    expect(r.exitCode).toBe(3);
     expect(r.stderr).toContain('Rerun: gbrain dream --drain --window 300');
   });
 
@@ -237,20 +237,3 @@ describe('dream --drain stop contract (#5809)', () => {
   });
 });
 
-
-describe('dream --drain budget stop (#6425)', () => {
-  test('names the spend, the cap and the raise-cap command; --json carries a structured notice', async () => {
-    nextResult = baseResult({ stopped: 'budget', remaining: 2, batches: 2, spent_usd: 0.0151, budget_usd: 0.03 });
-    const human = await runDrainCaptured([]);
-    expect(human.exitCode).toBe(11);
-    expect(human.stderr).toContain('[drain] stopped: budget; spent $0.0151 of the $0.03 per-run cap (cycle.extract_atoms.budget_usd); 2 page(s) remaining. '
-      + 'Rerun: gbrain dream --drain --window 300, or raise the cap: gbrain config set cycle.extract_atoms.budget_usd <usd>');
-    const json = await runDrainCaptured(['--json']);
-    const payload = JSON.parse(json.stdout.find(l => l.trim().startsWith('{'))!);
-    expect(payload).toMatchObject({ stopped: 'budget', spent_usd: 0.0151, budget_usd: 0.03, resume_command: 'gbrain dream --drain --window 300' });
-    expect(payload.notices).toEqual([expect.objectContaining({ code: 'atom_drain_budget', kind: 'info', contract_version: 1,
-      fix: expect.objectContaining({ argv: ['gbrain', 'config', 'set', 'cycle.extract_atoms.budget_usd', '<USD>'], consent: ['paid'], next: 'ask_user',
-        verify: { argv: ['gbrain', 'config', 'get', 'cycle.extract_atoms.budget_usd'] } }) })]);
-    expect(payload.notices[0].why).toContain('$0.0151 of $0.03');
-  });
-});

@@ -9,15 +9,12 @@ function ordinaryPool(engine: BrainEngine): BudgetPool {
 export function publicationConcurrency(engine: BrainEngine): number {
   return engine.kind === 'pglite' ? 1 : Math.min(2, poolLongHoldCapacity(ordinaryPool(engine)));
 }
-/**
- * Acquire before checking out a connection; there is no asynchronous wait here. #5984 lanes pass a higher
- * `limit` (their lane count), still bounded by the pool's long-hold capacity.
- */
-export function tryAcquirePublicationCapacity(engine: BrainEngine, limit?: number): (() => void) | null {
+/** Acquire before checking out a connection; there is no asynchronous wait here. */
+export function tryAcquirePublicationCapacity(engine: BrainEngine): (() => void) | null {
   if (engine.kind === 'postgres') {
     const pool = ordinaryPool(engine);
     const count = publishing.get(pool) ?? 0;
-    if (count >= (limit === undefined ? publicationConcurrency(engine) : Math.min(limit, poolLongHoldCapacity(pool)))) return null;
+    if (count >= publicationConcurrency(engine)) return null;
     const release = tryAcquirePoolLongHold(pool);
     if (!release) return null;
     publishing.set(pool, count + 1);

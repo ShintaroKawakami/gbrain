@@ -21,7 +21,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, unl
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { detectExecutionEnvironment } from '../core/execution-env.ts';
 import { join, dirname, isAbsolute, resolve as resolvePath } from 'path';
-import { execSync } from '../core/spawn.ts';
+import { execSync } from 'child_process';
 import type { BrainEngine } from '../core/engine.ts';
 import { loadConfig, saveConfig, gbrainPath as gbrainHomePath } from '../core/config.ts';
 import {
@@ -82,7 +82,6 @@ import {
   systemdUnitPath,
   unitWrapperPath,
 } from './autopilot/jobs.ts';
-import { autopilotInstallConsent, renderInstallDryRun } from './autopilot/install-consent.ts';
 export { cronLineBelongsToBrain, crontabIndicatesAutopilotInstall, plistWrapperPath, scriptWrapperPath, unitWrapperPath };
 export { autopilotLockPath, autopilotDisabledMarkerPath, autopilotPausedMarkerPath, autopilotLaunchdLabel };
 export { relativeSourceLocalPathSkipWarning as relativeLocalPathSkipWarning };
@@ -762,7 +761,7 @@ const GBRAIN_ENV_TEMPLATE = `# gbrain daemon environment — sourced by autopilo
 # API keys (~/.gbrain/config.json file plane works too):
 # export ANTHROPIC_API_KEY=sk-ant-...
 # export OPENAI_API_KEY=sk-...
-# export VOYAGE_API_KEY=pa-...  (off disk, as this file is bash: ="$(op read 'op://Private/Voyage/credential')")
+# export VOYAGE_API_KEY=pa-...
 #
 # Process-level env that must exist before the daemon boots:
 # export NODE_EXTRA_CA_CERTS=/path/to/corp-ca.pem
@@ -932,8 +931,6 @@ async function installDaemon(engine: BrainEngine, args: string[]) {
     process.exit(1);
   }
 
-  if (args.includes('--dry-run')) { console.log(renderInstallDryRun({ target, repoPath, job })); return; }
-  if (!await autopilotInstallConsent(engine, args, { target, repoPath, job })) return;
   const wrapperPath = writeWrapperScript(repoPath, target, job);
   // #2608: tell the operator about the deterministic key channel — launchd/
   // systemd don't inherit the login shell env, and rc-file interactive guards
@@ -942,7 +939,7 @@ async function installDaemon(engine: BrainEngine, args: string[]) {
   console.log(
     `API keys: the daemon sources ${join(gbrainHomePath(), 'env')} (plain KEY=value lines, ` +
     `auto-exported) in addition to your shell profile. If LLM phases report no provider, put ` +
-    'ANTHROPIC_API_KEY=... (or KEY="$(your-secret-manager get KEY)" to keep it off disk) there and re-run `gbrain autopilot --install`.',
+    'ANTHROPIC_API_KEY=... (or your provider\'s key) there and re-run `gbrain autopilot --install`.',
   );
   // A fresh install clears any prior self-disable AND any leaked pause, so a
   // reinstall does not report "disabled" forever or park itself from day one

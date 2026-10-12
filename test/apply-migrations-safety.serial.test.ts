@@ -131,7 +131,6 @@ mock.module(${JSON.stringify(join(root, 'src/core/migration-orchestration-lock.t
   acquireMigrationOrchestrationLock: async () => ({ assertHeld: async () => {}, release: async () => {} }),
   MIGRATIONS_RUNNING_EXIT_CODE: 75,
   MigrationsRunningError: class extends Error {},
-  MigrationLeaseLostError: class extends Error {},
 }));
 const factory = await import(${JSON.stringify(join(root, 'src/core/engine-factory.ts'))});
 mock.module(${JSON.stringify(join(root, 'src/core/engine-factory.ts'))}, () => ({

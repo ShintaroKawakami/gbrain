@@ -28,10 +28,6 @@ export const claudeCli: Recipe = {
   name: 'Claude (via CLI)',
   tier: 'native',
   implementation: 'claude-cli',
-  // Calls bill against the operator's Claude subscription, not per token, so
-  // `pricing.overrides` accepts a `claude-cli:*` provider wildcard (e.g. $0).
-  // Without one, claude-cli models price at Anthropic's API list rate.
-  billing: 'subscription',
   // The CLI owns auth; no env vars are required from the gateway side.
   auth_env: {
     required: [],

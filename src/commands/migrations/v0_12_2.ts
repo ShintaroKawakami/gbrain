@@ -125,7 +125,6 @@ function finalizeResult(phases: OrchestratorPhaseResult[], status: 'complete' | 
 
 export const v0_12_2: Migration = {
   version: '0.12.2',
-  fresh_install_noop: true,
   featurePitch: {
     headline: 'Postgres frontmatter queries now work — JSONB double-encode bug fixed and existing rows auto-repaired',
     description:

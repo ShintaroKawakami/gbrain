@@ -15,15 +15,8 @@
 import type { GBrainConfig } from './config.ts';
 import { discoverOAuth, mintClientCredentialsToken, smokeTestMcp } from './remote-mcp-probe.ts';
 import { callRemoteTool, RemoteMcpError, unpackToolResult } from './mcp-client.ts';
-import { isScopeErrorCode } from './error-catalogue.ts';
 import { safeCompare, driftLevel, loadPromptState } from './thin-client-upgrade-prompt.ts';
 import { VERSION } from '../version.ts';
-import { writeJsonDocument } from './cli-force-exit.ts';
-
-/** A status-only host's envelope on a failed check: the code, its fix and the words to relay. */
-function statusOnlyDetail(env: Record<string, unknown> | undefined): Record<string, unknown> {
-  return env ? { code: 'serve_status_only', fix: env.fix, user_message: env.user_message, retry_after_s: env.retry_after_s } : {};
-}
 
 export interface RemoteCheck {
   name: string;
@@ -53,7 +46,7 @@ export async function runRemoteDoctor(config: GBrainConfig, args: string[]): Pro
   const report = await collectRemoteDoctorReport(config);
 
   if (jsonOutput) {
-    await writeJsonDocument(JSON.stringify(report));
+    console.log(JSON.stringify(report));
   } else {
     printHumanReport(report);
   }
@@ -163,7 +156,7 @@ export async function collectRemoteDoctorReport(
       name: 'oauth_discovery',
       status: 'fail',
       message: disco.message,
-      detail: { reason: disco.reason, ...(disco.status ? { status: disco.status } : {}), ...statusOnlyDetail(disco.status_only) },
+      detail: { reason: disco.reason, ...(disco.status ? { status: disco.status } : {}) },
     });
     return finalize(remote, checks);
   }
@@ -180,10 +173,7 @@ export async function collectRemoteDoctorReport(
       name: 'oauth_token',
       status: 'fail',
       message: tokenRes.message,
-      detail: {
-        reason: tokenRes.reason, ...(tokenRes.status ? { status: tokenRes.status } : {}),
-        ...(tokenRes.retry_after_s !== undefined ? { retry_after_s: tokenRes.retry_after_s } : {}), ...statusOnlyDetail(tokenRes.status_only),
-      },
+      detail: { reason: tokenRes.reason, ...(tokenRes.status ? { status: tokenRes.status } : {}) },
     });
     return finalize(remote, checks);
   }
@@ -440,7 +430,7 @@ async function probeScopes(config: GBrainConfig): Promise<ScopeProbeResult> {
     result.read_ok = true;
   } catch (e) {
     if (e instanceof RemoteMcpError) {
-      result.read_error = isScopeErrorCode(e.detail?.code, e.detail?.canonical_code, e.detail?.reason) ? 'missing_scope' : e.reason;
+      result.read_error = e.detail?.code === 'missing_scope' ? 'missing_scope' : e.reason;
     } else {
       result.read_error = e instanceof Error ? e.message : String(e);
     }
@@ -453,7 +443,7 @@ async function probeScopes(config: GBrainConfig): Promise<ScopeProbeResult> {
     result.admin_ok = true;
   } catch (e) {
     if (e instanceof RemoteMcpError) {
-      result.admin_error = isScopeErrorCode(e.detail?.code, e.detail?.canonical_code, e.detail?.reason) ? 'missing_scope' : e.reason;
+      result.admin_error = e.detail?.code === 'missing_scope' ? 'missing_scope' : e.reason;
     } else {
       result.admin_error = e instanceof Error ? e.message : String(e);
     }

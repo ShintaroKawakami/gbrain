@@ -20,7 +20,6 @@ import { checkVolunteerChannels } from './core-health.ts';
 import { buildRetrievalReflexCheck, buildMemoryVerbsCheck } from './verbs-reflex.ts';
 import type { Check } from '../../doctor.ts';
 import type { DoctorContext, DoctorEntry } from '../context.ts';
-import { checkError } from '../check-fix.ts';
 
 async function runResolverHealth(ctx: DoctorContext): Promise<Check[]> {
   const { skillsDirResolution: detected, doFix, dryRun, jsonOutput, scope } = ctx;
@@ -77,7 +76,7 @@ async function runResolverHealth(ctx: DoctorContext): Promise<Check[]> {
       checks.push(check);
     }
   } else if (scope === 'all') {
-    checks.push(checkError('resolver_health', 'find skills directory'));
+    checks.push({ name: 'resolver_health', status: 'warn', message: 'Could not find skills directory' });
   }
   return checks;
 }
@@ -121,7 +120,6 @@ async function runRetrievalReflex(ctx: DoctorContext): Promise<Check[]> {
 export const retrievalReflexEntry: DoctorEntry = {
   name: 'retrieval_reflex_health',
   emits: ['retrieval_reflex_health', 'volunteer_channels', 'memory_verbs_usage'],
-  engineChecks: ['volunteer_channels'],
   run: runRetrievalReflex,
 };
 

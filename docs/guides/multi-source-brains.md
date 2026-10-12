@@ -166,7 +166,8 @@ source is archived. Private pages stay hidden from remote agents exactly as in
 
 Graph output carries source ids: each `gbrain graph` node has `source_id`, and
 each edge returned to agents has `from_source_id` / `to_source_id`. The same slug
-in two sources is two nodes or two edges.
+in two sources is two nodes or two edges, so a walk may return more edges than
+before.
 
 When a local unqualified read finds nothing but the page has links in a source
 outside the read (a non-federated source), the CLI prints the per-source counts
@@ -223,7 +224,6 @@ gbrain sources unfederate <id>
 gbrain sources mirror-readonly <id>
 gbrain sources mirror-writable <id>
 gbrain sources refresh <id> [--dry-run] [--resume|--abandon]   Managed brains: fast-forward the checkout and sync.
-gbrain sources set-strategy <id> <markdown|code|auto>
 ```
 
 ### Read-only mirror sources
@@ -267,27 +267,6 @@ The autopilot cycle syncs the checkout as it is and reports
 `upstream_refresh: "skipped_managed"`; `gbrain doctor` (`sync_freshness`) says
 "upstream unknown" when the checkout was not fetched in the last 24 hours. See
 [`managed_pull_skipped`](write-refusals.md#managed_pull_skipped).
-
-### Code sources: persist the sync strategy
-
-Every sync of a source (`sync --all`, autopilot, the dream cycle, the MCP
-`sync` op) uses the strategy stored on the source when the call names none.
-Unset, that is `markdown`, which imports only Markdown and deletes the page of
-a code file that changes. Record `code` (code only) or `auto` (Markdown and
-code) once for a code repository:
-
-```bash
-gbrain sources set-strategy api code
-gbrain sync --source api --full   # re-classify files unchanged since the last sync
-```
-
-`gbrain sources list --json` shows `strategy` per source (`null` when unset).
-An explicit `gbrain sync --strategy` still wins for that run. A source with an
-unfinished managed sync run refuses the change (`sync_run_unfinished`) until
-the run finishes (`gbrain sync --source <id> --no-pull` resumes it) or is
-retired ([managed sync orphans](repair.md#managed-sync-orphans)): that run's
-frozen manifest was classified under the old strategy. Connector sources
-(GitHub, Google) materialize Markdown and take no strategy.
 
 ## The git requirement for --path sources
 
@@ -352,7 +331,7 @@ stored file paths, called its **slug-root mode**:
 
 The mode is decided once, by the first real sync or the first coordinated page
 write (such as `put_page`) that records a new file path, and pinned in the
-source's configuration. A few write paths, such as saved brainstorm
+source's configuration. A few older write paths, such as saved brainstorm
 ideas, follow an existing pin but do not set one. Every later sync,
 write and reader obeys the pin, so an existing brain never has its slugs
 renamed. `gbrain sync --dry-run` works out the mode without pinning it. A
@@ -371,10 +350,11 @@ can refuse that file with a slug/origin mismatch; there, add new pages as
 files in the checkout and sync them. Pages that already have a stored path
 keep writing to that file.
 
-**Older stored paths.** Releases before v0.60.5.0 recorded Git-root-style
-paths (`notes/people/alice-example.md`) for pages in `source-root` sources.
-Sync accepts that form when the rest of the path names the same page, and
-rewrites it on the next import. No command is needed.
+**Older stored paths.** Before v0.60.5.0, write-through recorded
+Git-root-style paths (`notes/people/alice-example.md`) for pages in
+`source-root` sources, which made the next sync fail. Sync now accepts that
+older form when the rest of the path names the same page, and rewrites it on
+the next import. No command is needed.
 
 **`ambiguous_source_path`.** If both readings of an old stored path exist as
 files, for example `~/vault/notes/people/alice-example.md` and

@@ -18,7 +18,7 @@
  *
  * Lane: unit. Run: `bun test test/qm-provisioning.test.ts`. Moved from test/e2e/
  * by the 2026-09 lane-move pilot (PGLite-only, no DATABASE_URL); see
- * docs/test-audit/2026-09-29/implementation/lane-pilot.md.
+ * docs/TESTING.md "Lane-move pilot".
  */
 
 import { describe, test as testRaw, expect, beforeAll, afterAll } from 'bun:test';
@@ -26,7 +26,6 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { keylessBrainEnv } from './helpers/provider-env.ts';
-import { startServeHttp, type ServeHttp } from './helpers/serve-http.ts';
 import { cliDiagnostic, fixtureDiagnostic } from './helpers/fixture-diagnostics.ts';
 
 function test(name: string, fn: () => void | Promise<unknown>): void {
@@ -62,7 +61,7 @@ describe('qm-harness provisioning + write fence (e2e, PGLite)', () => {
   let workDir: string;
   let aliceHome: string;
   let bobHome: string;
-  let server: ServeHttp | null = null;
+  let serverProc: ReturnType<typeof Bun.spawn> | null = null;
   let serverPort: number;
   const creds: Record<string, { clientId: string; secret: string }> = {};
   let rerunCredsGrew = true; // set false when idempotency holds
@@ -136,14 +135,26 @@ describe('qm-harness provisioning + write fence (e2e, PGLite)', () => {
     };
 
     // 5. Serve over HTTP MCP (holds the PGLite lock from here on).
-    server = await startServeHttp({
-      cwd: process.cwd(),
-      env: keylessBrainEnv(process.env, hostHome, {
-        DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined, GBRAIN_REMOTE_CLIENT_SECRET: undefined,
-      }),
-      timeoutMs: 30_000,
+    serverPort = 30000 + Math.floor(Math.random() * 30000);
+    const env = keylessBrainEnv(process.env, hostHome, {
+      DATABASE_URL: undefined, GBRAIN_DATABASE_URL: undefined, GBRAIN_REMOTE_CLIENT_SECRET: undefined,
     });
-    serverPort = server.port;
+    serverProc = Bun.spawn({
+      cmd: ['bun', '--no-env-file', 'run', CLI, 'serve', '--http', '--port', String(serverPort)],
+      env, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe',
+    });
+    const deadline = Date.now() + 30_000;
+    let up = false;
+    while (Date.now() < deadline) {
+      try {
+        const res = await fetch(`http://127.0.0.1:${serverPort}/.well-known/oauth-authorization-server`, {
+          signal: AbortSignal.timeout(500),
+        });
+        if (res.ok) { up = true; break; }
+      } catch { /* retry */ }
+      await new Promise(r => setTimeout(r, 250));
+    }
+    if (!up) throw new Error('serve --http did not come up');
 
     // 6. Thin-client bootstrap for both scopes (the once-per-sandbox step).
     //    --oauth-client-secret (NOT the env var) on purpose: an env-sourced
@@ -164,7 +175,10 @@ describe('qm-harness provisioning + write fence (e2e, PGLite)', () => {
   }, 300_000);
 
   afterAll(async () => {
-    await server?.stop();
+    if (serverProc) {
+      serverProc.kill();
+      await serverProc.exited.catch(() => {});
+    }
     for (const dir of [hostHome, workDir, aliceHome, bobHome]) {
       if (dir) rmSync(dir, { recursive: true, force: true });
     }

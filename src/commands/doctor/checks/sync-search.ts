@@ -42,7 +42,7 @@ import {
   checkStaleLocks,
   checkCyclePhaseScope,
 } from './routing-federation.ts';
-import { checkSearchMode, checkEvalDrift } from './search-eval.ts';
+import { checkChatFallbackChainInert, checkSearchMode, checkEvalDrift } from './search-eval.ts';
 import type { Check } from '../../doctor.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
 
@@ -63,8 +63,6 @@ async function runSyncFreshness(ctx: DoctorContext): Promise<Check[]> {
     checks.push(await checkSyncFreshness(engine, { localOnly: true }));
     const contentWrites = await (await import('./canonical-content.ts')).checkCanonicalContentWrites(engine);
     if (contentWrites) checks.push(contentWrites);
-    const sharedSkills = await (await import('./shared-skills.ts')).checkSharedSkillsSources(engine);
-    if (sharedSkills) checks.push(sharedSkills);
     // Monthly backup-coverage check (same D4 trust stance as sync_freshness:
     // localOnly:true probes git; the remote path stays a cache-only reader).
     progress.heartbeat('backup_coverage');
@@ -105,7 +103,6 @@ export const syncFreshnessEntry: DoctorEntry = {
   emits: [
     'sync_freshness',
     'canonical_content_writes',
-    'shared_skills_sources',
     'backup_coverage',
     'sync_consolidation',
     'links_extraction_lag',
@@ -126,6 +123,9 @@ async function runSearchMode(ctx: DoctorContext): Promise<Check[]> {
   // v0.32.3 search-lite — mode + eval_drift surfaces. Status stays 'ok' per
   // [CDX-20]; hint lives in `message`.
   if (engine !== null) {
+    progress.heartbeat('chat_fallback_chain_inert');
+    const inertFallbackChain = await checkChatFallbackChainInert(engine);
+    if (inertFallbackChain) checks.push(inertFallbackChain);
     progress.heartbeat('search_mode');
     checks.push(await checkSearchMode(engine));
     // issue #1777 — hidden_by_search_policy: chunked pages withheld from default
@@ -217,8 +217,9 @@ async function runSearchMode(ctx: DoctorContext): Promise<Check[]> {
 }
 
 export const searchModeEntry: DoctorEntry = {
-  name: 'search_mode',
+  name: 'chat_fallback_chain_inert',
   emits: [
+    'chat_fallback_chain_inert',
     'search_mode',
     'hidden_by_search_policy',
     'eval_drift',

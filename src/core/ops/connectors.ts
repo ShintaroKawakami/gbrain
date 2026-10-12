@@ -13,7 +13,7 @@
  */
 
 import type { Operation } from './contract.ts';
-import { hostOnlyError, invalidParam } from './op-fix.ts';
+import { OperationError } from './contract.ts';
 import { connectorProviders } from '../connectors/registry.ts';
 import { credentialMode, resolveCredential } from '../connectors/credentials.ts';
 import {
@@ -24,11 +24,10 @@ import {
   sourceIdKey,
 } from '../connectors/config-keys.ts';
 import { isConnectorProviderName } from '../connectors/registry.ts';
+import { runConnectorSync } from '../connectors/sync.ts';
 
 const connectors_status: Operation = {
   name: 'connectors_status',
-  mutating: false,
-  idempotent: true,
   outputRedaction: 'no_stored_text',
   description:
     'Per-provider chat-connector status: strategies, whether a credential is ' +
@@ -36,7 +35,7 @@ const connectors_status: Operation = {
     'last_sync_at, auth_error_at, auto_sync, and the incremental watermark. ' +
     'Local-only; credentials never cross the wire.',
   scope: 'read',
-  localOnly: true, cliOnly: { argv: ['gbrain', 'connectors', 'status'] },
+  localOnly: true,
   params: {
     provider: {
       type: 'string',
@@ -45,9 +44,7 @@ const connectors_status: Operation = {
   },
   handler: async (ctx, p) => {
     if (ctx.remote === true) {
-      throw hostOnlyError(ctx, 'permission_denied', 'connectors_status is local-only — call via the gbrain CLI.',
-        ['gbrain', 'connectors', 'status', ...(p.provider === 'chatgpt' || p.provider === 'claude' ? [p.provider] : [])],
-        'Connector credentials live on the brain host, so only its CLI reads their status.');
+      throw new OperationError('permission_denied', 'connectors_status is local-only — call via the gbrain CLI.');
     }
     const only = typeof p.provider === 'string' ? p.provider : undefined;
     const providers = connectorProviders.filter((prov) => !only || prov.name === only);
@@ -75,16 +72,15 @@ const connectors_status: Operation = {
 
 const connector_sync: Operation = {
   name: 'connector_sync',
-  idempotent: false,
   outputRedaction: 'no_stored_text',
   description:
     'Sync a chat provider\'s conversation history into the brain: list new ' +
     'conversations since the watermark, fetch them, and ingest as pages under ' +
-    'conversations/<provider>/. Incremental by default; `full: true` re-scans. ' +
+    'conversations/<provider>/. Incremental by default; --full re-scans. ' +
     'Local-only (uses on-disk credentials).',
   scope: 'write',
   mutating: true,
-  localOnly: true, cliOnly: { argv: ['gbrain', 'connectors', 'sync', '<provider>'] },
+  localOnly: true,
   params: {
     provider: { type: 'string', required: true, description: "'chatgpt' or 'claude'." },
     full: { type: 'boolean', description: 'Ignore the watermark and re-scan everything.' },
@@ -93,16 +89,12 @@ const connector_sync: Operation = {
   },
   handler: async (ctx, p) => {
     if (ctx.remote === true) {
-      throw hostOnlyError(ctx, 'permission_denied', 'connector_sync is local-only — call via the gbrain CLI.',
-        ['gbrain', 'connectors', 'sync', ...(p.provider === 'chatgpt' || p.provider === 'claude' ? [p.provider] : []), '--dry-run'],
-        'Connector syncs use credentials stored on the brain host; the dry run previews how many conversations would import.');
+      throw new OperationError('permission_denied', 'connector_sync is local-only — call via the gbrain CLI.');
     }
     const provider = typeof p.provider === 'string' ? p.provider : '';
     if (!isConnectorProviderName(provider)) {
-      throw invalidParam(ctx, 'connector_sync', 'provider', 'unknown connector provider (expected chatgpt|claude)', { choices: ['chatgpt', 'claude'] });
+      throw new OperationError('invalid_params', `unknown connector provider '${provider}' (expected chatgpt|claude)`);
     }
-    // The sync engine (transcript ingest and its persistence graph) loads only when a sync runs.
-    const { runConnectorSync } = await import('../connectors/sync.ts');
     return runConnectorSync(ctx.engine, {
       provider,
       sourceId: ctx.sourceId,

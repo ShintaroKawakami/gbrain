@@ -3,8 +3,7 @@ import type { BrainEngine } from '../../src/core/engine.ts';
 import type { SearchOpts } from '../../src/core/types.ts';
 import { installFixtureChunks } from './page-projection.ts';
 
-/** The embedding every seeded `query-dates` chunk carries. */
-export const vector = new Float32Array(1536);
+const vector = new Float32Array(1536);
 vector[0] = 1;
 const dates = [
   ['start', '2026-03-01T00:00:00Z'],

@@ -3,11 +3,7 @@
  *
  * Three statements, no per-page rows returned to TypeScript:
  *   1. counters: page, chunk and link counts, embedding coverage, missing
- *      embeddings, dead links, entity link/timeline coverage. Entity pages
- *      are the types the active schema pack(s) declare as entities (#4772),
- *      resolved per source by `HealthDeps.entityTypes` and bound as text[]
- *      parameters; an unavailable pack binds an empty list and the result
- *      says so in `entity_types_status`;
+ *      embeddings, dead links, entity link/timeline coverage;
  *   2. the linkable scope (live, unquarantined pages the shared orphan policy
  *      keeps, rendered in SQL by `orphanExclusionSql`) grouped by page type,
  *      with islanded and with-timeline counts per type. The brain_score
@@ -43,12 +39,11 @@
  */
 import type { BrainHealth } from '../types.ts';
 import { MIN_ENTITY_PAGES_FOR_COVERAGE } from '../types.ts';
-import { effectiveLinkExtractorWatermark } from '../link-extraction-watermark.ts';
+import { LINK_EXTRACTOR_VERSION_TS } from '../link-extraction.ts';
 import { QUARANTINE_FILTER_FRAGMENT } from '../quarantine.ts';
 import { loadOrphanPolicyOverrides, orphanExclusionSql } from '../orphan-policy.ts';
 import { loadTimelineGradedPredicate } from '../timeline-grading.ts';
 import { quoteIdentifier } from '../search/embedding-column.ts';
-import { entityTypePredicateSql, type EntityTypeResolution } from '../schema-pack/entity-types.ts';
 import type { LegacyUnscopedRead } from './brands.ts';
 import { sqlFragment, trustedSql } from './fragment.ts';
 import { compileRowNormalizer } from './normalize.ts';
@@ -59,12 +54,6 @@ export interface HealthDeps {
   embeddingColumn(): Promise<string>;
   countStalePagesForExtraction(opts: { sourceId?: string; versionTs: string }): Promise<number>;
   getConfig(key: string): Promise<string | null>;
-  /**
-   * #4772: the entity type lists for the requested scope (null = brain-wide),
-   * resolved per source from the active schema pack(s) by
-   * `schema-pack/entity-types.ts`; `pack_unavailable` carries an empty filter.
-   */
-  entityTypes(scope: readonly string[] | null): Promise<EntityTypeResolution>;
 }
 
 interface LinkableTypeGroup {
@@ -100,14 +89,12 @@ export async function getHealth(
 ): Promise<BrainHealth> {
   const requested = opts?.sourceIds ?? (opts?.sourceId ? [opts.sourceId] : null);
   const scope = requested === null ? null : [...new Set(requested)];
-  const [column, orphanOverrides, isTimelineGraded, entityTypes] = await Promise.all([
+  const [column, orphanOverrides, isTimelineGraded] = await Promise.all([
     deps.embeddingColumn(),
     loadOrphanPolicyOverrides(deps),
     loadTimelineGradedPredicate(deps),
-    deps.entityTypes(scope),
   ]);
   const col = trustedSql(quoteIdentifier(column));
-  const isEntity = entityTypePredicateSql('p', entityTypes.filter);
   const inScope = {
     p: scope === null ? sqlFragment`` : sqlFragment`AND p.source_id = ANY(${scope}::text[])`,
     src: scope === null ? sqlFragment`` : sqlFragment`AND src.source_id = ANY(${scope}::text[])`,
@@ -129,7 +116,7 @@ export async function getHealth(
   const { rows: [aggregate] } = await exec.run(sqlFragment`
     WITH entity_pages AS (
       SELECT p.id FROM pages p
-      WHERE ${isEntity} AND p.deleted_at IS NULL
+      WHERE p.type IN ('entity', 'person', 'company') AND p.deleted_at IS NULL
         AND ${trustedSql(QUARANTINE_FILTER_FRAGMENT)}
         ${inScope.p}
     ),
@@ -199,7 +186,7 @@ export async function getHealth(
   const { rows: connected } = await exec.run<{ slug: string; link_count: number }>(sqlFragment`
     WITH entity_pages AS (
       SELECT p.id, p.slug FROM pages p
-      WHERE ${isEntity} AND p.deleted_at IS NULL
+      WHERE p.type IN ('entity', 'person', 'company') AND p.deleted_at IS NULL
         AND ${trustedSql(QUARANTINE_FILTER_FRAGMENT)}
         ${inScope.p}
     ),
@@ -219,11 +206,10 @@ export async function getHealth(
      LIMIT 5
   `);
 
-  const watermark = await effectiveLinkExtractorWatermark(deps);
   const stalePages = scope === null
-    ? await deps.countStalePagesForExtraction({ versionTs: watermark })
+    ? await deps.countStalePagesForExtraction({ versionTs: LINK_EXTRACTOR_VERSION_TS })
     : (await Promise.all(scope.map(sourceId =>
-        deps.countStalePagesForExtraction({ sourceId, versionTs: watermark }),
+        deps.countStalePagesForExtraction({ sourceId, versionTs: LINK_EXTRACTOR_VERSION_TS }),
       ))).reduce((a, b) => a + b, 0);
 
   let linkablePageCount = 0;
@@ -267,7 +253,6 @@ export async function getHealth(
     brain_score: embedCoverageScore + linkDensityScore + timelineCoverageScore + noOrphansScore + noDeadLinksScore,
     dead_links: deadLinks,
     entity_page_count: h.entity_page_count,
-    entity_types_status: entityTypes.status,
     link_coverage: coverageGraded ? Number(h.link_coverage) : null,
     timeline_coverage: coverageGraded ? Number(h.timeline_coverage) : null,
     most_connected: connected.map(c => ({ slug: c.slug, link_count: Number(c.link_count) })),

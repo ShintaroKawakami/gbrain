@@ -149,8 +149,7 @@ describe('real envelopes through dispatchToolCall', () => {
     const res = await dispatchToolCall(
       engine,
       'put_page',
-      // #5970: an unknown parameter is refused before the handler's fence check, so only declared ones are sent.
-      { slug: 'other/page', content: 'x' },
+      { slug: 'other/page', title: 'x', content: 'x' },
       { ...HTTP, auth: boundAuth() },
     );
     expect(res.isError).toBe(true);

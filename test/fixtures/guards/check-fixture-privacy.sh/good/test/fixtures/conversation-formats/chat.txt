@@ -1,2 +1,0 @@
-user: ping alice-example
-assistant: done

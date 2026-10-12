@@ -8,9 +8,7 @@
  * PGLite, unmanaged (persistence off), chat stubbed. Synthetic names only.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { serializePageToMarkdown } from '../src/core/markdown.ts';
-import type { Page } from '../src/core/types.ts';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -50,11 +48,10 @@ async function backstopPage(slug: string, type: 'note' | 'meeting') {
   return r;
 }
 
-const pages: Page[] = [];
 beforeAll(async () => {
   engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema();
-  const page = async (slug: string, title: string, type: string, frontmatter: Record<string, unknown> = {}) =>
-    pages.push(await engine.putPage(slug, { type: type as never, title, compiled_truth: `# ${title}\n\n${BODY}`, frontmatter }, { sourceId: 'default' }));
+  const page = (slug: string, title: string, type: string, frontmatter: Record<string, unknown> = {}) =>
+    engine.putPage(slug, { type: type as never, title, compiled_truth: `# ${title}\n\n${BODY}`, frontmatter }, { sourceId: 'default' });
   await page('companies/acme-example', 'Acme Example', 'note');
   await page('companies/widget-example', 'Widget Example', 'company');
   await page('people/dana-private-example', 'Dana Private-Example', 'person', { visibility: 'private' });
@@ -62,11 +59,6 @@ beforeAll(async () => {
 }, 60_000);
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'backstop-infer-'));
-  // The pages have their files, as a local_path brain's pages do (#6398: a DB-only page takes the DB-only fact route).
-  for (const p of pages) {
-    mkdirSync(join(dir, p.slug, '..'), { recursive: true });
-    writeFileSync(join(dir, `${p.slug}.md`), serializePageToMarkdown(p, []));
-  }
   await engine.executeRaw(`UPDATE sources SET local_path=$1 WHERE id='default'`, [dir]);
   _resetWriteThroughCacheForTest();
 });

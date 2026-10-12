@@ -5,19 +5,17 @@
  * in ../operations.ts. Never import from '../operations.ts' here (cycle).
  */
 
-import { assertSourceInCallerScope, readPolicyOpts } from './context.ts';
 import type { Operation } from './contract.ts';
-import { invalidParam } from './op-fix.ts';
+import { assertSourceInCallerScope, readPolicyOpts } from './context.ts';
+import { OperationError } from './contract.ts';
 
 // --- Orphans ---
 
-export const ORPHANS_DEFAULT_LIMIT = 100;
-export const ORPHANS_MAX_LIMIT = 1000;
+const ORPHANS_DEFAULT_LIMIT = 100;
+const ORPHANS_MAX_LIMIT = 1000;
 
 const find_orphans: Operation = {
   name: 'find_orphans',
-  mutating: false,
-  idempotent: true,
   outputRedaction: 'retrieval',
   description: 'Find disconnected pages. Default mode "islanded" (no live inbound AND no outbound link) matches get_health.orphan_pages; mode "inbound" is the legacy no-inbound-only view. Essential for content enrichment cycles.',
   params: {
@@ -47,7 +45,7 @@ const find_orphans: Operation = {
     // quietly fall back to the default and misreport the orphan set.
     const mode = p.mode === undefined ? undefined : (p.mode as string);
     if (mode !== undefined && mode !== 'inbound' && mode !== 'islanded') {
-      throw invalidParam(ctx, 'find_orphans', 'mode', 'find_orphans: invalid mode — use \'inbound\' or \'islanded\'', { choices: ['islanded', 'inbound'] });
+      throw new Error(`find_orphans: invalid mode "${mode}" — use 'inbound' or 'islanded'`);
     }
     // v0.41.29.0 (Codex F8): scope by the caller's source (ctx.sourceId /
     // ctx.auth.allowedSources) via the canonical sourceScopeOpts ladder.
@@ -61,11 +59,8 @@ const find_orphans: Operation = {
     const scope = named !== undefined ? await readPolicyOpts(ctx, { sourceId: named }) : await readPolicyOpts(ctx);
     const limit = p.limit === undefined ? ORPHANS_DEFAULT_LIMIT : Number(p.limit);
     const offset = p.offset === undefined ? 0 : Number(p.offset);
-    const limitOk = Number.isInteger(limit) && limit >= 1 && limit <= ORPHANS_MAX_LIMIT;
-    if (!limitOk || !Number.isInteger(offset) || offset < 0) {
-      throw invalidParam(ctx, 'find_orphans', limitOk ? 'offset' : 'limit',
-        `find_orphans: limit must be 1-${ORPHANS_MAX_LIMIT} and offset a non-negative integer`,
-        limitOk ? { def: find_orphans.params.offset, example: 0 } : { def: find_orphans.params.limit, example: ORPHANS_DEFAULT_LIMIT });
+    if (!Number.isInteger(limit) || limit < 1 || limit > ORPHANS_MAX_LIMIT || !Number.isInteger(offset) || offset < 0) {
+      throw new OperationError('invalid_params', `find_orphans: limit must be 1-${ORPHANS_MAX_LIMIT} and offset a non-negative integer`);
     }
     const result = await findOrphans(ctx.engine, {
       includePseudo: (p.include_pseudo as boolean) || false,

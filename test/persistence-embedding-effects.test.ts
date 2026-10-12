@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -7,7 +7,7 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { PostgresEngine } from '../src/core/postgres-engine.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
-import { EFFECT_RENEWAL_INTERVAL_MS, __setEffectRenewalIntervalForTests, effectRenewalInterval, runPersistenceEffects, type EffectWorkerOptions } from '../src/core/persistence/effects.ts';
+import { runPersistenceEffects, type EffectWorkerOptions } from '../src/core/persistence/effects.ts';
 import { claimPersistenceEffect, publicEffectsForRequest } from '../src/core/persistence/effect-journal.ts';
 import { localHostId, registerLocalWriter } from '../src/core/persistence/identity.ts';
 import { submissionAuthority } from '../src/core/persistence/authority.ts';
@@ -20,19 +20,8 @@ import { invokeAI, isAIInvocationPolicyError, withAIInvocationGuard } from '../s
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { withEnv } from './helpers/with-env.ts';
-import { testWaitMs } from './helpers/wait-for.ts';
 
 const databaseUrl = process.env.DATABASE_URL;
-/**
- * Claim renewal runs at this interval instead of the production 10 s. Every
- * renewal-timing case below is expressed in renewal intervals, including the
- * fixture lease (1.5 intervals, as 15 s is to 10 s), so the takeover attempts
- * still land after the unrenewed lease would have expired.
- */
-const renewalMs = testWaitMs(1_500);
-let restoreRenewal: () => void = () => {};
-beforeEach(() => { restoreRenewal = __setEffectRenewalIntervalForTests(renewalMs); });
-afterEach(() => { restoreRenewal(); expect(effectRenewalInterval()).toBe(EFFECT_RENEWAL_INTERVAL_MS); });
 for (const kind of testBackends()) {
   describe(`embedding effects ${kind}`, () => {
     let engine: BrainEngine;
@@ -326,7 +315,7 @@ for (const kind of testBackends()) {
         } } });
       expect(reason).toMatchObject({ code: 'write_claim_lost' });
       const stoppedAt = renewals;
-      await Bun.sleep(renewalMs * 1.1);
+      await Bun.sleep(11_000);
       expect(renewals).toBe(stoppedAt);
       expect((await engine.executeRaw('SELECT state,execution_token FROM persistence_effects WHERE id=$1', [f.effectId]))[0])
         .toMatchObject({ state: 'running', execution_token: successor });
@@ -480,7 +469,7 @@ for (const kind of testBackends()) {
       await engine.executeRaw(`CREATE FUNCTION shorten_embedding_claim() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN
           IF NEW.kind='embedding' AND NEW.state='running' AND NEW.claim_expires_at IS DISTINCT FROM OLD.claim_expires_at THEN
-            NEW.claim_expires_at=clock_timestamp()+interval '${renewalMs * 1.5} milliseconds';
+            NEW.claim_expires_at=clock_timestamp()+interval '15 seconds';
           END IF;
           RETURN NEW;
         END $$`);
@@ -490,16 +479,16 @@ for (const kind of testBackends()) {
       const started = Promise.withResolvers<void>();
       const options = { hostId: localHostId(), limit: 1, embedding: { signature, model, embed: async () => {
         calls++; started.resolve();
-        for (let n = 0; n < 3; n++) { await Bun.sleep(renewalMs * 1.1); batches++; }
+        for (let n = 0; n < 3; n++) { await Bun.sleep(11_000); batches++; }
         return vectors();
       } } };
       const worker = runPersistenceEffects(engine, { engine: engine.kind }, options);
       try {
         await started.promise;
-        await Bun.sleep(renewalMs * 1.7);
+        await Bun.sleep(17_000);
         await runPersistenceEffects(competitor, { engine: competitor.kind }, { ...options,
           embedding: { signature, model, embed: async () => { calls++; return vectors(); } } });
-        await Bun.sleep(renewalMs * 1.1);
+        await Bun.sleep(11_000);
         await runPersistenceEffects(competitor, { engine: competitor.kind }, { ...options,
           embedding: { signature, model, embed: async () => { calls++; return vectors(); } } });
         await worker;
@@ -538,7 +527,7 @@ for (const kind of testBackends()) {
       }
       const stoppedAt = renewals;
       expect(stoppedAt).toBe(4);
-      await Bun.sleep(renewalMs * 1.1);
+      await Bun.sleep(11_000);
       expect(renewals).toBe(stoppedAt);
     });
 

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runDream } from '../src/commands/dream.ts';
-import { validateCommandFlags } from '../src/cli/main.ts';
+import { validateCommandFlags } from '../src/cli.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';

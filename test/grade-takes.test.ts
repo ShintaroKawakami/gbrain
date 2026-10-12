@@ -71,10 +71,6 @@ function buildMockEngine(opts: {
     async resolveTake(pageId: number, rowNum: number, resolution: TakeResolution): Promise<void> {
       resolves.push({ pageId, rowNum, resolution });
     },
-    // The resolution runs in a maintenance transaction; the mock is its own transaction engine.
-    async transaction<T>(fn: (tx: BrainEngine) => Promise<T>): Promise<T> {
-      return fn(engine);
-    },
   } as unknown as BrainEngine;
 
   return { engine, captured, resolves };

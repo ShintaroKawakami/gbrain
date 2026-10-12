@@ -92,12 +92,18 @@ describe('#5364 diagnostics across workers, sources, CLI, and cycle', () => {
   });
 
   test.each(['0', '-1', 'invalid', '1junk', 'Infinity', undefined])('invalid explicit cap %s is rejected before extraction or background submission', async value => {
-    // Agent contract v1 D4: a usage error (invalid_params, exit 2 via renderCliError), not print + exit(1).
+    const error = spyOn(console, 'error').mockImplementation(() => {});
+    const exit = spyOn(process, 'exit').mockImplementation(((code: number) => { throw new Error(`exit:${code}`); }) as never);
     const args = ['--source-id', 'speaker-a', '--max-cost-usd', ...(value === undefined ? [] : [value])];
-    await expect(runExtractConversationFacts(engine, args))
-      .rejects.toMatchObject({ code: 'invalid_params', message: expect.stringContaining('--max-cost-usd requires a positive finite number') });
-    await expect(runExtractConversationFacts(engine, ['--background', ...args])).rejects.toThrow('--max-cost-usd requires a positive finite number');
-    expect(calls).toBe(0);
+    try {
+      await expect(runExtractConversationFacts(engine, args)).rejects.toThrow('exit:1');
+      await expect(runExtractConversationFacts(engine, ['--background', ...args])).rejects.toThrow('--max-cost-usd requires a positive finite number');
+      expect(error.mock.calls[0]?.[0]).toContain('--max-cost-usd requires a positive finite number');
+      expect(calls).toBe(0);
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+    }
   });
 
   test('dry-run help promises segmentation without model calls', async () => {
@@ -224,7 +230,7 @@ describe('#5364 diagnostics across workers, sources, CLI, and cycle', () => {
     const log = spyOn(console, 'log').mockImplementation(() => {});
     const exit = spyOn(process, 'exit').mockImplementation(((code: number) => { throw new Error(`exit:${code}`); }) as never);
     try {
-      await expect(runExtractConversationFacts(engine, ['--source-id', 'speaker-a', '--types', 'conversation', '--sleep', '0'])).rejects.toThrow('exit:1'); // agent contract v1 A3: lock skips exit 1 (retryable); 3 means confirmation_required
+      await expect(runExtractConversationFacts(engine, ['--source-id', 'speaker-a', '--types', 'conversation', '--sleep', '0'])).rejects.toThrow('exit:3');
       expect(log.mock.calls.map(call => call.join(' ')).join('\n')).toContain('Skipped 1 page(s) held by another worker');
     } finally {
       exit.mockRestore();

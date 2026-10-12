@@ -73,8 +73,6 @@ export interface ConversationStub {
   /** ISO 8601 UTC last-update time — the axis the watermark compares against. */
   updatedAt: string;
   createdAt?: string;
-  /** The organization that listed it, for providers that route detail fetches by org (claude). */
-  orgId?: string;
 }
 
 /** Verdict from a provider `probe()` — did the credential reach history? */
@@ -103,12 +101,6 @@ export interface ChatHistoryProvider {
   /** Compile-time base origin; overridable in tests via `baseUrlOverride`. */
   baseUrl: string;
   /**
-   * True when a detail fetch must name the organization that listed the
-   * conversation (stubs carry `orgId`). A retained failure without a recorded
-   * org is then never retried by id; it waits for a `--full` sync (#6387).
-   */
-  routesByOrg?: boolean;
-  /**
    * Build the auth headers for a request from a resolved credential. Default
    * shape is `{ cookie, authorization: Bearer <accessToken> }` (either/both).
    * The orchestrator wires this into the client's `headers()`.
@@ -136,13 +128,12 @@ export interface ChatHistoryProvider {
    * Fetch one conversation, normalized to the provider's NATIVE EXPORT object
    * shape — the exact shape the `spoolFormat` adapter already parses. Throws a
    * drift error when the payload lacks its required shape (missing `mapping`
-   * for chatgpt, missing `chat_messages` for claude). `orgId` (from the
-   * stub or the failed ledger) routes the fetch on `routesByOrg` providers.
+   * for chatgpt, missing `chat_messages` for claude).
    */
   fetchConversation(
     client: ConnectorClient,
     id: string,
-    opts?: { signal?: AbortSignal; orgId?: string },
+    opts?: { signal?: AbortSignal },
   ): Promise<Record<string, unknown>>;
   /** Paste-in credential-capture instructions for the browser-session lane. */
   sessionInstructions(): string;

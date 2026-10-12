@@ -19,7 +19,6 @@ import { readProjectionSnapshot, installPageProjection } from './page-state/proj
  */
 
 import { chunkText } from './chunkers/recursive.ts';
-import { fenceTrustMarker, markFenceChunk, unmarkFenceChunk } from './eligibility/fence-overlay.ts';
 import { estimateEmbedTokens } from './chunkers/token-estimate.ts';
 import { resolveMaxChunkTokens } from './embedding-input-limit.ts';
 import type { BrainEngine } from './engine.ts';
@@ -97,20 +96,16 @@ export function healOversizedChunks(
     }
 
     splitCount++;
-    // #5575 ENG-1: a low-tier facts-fence chunk keeps its trust marker on every piece.
-    const { tier, unconfirmed, body } = unmarkFenceChunk(c.chunk_text);
-    const room = tier ? Math.max(1, maxTokens - estimateEmbedTokens(fenceTrustMarker(tier, unconfirmed)) - 1) : maxTokens;
-    const parts = chunkText(body, { maxTokens: room });
+    const parts = chunkText(c.chunk_text, { maxTokens });
     // Pathological: estimator / splitter disagreement — hard-split by chars
     // so we never re-emit the original oversized row unchanged.
     const pieces =
-      parts.length > 1 || (parts[0] && estimateEmbedTokens(parts[0].text) <= room)
+      parts.length > 1 || (parts[0] && estimateEmbedTokens(parts[0].text) <= maxTokens)
         ? parts.map((p) => p.text)
-        : hardSplitByChars(body, room);
+        : hardSplitByChars(c.chunk_text, maxTokens);
 
-    for (const piece of pieces) {
-      if (!piece) continue;
-      const text = tier ? markFenceChunk(tier, piece, unconfirmed) : piece;
+    for (const text of pieces) {
+      if (!text) continue;
       out.push(carryHealedMetadata(c, {
         chunk_index: out.length,
         chunk_text: text,

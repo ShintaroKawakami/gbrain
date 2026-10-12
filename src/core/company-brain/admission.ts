@@ -1,10 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
-import type { Action } from '../agent-output.ts';
-import type { RegistryCode } from '../error-registry.ts';
-import { opError, OperationError } from '../ops/contract.ts';
-import { readFix, trustedCliRequired } from '../ops/op-fix.ts';
+import { OperationError } from '../ops/contract.ts';
 import { isValidSourceId } from '../source-id.ts';
 import { assertNoOverlappingPath } from '../sources-ops.ts';
 import { checkApprovedSchemaForEngine } from '../schema-pack/engine-resolution.ts';
@@ -18,45 +15,8 @@ import { priorTopologyChange, recordTopologyChange } from '../persistence/topolo
 import { runManagedSourceLifecycle } from '../persistence/source-lifecycle.ts';
 import { validateCompanyBrainPlan } from './inspection.ts';
 import { beginSourceIngestionReceipt, getSourceIngestionReceipt, linkSourceIngestionCheckpoints, type SourceIngestionFence } from './receipts.ts';
-import type { CompanyBrainPlan, PlanValidationResult } from './types.ts';
+import type { CompanyBrainPlan } from './types.ts';
 import { companyBrainProfile, companyBrainPolicyFingerprint, companyBrainRepository, assertCompanyBrainPolicy, assertCompanyBrainExtractor, isCompanyBrainId } from './policy.ts';
-
-export function reinspectFix(path: string): Action {
-  return readFix('A fresh read-only inspection shows what the checkout holds now and produces a plan you can review and connect.',
-    { argv: ['gbrain', 'sources', 'inspect', resolve(path), '--profile', 'company-brain', '--json'] });
-}
-
-export function sourceStatusFix(brainId: string, why: string): Action {
-  return readFix(why, { argv: ['gbrain', 'sources', 'status', '--brain', brainId, '--json'] });
-}
-
-export function ownerStatusFix(sourceId: string): Action {
-  return readFix(`Shows which host owns source ${sourceId} and whether its owner is active; the company sync runs only there.`,
-    { argv: ['gbrain', 'sources', 'writer', 'status', '--source', sourceId, '--json'] });
-}
-
-function planNotReady(code: PlanValidationResult['code'], message: string, path: string): OperationError {
-  return opError(code as RegistryCode, message,
-    `Inspect ${resolve(path)} again, resolve any error findings, and connect only the new reviewed plan; a changed or stale plan is never re-approved silently.`,
-    { fix: reinspectFix(path) });
-}
-
-function requestIdError(): OperationError {
-  return opError('invalid_params', 'requestId must be a UUID.',
-    'Pass the request ID printed as "Request:" by the earlier connect (a UUID) to resume that request, or omit it to start a new one.');
-}
-
-function brainUninitialized(message: string, brainId: string): OperationError {
-  return opError('destination_not_ready', message,
-    `Brain ${brainId} has no persistence identity yet. Check it with gbrain doctor; initializing or migrating a brain is a separate step the user approves, and connect never does it.`,
-    { fix: readFix(`Shows brain ${brainId}'s schema and migration state without changing it.`, { argv: ['gbrain', 'doctor', '--brain', brainId, '--json'] }) });
-}
-
-function sourceTaken(message: string, input: CompanyBrainDestination): OperationError {
-  return opError('source_id_taken', message,
-    `Source ${input.sourceId} already exists in brain ${input.brainId}. If it is this company source, resume it with gbrain sync --brain ${input.brainId} --source ${input.sourceId} --no-embed --no-pull (or repeat connect with its original --request-id); otherwise choose a new --source id.`,
-    { fix: sourceStatusFix(input.brainId, `Shows source ${input.sourceId}'s registration and ingestion receipt so you can tell whether it is the company source to resume.`) });
-}
 
 export interface CompanyBrainDestination {
   brainId: string;
@@ -71,8 +31,7 @@ export interface CompanyBrainConnectInput extends CompanyBrainDestination {
 export function unwrapCompanyBrainPlan(value: unknown): CompanyBrainPlan {
   if (value && typeof value === 'object' && 'plan' in value) value = (value as { plan: unknown }).plan;
   if (!value || typeof value !== 'object' || Array.isArray(value) || !('plan_digest' in value)) {
-    throw opError('plan_stale', 'A raw inspection plan or inspection envelope with plan is required.',
-      'Pass the JSON that gbrain sources inspect --profile company-brain --json writes (the raw plan, or its envelope with a plan key); inspect the repository again if the file is not one.');
+    throw new OperationError('plan_stale', 'A raw inspection plan or inspection envelope with plan is required.');
   }
   return value as CompanyBrainPlan;
 }
@@ -92,12 +51,10 @@ export interface CompanyBrainPreview {
 export function assertCompanyBrainCaller(input: CompanyBrainDestination): void {
   const authority = currentSubmissionAuthority();
   if (input.remote !== false || currentVerifiedLocalWriter()?.remote || authority?.kind === 'remote_agent' || authority?.kind === 'remote_generic') {
-    throw trustedCliRequired('Company source administration requires an explicitly trusted local caller.');
+    throw new OperationError('permission_denied', 'Company source administration requires an explicitly trusted local caller.');
   }
   if (!isCompanyBrainId(input.brainId) || !isValidSourceId(input.sourceId)) {
-    throw opError('destination_not_ready', 'An explicitly selected initialized brain and source ID are required.',
-      'Name the destination explicitly: --brain takes a mounted brain id of lowercase letters, digits, and hyphens, and --source a lowercase source id; ambient routing is never used.',
-      { fix: readFix('Lists the mounted brains and their ids.', { argv: ['gbrain', 'mounts', 'list', '--json'] }) });
+    throw new OperationError('destination_not_ready', 'An explicitly selected initialized brain and source ID are required.');
   }
 }
 
@@ -105,9 +62,7 @@ export async function ingestionFence(engine: BrainEngine, sourceId: string): Pro
   if (!await managedPersistenceEnabled(engine)) return { mode: 'unmanaged' };
   const binding = await getWorktreeBinding(engine, sourceId);
   if (!binding?.owner_host_id || binding.owner_host_id !== localHostId() || binding.state !== 'active' || !binding.local_path) {
-    throw opError('owner_unavailable', 'The managed source must run on its active registered local owner.',
-      `Source ${sourceId} is managed and this host is not its active owner. Check the owner, then run the command on that host or wait until its owner is active again.`,
-      { fix: ownerStatusFix(sourceId) });
+    throw new OperationError('owner_unavailable', 'The managed source must run on its active registered local owner.');
   }
   return { mode: 'managed', worktreeId: binding.worktree_id, ownerHostId: binding.owner_host_id,
     ownerEpoch: String(binding.owner_epoch), topologyGeneration: String(binding.topology_generation) };
@@ -117,26 +72,20 @@ async function assertIngestionStorage(engine: BrainEngine): Promise<void> {
   const [storage] = await engine.executeRaw<{ receipts: string | null; persistence: string | null; policy: boolean }>(
     `SELECT to_regclass('source_ingestion_receipts')::text AS receipts,to_regclass('persistence_brain')::text AS persistence,
       EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='source_ingestion_receipts' AND column_name='policy_fingerprint') AS policy`);
-  if (!storage?.receipts || !storage.persistence || !storage.policy) {
-    throw opError('destination_not_ready', 'The selected brain needs company ingestion migration 162 with immutable policy receipts.',
-      'The selected brain has pending schema migrations. List them with the command in fix, ask the user to approve applying them to that brain, then preview again.',
-      { fix: { argv: ['gbrain', 'apply-migrations', '--dry-run', '--json'], consent: [], actor: 'agent', why: 'Lists the pending migrations without applying them.', requires_exclusive: false } });
-  }
+  if (!storage?.receipts || !storage.persistence || !storage.policy) throw new OperationError('destination_not_ready', 'The selected brain needs company ingestion migration 162 with immutable policy receipts.',
+    'Run gbrain apply-migrations --yes against the explicitly selected brain, then preview again.');
 }
 
 function admissionConfig(input: CompanyBrainConnectInput, requestId: string, databaseId: string) {
   const plan = input.plan;
-  if (!plan.revision || !plan.schema) throw planNotReady('source_not_ready', 'A committed source and approved schema are required.', input.path);
+  if (!plan.revision || !plan.schema) throw new OperationError('source_not_ready', 'A committed source and approved schema are required.');
   const policy = { version: 1, profile: 'company-brain', brainId: input.brainId, databaseId, receiptId: requestId,
     repository: companyBrainRepository(plan.revision), planDigest: plan.plan_digest, selection: plan.selection, limits: plan.limits,
     schema: plan.schema, extractorVersion: plan.extractor_version, approvedRevision: plan.revision.commit,
     committedOnly: true, noPull: true, noEmbed: true, noBackfill: true, noWriteback: true };
   const config = { federated: false, strategy: 'markdown', slug_root_mode: 'source-root', company_brain: policy };
   const profile = companyBrainProfile(config)!;
-  if (Buffer.byteLength(JSON.stringify(config)) > 8192) {
-    throw opError('request_too_large', 'The approved selection exceeds source policy capacity; narrow the selection.',
-      `The stored source policy is capped at 8192 bytes. Inspect ${resolve(input.path)} again with fewer, broader --include and --exclude globs, then connect that plan.`);
-  }
+  if (Buffer.byteLength(JSON.stringify(config)) > 8192) throw new OperationError('request_too_large', 'The approved selection exceeds source policy capacity; narrow the selection.');
   return { profile, config };
 }
 
@@ -152,7 +101,7 @@ async function approvedReplay(engine: BrainEngine, input: CompanyBrainConnectInp
   const [source] = await engine.executeRaw<{ incarnation: string; archived: boolean; local_path: string; config: unknown }>(
     'SELECT incarnation,archived,local_path,config FROM sources WHERE id=$1', [input.sourceId]);
   if (!source) return null;
-  const collision = () => sourceTaken('This source already exists and does not match this exact admitted request. Use sync to resume it.', input);
+  const collision = () => new OperationError('source_id_taken', 'This source already exists and does not match this exact admitted request. Use sync to resume it.');
   if (!input.requestId || !isWriteRequestId(input.requestId) || source.archived) throw collision();
   if (!input.plan.revision || resolve(input.path) !== source.local_path || input.plan.revision.root !== source.local_path) throw collision();
   const principal = await topologyPrincipal(engine);
@@ -176,17 +125,15 @@ async function approvedReplay(engine: BrainEngine, input: CompanyBrainConnectInp
 export async function checkCompanyBrainDestination(engine: BrainEngine, input: CompanyBrainConnectInput, newSource = true): Promise<CompanyBrainPreview> {
   assertCompanyBrainCaller(input);
   await assertIngestionStorage(engine);
-  if (!input.plan.ready || !input.plan.revision || !input.plan.schema) throw planNotReady('source_not_ready', 'The inspected source is not ready to connect.', input.path);
+  if (!input.plan.ready || !input.plan.revision || !input.plan.schema) throw new OperationError('source_not_ready', 'The inspected source is not ready to connect.');
   const [brain] = await engine.executeRaw<{ brain_id: string; enabled: boolean }>('SELECT brain_id,enabled FROM persistence_brain WHERE singleton=1');
-  if (!brain) throw brainUninitialized('Initialize the selected brain before connecting a source.', input.brainId);
+  if (!brain) throw new OperationError('destination_not_ready', 'Initialize the selected brain before connecting a source.');
   if (newSource && (await engine.executeRaw('SELECT id FROM sources WHERE id=$1', [input.sourceId])).length) {
-    throw sourceTaken('Connect requires a new source. Resume the existing source through sync.', input);
+    throw new OperationError('source_id_taken', 'Connect requires a new source. Resume the existing source through sync.');
   }
   const requirements = input.plan.audience_requirements;
   if (requirements.some(value => !['internal', 'public', 'world'].includes(value))) {
-    throw opError('destination_not_ready', 'The source requires a narrower audience policy; no access grants will be inferred or changed.',
-      `Some pages declare an audience narrower than internal. Exclude them by inspecting ${resolve(input.path)} again with --exclude globs, or ask the user to map them through a separately approved access design.`,
-      { fix: reinspectFix(input.path) });
+    throw new OperationError('destination_not_ready', 'The source requires a narrower audience policy; no access grants will be inferred or changed.');
   }
   const schema = input.plan.schema;
   const checked = await checkApprovedSchemaForEngine(engine, { name: schema.name, identity: schema.identity, resolvedManifestHash: schema.resolved_digest },
@@ -194,15 +141,11 @@ export async function checkCompanyBrainDestination(engine: BrainEngine, input: C
   if (checked.binding) {
     const [page] = await engine.executeRaw('SELECT id FROM pages LIMIT 1');
     const [profile] = await engine.executeRaw("SELECT id FROM sources WHERE config->'company_brain' IS NOT NULL LIMIT 1");
-    if (page || profile) {
-      throw opError('destination_not_ready', 'An occupied brain must already use the exact company schema. Mixed-schema admission is not supported.',
-        `Brain ${input.brainId} already holds pages under a different schema. Connect into a dedicated company brain instead; creating one is a separate step the user approves.`,
-        { fix: sourceStatusFix(input.brainId, `Shows what brain ${input.brainId} already holds.`) });
-    }
+    if (page || profile) throw new OperationError('destination_not_ready', 'An occupied brain must already use the exact company schema. Mixed-schema admission is not supported.');
   }
   const [broad] = await engine.executeRaw<{ count: string }>(
     `SELECT count(*)::text AS count FROM (
-      SELECT client_id AS id FROM oauth_clients WHERE deleted_at IS NULL AND source_id IS NULL AND cardinality(federated_read)=0 AND source_grant IS DISTINCT FROM 'none'
+      SELECT client_id AS id FROM oauth_clients WHERE deleted_at IS NULL AND source_id IS NULL AND cardinality(federated_read)=0
         AND (scope IS NULL OR scope ~ '(^|\\s)(read|admin)(\\s|$)') AND (allowed_operations IS NULL OR cardinality(allowed_operations)>0)
       UNION ALL SELECT id::text FROM persistence_local_writers WHERE lane='stdio' AND revoked_at IS NULL
         AND grant_ceiling->'sourceIds' ? '*' AND grant_ceiling->'scopes' ? 'read'
@@ -215,11 +158,11 @@ export async function checkCompanyBrainDestination(engine: BrainEngine, input: C
 export async function previewCompanyBrain(engine: BrainEngine, input: CompanyBrainConnectInput): Promise<CompanyBrainPreview> {
   input = { ...input, plan: unwrapCompanyBrainPlan(input.plan) };
   assertCompanyBrainCaller(input);
-  if (input.requestId !== undefined && !isWriteRequestId(input.requestId)) throw requestIdError();
+  if (input.requestId !== undefined && !isWriteRequestId(input.requestId)) throw new OperationError('invalid_params', 'requestId must be a UUID.');
   await assertIngestionStorage(engine);
   const replay = await approvedReplay(engine, input);
   const checked = await validateCompanyBrainPlan(input.plan, { path: input.path, mode: replay ? 'resume' : 'apply' });
-  if (!checked.valid) throw planNotReady(checked.code, 'The source no longer matches its approved inspection plan.', input.path);
+  if (!checked.valid) throw new OperationError(checked.code, 'The source no longer matches its approved inspection plan.');
   return { ...await checkCompanyBrainDestination(engine, input, !replay), ...(replay ? { replayed: true as const, receiptId: replay.receiptId } : {}) };
 }
 
@@ -228,34 +171,26 @@ export async function admitCompanyBrain(engine: BrainEngine, input: CompanyBrain
   assertCompanyBrainCaller(input);
   await assertIngestionStorage(engine);
   const requestId = input.requestId ?? randomUUID();
-  if (!isWriteRequestId(requestId)) throw requestIdError();
+  if (!isWriteRequestId(requestId)) throw new OperationError('invalid_params', 'requestId must be a UUID.');
   const replay = await approvedReplay(engine, { ...input, requestId });
   if (replay) {
     const validation = await validateCompanyBrainPlan(input.plan, { path: input.path, mode: 'resume' });
-    if (!validation.valid) {
-      throw opError(validation.code as RegistryCode, 'The admitted request no longer matches its approved repository identity.',
-        `Request ${requestId} already admitted source ${input.sourceId}, but the checkout no longer matches its approved commit. Check the receipt; resume with gbrain sync --brain ${input.brainId} --source ${input.sourceId} --no-embed --no-pull once that commit is present again. gbrain never substitutes current HEAD.`,
-        { fix: sourceStatusFix(input.brainId, `Shows source ${input.sourceId}'s ingestion receipt and outstanding phase.`) });
-    }
+    if (!validation.valid) throw new OperationError(validation.code, 'The admitted request no longer matches its approved repository identity.');
     return replay;
   }
-  if (!input.plan.revision || !input.plan.schema) throw planNotReady('source_not_ready', 'A committed source and approved schema are required.', input.path);
+  if (!input.plan.revision || !input.plan.schema) throw new OperationError('source_not_ready', 'A committed source and approved schema are required.');
   const plan = input.plan;
   const [brain] = await engine.executeRaw<{ brain_id: string }>('SELECT brain_id FROM persistence_brain WHERE singleton=1');
-  if (!brain) throw brainUninitialized('Initialize the explicitly selected brain first.', input.brainId);
+  if (!brain) throw new OperationError('destination_not_ready', 'Initialize the explicitly selected brain first.');
   const { profile, config } = admissionConfig(input, requestId, brain.brain_id);
   assertCompanyBrainExtractor(profile.extractorVersion, input);
   await registerLocalWriter(engine, 'cli');
   const before = async (tx: BrainEngine) => {
     await tx.executeRaw("SELECT key FROM config WHERE key='schema_pack' FOR UPDATE");
     const preview = await checkCompanyBrainDestination(tx, input);
-    if (preview.databaseId !== profile.databaseId) {
-      throw opError('source_changed', 'The selected database identity changed during admission.',
-        `Brain ${input.brainId} now resolves to a different database than the one previewed, so nothing was admitted. Check it with gbrain doctor, then preview the connect again before approving.`,
-        { fix: readFix(`Shows which database brain ${input.brainId} resolves to now.`, { argv: ['gbrain', 'doctor', '--brain', input.brainId, '--json'] }) });
-    }
+    if (preview.databaseId !== profile.databaseId) throw new OperationError('source_changed', 'The selected database identity changed during admission.');
     const validation = await validateCompanyBrainPlan(plan, { path: input.path, mode: 'apply' });
-    if (!validation.valid) throw planNotReady(validation.code, 'The source changed before admission; inspect it again.', input.path);
+    if (!validation.valid) throw new OperationError(validation.code, 'The source changed before admission; inspect it again.');
     await assertNoOverlappingPath(tx, input.sourceId, plan.revision!.root);
     if (preview.schemaBinding) await tx.setConfig('schema_pack', preview.schemaBinding);
   };

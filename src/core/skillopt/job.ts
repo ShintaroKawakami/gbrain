@@ -27,7 +27,7 @@ import type { SkillOptOpts } from './types.ts';
 export type SkillOptJobInput = Pick<SkillOptOpts,
   | 'skillsDir' | 'skillName' | 'benchmarkPath' | 'epochs' | 'batchSize' | 'lr' | 'lrSchedule' | 'split'
   | 'reflectMaxTokens' | 'mode' | 'dryRun' | 'noMutate' | 'allowMutateBundled' | 'heldOutPath'
-  | 'bootstrapReviewed' | 'maxCostUsd' | 'maxCostSource' | 'maxRuntimeMin' | 'force'
+  | 'bootstrapReviewed' | 'maxCostUsd' | 'maxRuntimeMin' | 'force'
 > & { models: SkillOptModels; modelFlags: SkillOptModelFlags; modelsStrict: boolean };
 
 export function buildSkillOptJobData(input: SkillOptJobInput): Record<string, unknown> {
@@ -63,7 +63,6 @@ export function buildSkillOptJobData(input: SkillOptJobInput): Record<string, un
     ...(input.heldOutPath ? { held_out_path: input.heldOutPath } : {}),
     bootstrap_reviewed: input.bootstrapReviewed,
     max_cost_usd: input.maxCostUsd,
-    ...(input.maxCostSource ? { max_cost_source: input.maxCostSource } : {}),
     max_runtime_min: input.maxRuntimeMin,
     force: input.force,
   };
@@ -119,7 +118,6 @@ export async function runSkillOptJob(engine: BrainEngine, rawData: unknown): Pro
     ...(data.held_out_path ? { heldOutPath: String(data.held_out_path) } : {}),
     json: true,
     maxCostUsd: Number(data.max_cost_usd ?? 5.0),
-    maxCostSource: data.max_cost_source === 'default' ? 'default' : 'user',
     maxRuntimeMin: Number(data.max_runtime_min ?? 30),
     force: Boolean(data.force),
   });

@@ -32,10 +32,7 @@ import {
   type CycleReport,
 } from '../core/cycle.ts';
 import { ALL_SOURCES, isResolverUserError, resolveImplicitDefaultSourceId, resolveSourceId } from '../core/source-resolver.ts';
-import { jsonGuardActive, jsonRequested, setCliExitVerdict, writeJsonDocument } from '../core/cli-force-exit.ts';
-import { BUDGET_STOP_EXIT_CODE } from '../core/exit-codes.ts';
-import { opError, type OperationError } from '../core/ops/contract.ts';
-import { usageError, writeCliError, writeCliRefusal } from '../cli/cli-error.ts';
+import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { fetchSource } from '../core/sources-load.ts';
 import { existsSync } from 'fs';
 import { resolve } from 'node:path';
@@ -107,17 +104,8 @@ interface DreamArgs {
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DEFAULT_DRAIN_WINDOW_SECONDS = 300;
-/** Exit code for "drain ran but the backlog isn't empty — run again" (A3: a resumable stop, never 3). */
-const EXIT_DRAIN_INCOMPLETE = BUDGET_STOP_EXIT_CODE;
-
-/** D2: the human stderr line (unchanged) plus, under --json, the envelope as the document; then exit. */
-function dreamExit(e: OperationError, json = jsonRequested(process.argv.slice(2))): never {
-  process.exit(writeCliRefusal(e, 'dream', { json }));
-}
-
-function sourceError(e: Error): OperationError {
-  return opError('unknown_source', e.message, 'Run `gbrain sources list` for the registered source ids, then pass one with --source.');
-}
+/** Exit code for "drain ran but the backlog isn't empty — run again". */
+const EXIT_DRAIN_INCOMPLETE = 3;
 
 /**
  * Collect every occurrence of `--<flag> <value>` in argv. Used to
@@ -145,10 +133,10 @@ function parseArgs(args: string[]): DreamArgs {
   // ran phase a alone and exited 0 with a report covering one phase. Each
   // value is validated, order is preserved, repeats of the same value
   // collapse (same contract as the repeated --source handling below).
-  const json = jsonRequested(args);
   const phaseValues = collectFlagValues(args, '--phase');
   if (phaseValues === null) {
-    dreamExit(usageError('--phase <name>: missing value. Usage: gbrain dream --phase <name>', 'Example: gbrain dream --phase lint'), json);
+    console.error('--phase <name>: missing value. Usage: gbrain dream --phase <name>');
+    process.exit(2);
   }
   // issue #2860 (Codex P3): captured BEFORE --input/--drain get a chance to
   // implicitly default `phases` below, so --once's validation can require
@@ -160,12 +148,9 @@ function parseArgs(args: string[]): DreamArgs {
   const phaseWasExplicit = phaseValues.length > 0;
   let phases: CyclePhase[] = [];
   for (const rawPhase of phaseValues) {
-    if (rawPhase === 'auto_think') {
-      dreamExit(usageError('The auto_think phase is replaced by pinned questions: dream.auto_think.questions became pins (inactive when auto_think was off).',
-        'Run gbrain dream --phase standing_questions to refresh due pins; gbrain questions list shows them.'), json);
-    }
     if (!(ALL_PHASES as string[]).includes(rawPhase)) {
-      dreamExit(usageError(`Unknown phase "${rawPhase}". Valid: ${ALL_PHASES.join(', ')}`, 'Example: gbrain dream --phase lint'), json);
+      console.error(`Unknown phase "${rawPhase}". Valid: ${ALL_PHASES.join(', ')}`);
+      process.exit(1);
     }
     if (!phases.includes(rawPhase as CyclePhase)) phases.push(rawPhase as CyclePhase);
   }
@@ -179,28 +164,33 @@ function parseArgs(args: string[]): DreamArgs {
   const dateIdx = args.indexOf('--date');
   const date = dateIdx !== -1 ? args[dateIdx + 1] ?? null : null;
   if (date && !ISO_DATE_RE.test(date)) {
-    dreamExit(usageError(`--date must be YYYY-MM-DD; got "${date}"`, 'Example: gbrain dream --phase synthesize --date 2026-01-31'), json);
+    console.error(`--date must be YYYY-MM-DD; got "${date}"`);
+    process.exit(2);
   }
 
   const fromIdx = args.indexOf('--from');
   const from = fromIdx !== -1 ? args[fromIdx + 1] ?? null : null;
   if (from && !ISO_DATE_RE.test(from)) {
-    dreamExit(usageError(`--from must be YYYY-MM-DD; got "${from}"`, 'Example: gbrain dream --phase synthesize --from 2026-01-01 --to 2026-01-31'), json);
+    console.error(`--from must be YYYY-MM-DD; got "${from}"`);
+    process.exit(2);
   }
 
   const toIdx = args.indexOf('--to');
   const to = toIdx !== -1 ? args[toIdx + 1] ?? null : null;
   if (to && !ISO_DATE_RE.test(to)) {
-    dreamExit(usageError(`--to must be YYYY-MM-DD; got "${to}"`, 'Example: gbrain dream --phase synthesize --from 2026-01-01 --to 2026-01-31'), json);
+    console.error(`--to must be YYYY-MM-DD; got "${to}"`);
+    process.exit(2);
   }
   if (from && to && from > to) {
-    dreamExit(usageError(`--from (${from}) is after --to (${to}); empty range`, 'Pass --from on or before --to.'), json);
+    console.error(`--from (${from}) is after --to (${to}); empty range`);
+    process.exit(2);
   }
 
   // --input + --date / --from / --to is incoherent: --input is a single
   // file, the date filters scan a directory.
   if (inputFile && (date || from || to)) {
-    dreamExit(usageError('--input cannot be combined with --date / --from / --to', 'Use --input <file> alone, or the date filters alone.'), json);
+    console.error('--input cannot be combined with --date / --from / --to');
+    process.exit(2);
   }
 
   // --input implies --phase synthesize.
@@ -217,24 +207,29 @@ function parseArgs(args: string[]): DreamArgs {
   const sourceValues = collectFlagValues(args, '--source');
   const sourceIdValues = collectFlagValues(args, '--source-id');
   if (sourceValues === null) {
-    dreamExit(usageError('--source <id>: missing value. Usage: gbrain dream --source <source-id>', 'Example: gbrain dream --source default'), json);
+    console.error('--source <id>: missing value. Usage: gbrain dream --source <source-id>');
+    process.exit(2);
   }
   if (sourceIdValues === null) {
-    dreamExit(usageError('--source-id <id>: missing value. Usage: gbrain dream --source-id <source-id>', 'Example: gbrain dream --source-id default'), json);
+    console.error('--source-id <id>: missing value. Usage: gbrain dream --source-id <source-id>');
+    process.exit(2);
   }
   const uniqSource = Array.from(new Set(sourceValues));
   const uniqSourceId = Array.from(new Set(sourceIdValues));
   if (uniqSource.length > 1) {
-    dreamExit(usageError(`specify --source once; got [${uniqSource.map(v => `"${v}"`).join(', ')}]`, 'Run one dream per source: gbrain dream --source <id>.'), json);
+    console.error(`specify --source once; got [${uniqSource.map(v => `"${v}"`).join(', ')}]`);
+    process.exit(2);
   }
   if (uniqSourceId.length > 1) {
-    dreamExit(usageError(`specify --source-id once; got [${uniqSourceId.map(v => `"${v}"`).join(', ')}]`, 'Run one dream per source: gbrain dream --source <id>.'), json);
+    console.error(`specify --source-id once; got [${uniqSourceId.map(v => `"${v}"`).join(', ')}]`);
+    process.exit(2);
   }
   if (uniqSource.length === 1 && uniqSourceId.length === 1 && uniqSource[0] !== uniqSourceId[0]) {
-    dreamExit(usageError(
+    console.error(
       `use --source OR --source-id, not both (different values): ` +
       `--source="${uniqSource[0]}" vs --source-id="${uniqSourceId[0]}"`,
-      'Pass one of --source / --source-id.'), json);
+    );
+    process.exit(2);
   }
   const source = uniqSource[0] ?? uniqSourceId[0] ?? null;
 
@@ -278,14 +273,16 @@ function parseArgs(args: string[]): DreamArgs {
   if (windowIdx !== -1) {
     const raw = args[windowIdx + 1];
     if (raw === undefined || !/^\d+$/.test(raw.trim()) || parseInt(raw, 10) <= 0) {
-      dreamExit(usageError(`--window must be a positive integer (seconds); got "${raw}"`, 'Example: gbrain dream --drain --window 300'), json);
+      console.error(`--window must be a positive integer (seconds); got "${raw}"`);
+      process.exit(2);
     }
     windowSeconds = parseInt(raw, 10);
   }
   if (drain) {
     if (phases.length === 0) phases = ['extract_atoms'];
     else if (phases.length > 1 || phases[0] !== 'extract_atoms') {
-      dreamExit(usageError(`--drain currently supports only --phase extract_atoms (got "${phases.join(', ')}")`, 'Example: gbrain dream --drain --phase extract_atoms'), json);
+      console.error(`--drain currently supports only --phase extract_atoms (got "${phases.join(', ')}")`);
+      process.exit(2);
     }
   }
 
@@ -308,26 +305,28 @@ function parseArgs(args: string[]): DreamArgs {
   const once = args.includes('--once');
   const wantsHelp = args.includes('--help') || args.includes('-h');
   if (once && !phaseWasExplicit && !wantsHelp) {
-    dreamExit(usageError(
+    console.error(
       '--once requires an explicit --phase <name> (bypasses that one ' +
       'phase\'s dream.<phase>.enabled / cycle.<phase>.enabled gate for ' +
       'this run only; never touches config). A phase implied by --input ' +
       'or --drain does not count — --once would silently do nothing for ' +
       'those. Usage: gbrain dream --phase <name> --once',
-      'Example: gbrain dream --phase synthesize --once'), json);
+    );
+    process.exit(2);
   }
   // #4493 corollary: --once bypasses ONE phase's enabled gate; with several
   // named phases there is no single target, and force-enabling them all at
   // once is the surprise-spend risk #2860 exists to prevent.
   if (once && phases.length > 1 && !wantsHelp) {
-    dreamExit(usageError(
+    console.error(
       `--once supports a single --phase target; got [${phases.join(', ')}]. ` +
       'Run each phase in its own --phase <name> --once invocation.',
-      'Example: gbrain dream --phase synthesize --once'), json);
+    );
+    process.exit(2);
   }
 
   return {
-    json,
+    json: args.includes('--json'),
     dryRun: args.includes('--dry-run'),
     pull: args.includes('--pull'),
     phases,
@@ -406,7 +405,8 @@ async function resolveBrainDir(
 ): Promise<string | null> {
   if (explicit) {
     if (!existsSync(explicit)) {
-      dreamExit(opError('not_found', `--dir path does not exist: ${explicit}`, 'Pass an existing brain directory to --dir, or omit it to use the configured source.'));
+      console.error(`--dir path does not exist: ${explicit}`);
+      process.exit(1);
     }
     // Resolve to absolute so downstream writeFileSync(join(brainDir, slug))
     // can't silently land at cwd when explicit is `.` / `./brain` / etc.
@@ -686,7 +686,7 @@ async function runDrain(
   if (opts.dryRun) {
     const remaining = await countExtractAtomsBacklog(engine, extractionSourceId);
     if (opts.json) {
-      await writeJsonDocument(JSON.stringify({ phase: 'extract_atoms', status: 'ok', dry_run: true, extracted: 0, skipped: 0, remaining, batches: 0, stopped: 'window', failure_count: 0, failures: [], omitted_failure_count: 0, last_error: null, resume_command: drainCommand(opts) }, null, 2));
+      console.log(JSON.stringify({ phase: 'extract_atoms', status: 'ok', dry_run: true, extracted: 0, skipped: 0, remaining, batches: 0, stopped: 'window', failure_count: 0, failures: [], omitted_failure_count: 0, last_error: null }, null, 2));
     } else {
       console.log(`[drain] dry-run: ${remaining ?? '?'} page(s) eligible for atom extraction (no work done)`);
     }
@@ -712,7 +712,7 @@ async function runDrain(
   } catch (e) {
     if (e instanceof LockUnavailableError) {
       if (opts.json) {
-        await writeJsonDocument(JSON.stringify({ phase: 'extract_atoms', status: 'skipped', reason: 'cycle_already_running', resume_command: drainCommand(opts) }, null, 2));
+        console.log(JSON.stringify({ phase: 'extract_atoms', status: 'skipped', reason: 'cycle_already_running' }, null, 2));
       } else {
         console.log('[drain] skipped: another cycle holds the lock (cycle_already_running) — run again shortly');
       }
@@ -737,28 +737,18 @@ async function runDrain(
       `[drain] ${result.failure_count} item failure(s)${omitted}${result.last_error ? `; last error: ${result.last_error}` : ''}\n`,
     );
   }
-  const { drainBudgetNotice, usd } = await import('../core/cycle/extract-atoms-budget-notice.ts');
-  const budgetNotice = result.stopped === 'budget' ? drainBudgetNotice(result) : null;
   if (opts.json) {
-    const done = result.stopped === 'drained' && result.remaining === 0;
-    await writeJsonDocument(JSON.stringify(done ? result : { ...result, resume_command: drainCommand(opts),
-      ...(budgetNotice ? { notices: [budgetNotice] } : {}) }, null, 2));
+    console.log(JSON.stringify(result, null, 2));
   } else {
     console.log(`[drain] extracted ${result.extracted} atom(s) across ${result.batches} batch(es); ${result.remaining ?? '?'} remaining (stopped: ${result.stopped})`);
   }
   // null remaining = the final count query failed; do not report success.
   if (result.stopped === 'drained' && result.remaining === 0) return;
-  process.stderr.write(budgetNotice
-    ? `[drain] stopped: budget; spent ${usd(result.spent_usd)} of the ${usd(result.budget_usd)} per-run cap (cycle.extract_atoms.budget_usd); ` +
-      `${result.remaining ?? '?'} page(s) remaining. Rerun: ${drainCommand(opts)}, or raise the cap: gbrain config set cycle.extract_atoms.budget_usd <usd>\n`
-    : `[drain] stopped: ${result.stopped}; ${result.remaining ?? '?'} page(s) remaining. ` +
-      `Rerun: ${drainCommand(opts)}\n`,
+  process.stderr.write(
+    `[drain] stopped: ${result.stopped}; ${result.remaining ?? '?'} page(s) remaining. ` +
+    `Rerun: gbrain dream --drain --window ${opts.windowSeconds}${opts.source ? ` --source ${opts.source}` : ''}\n`,
   );
   process.exit(EXIT_DRAIN_INCOMPLETE);
-}
-
-function drainCommand(opts: DreamArgs): string {
-  return `gbrain dream --drain --window ${opts.windowSeconds}${opts.source ? ` --source ${opts.source}` : ''}`;
 }
 
 export async function runDream(engine: BrainEngine | null, args: string[]): Promise<CycleReport | void> {
@@ -789,10 +779,11 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     const RETRIAGE_ONLY_FLAGS = ['--reconcile-queue', '--cancel-unmatched', '--audit-rejects'];
     const stray = args.find(a => RETRIAGE_ONLY_FLAGS.includes(a));
     if (stray) {
-      setCliExitVerdict(writeCliRefusal(usageError(
+      console.error(
         `gbrain dream: ${stray} belongs to the 'retriage' subcommand — ` +
         `did you mean: gbrain dream retriage ${args.join(' ')}`,
-        `Run it as: gbrain dream retriage ${args.join(' ')}`), 'dream', { json: jsonRequested(args) }));
+      );
+      setCliExitVerdict(2);
       return;
     }
   }
@@ -837,7 +828,10 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     try {
       implicitDefaultSourceId = await resolveImplicitDefaultSourceId(engine);
     } catch (e) {
-      if (isResolverUserError(e)) dreamExit(sourceError(e as Error), opts.json);
+      if (isResolverUserError(e)) {
+        console.error((e as Error).message);
+        process.exit(1);
+      }
       throw e;
     }
     // Gated on an EMPTY env, not on !envScoped: an explicit GBRAIN_SOURCE=__all__
@@ -849,17 +843,21 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
   }
   if (opts.source !== null || envScoped) {
     if (engine === null) {
-      dreamExit(opError('database_error',
+      console.error(
         'gbrain dream --source <id> / GBRAIN_SOURCE=<id> requires a connected brain ' +
         '(no engine available); omit the source scope or run `gbrain init` first',
-        'Fix the brain connection (`gbrain doctor --json` names the cause), or run without a source scope.'), opts.json);
+      );
+      process.exit(1);
     }
     try {
       // A null explicit falls through to tier 2 (GBRAIN_SOURCE: validate +
       // assertSourceExists) — the recall.ts pattern.
       resolvedSourceId = await resolveSourceId(engine, opts.source);
     } catch (e) {
-      if (isResolverUserError(e)) dreamExit(sourceError(e as Error), opts.json);
+      if (isResolverUserError(e)) {
+        console.error((e as Error).message);
+        process.exit(1);
+      }
       throw e; // genuine bugs propagate with stack trace
     }
     // #4700 mirror of the path-derived branch below: an env scope naming the
@@ -876,10 +874,11 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     // doesn't project the archived column, so it cannot be used here.
     const src = await fetchSource(engine, resolvedSourceId);
     if (src?.archived === true) {
-      dreamExit(opError('unknown_source',
+      console.error(
         `source ${resolvedSourceId} is archived; restore with ` +
         `\`gbrain sources restore ${resolvedSourceId}\` before cycling`,
-        `Ask the user whether to restore it (gbrain sources restore ${resolvedSourceId}), then run dream again.`), opts.json);
+      );
+      process.exit(1);
     }
   }
 
@@ -900,10 +899,11 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
   // no checkout, the cycle skips filesystem phases and runs DB-only phases
   // (resolve_symbol_edges, embed, orphans, ...) — the postgres support path.
   if (brainDir === null && engine === null) {
-    dreamExit(opError('no_brain',
+    console.error(
       'No brain directory found and no database connection. ' +
       'Pass --dir <path> or configure a brain via `gbrain init`.',
-      'Pass --dir <path>, fix the brain connection, or create a brain with `gbrain init` (see `gbrain init --help`).'), opts.json);
+    );
+    process.exit(1);
   }
 
   // #1869: a path-scoped run (--dir, or the configured sync.repo_path) whose
@@ -935,8 +935,8 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
   // ─── issue #1678: bounded single-hold extract_atoms drain ──────────
   if (opts.drain) {
     if (engine === null) {
-      dreamExit(opError('database_error', 'gbrain dream --drain requires a connected brain (no engine available)',
-        'Fix the brain connection (`gbrain doctor --json` names the cause), then run the drain again.'), opts.json);
+      console.error('gbrain dream --drain requires a connected brain (no engine available)');
+      process.exit(1);
     }
     return runDrain(engine, opts, resolvedSourceId, brainDir);
   }
@@ -947,8 +947,6 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
 
   const report = await runCycle(engine, {
     brainDir,
-    // #6023: the local CLI sees private fact text in the consolidate dry-run preview.
-    remote: false,
     dryRun: opts.dryRun,
     pull: opts.pull,
     phases,
@@ -967,24 +965,18 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     onceForPhase: opts.once ? opts.phases[0]! : undefined,
   });
 
-  // Exit non-zero when the cycle failed overall or any phase failed (agent-first
-  // operator wave E4): a 'partial' cycle whose phase reports 'fail' — thrown and
-  // contained, or caught inside the runner — is never success. Warn-only
-  // 'partial' cycles still exit 0.
-  const failedPhases = report.phases.filter(p => p.status === 'fail' || p.details?.contained === true).map(p => p.phase);
-  const failed = report.status === 'failed' || failedPhases.length > 0;
-  if (!opts.json) printHuman(report);
-  else if (!failed || !jsonGuardActive()) await writeJsonDocument(JSON.stringify(report, null, 2));
-  else {
-    // D2: under the --json guard a failed cycle is one envelope leading with the CycleReport keys.
-    writeCliError(opError('cycle_failed', `The dream cycle ${report.status === 'failed' ? 'failed' : 'had failing phases'}${failedPhases.length ? ` (${failedPhases.join(', ')})` : ''}.`,
-      `Read phases[].error for the cause, fix it, then rerun the phase: gbrain dream --phase ${failedPhases[0] ?? '<phase>'}`),
-    'dream', { json: true, stderr: false, legacy: { ...report } });
+  if (opts.json) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    printHuman(report);
   }
-  if (failed && !opts.json && failedPhases.length > 0) {
-    console.error(`Dream failed: ${failedPhases.length} phase(s) failed (${failedPhases.join(', ')}); see the phase errors above. After fixing the cause, re-run one with: gbrain dream --phase ${failedPhases[0]}`);
+
+  // Exit non-zero when the cycle failed overall (helps cron spot real problems).
+  // 'partial' is not a failure — it means some phase warned but the cycle ran —
+  // except when a phase threw and was contained so later phases could run.
+  if (report.status === 'failed' || report.phases.some(p => p.details?.contained === true)) {
+    process.exit(1);
   }
-  if (failed) process.exit(1);
 
   return report;
 }

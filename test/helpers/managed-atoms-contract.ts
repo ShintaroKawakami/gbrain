@@ -10,7 +10,6 @@ import { submitPageMutation } from '../../src/core/persistence/page-mutations.ts
 import { claimWorktree } from '../../src/core/persistence/ownership.ts';
 import { isPhysicalRootMetadata } from '../../src/core/persistence/physical-root.ts';
 import { __setMaintenanceWriteWaitForTests } from '../../src/core/persistence/maintenance-wait.ts';
-import { testWaitMs } from './wait-for.ts';
 import { registerLocalWriter, withVerifiedLocalRegistration, type LocalGrant } from '../../src/core/persistence/identity.ts';
 import { withCoordinatedWrite } from '../../src/core/persistence/context.ts';
 import { TEST_WRITE_ATTRIBUTION } from './write-attribution.ts';
@@ -32,8 +31,8 @@ type Case = typeof atomContractCases[number];
 export async function exerciseManagedAtoms(engine: BrainEngine, scenario: Case): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), 'gbrain-managed-atoms-'));
   const sourceId = `atoms-${scenario.replaceAll('_', '-')}`;
-  // The deferred case only needs a pending publish; a short wait proves the same deferral.
-  const restoreWait = scenario === 'deferred' ? __setMaintenanceWriteWaitForTests(testWaitMs(250)) : () => {};
+  // The deferred case only needs a pending publish; keep its wait at the pre-#5854 5 s.
+  if (scenario === 'deferred') __setMaintenanceWriteWaitForTests(5_000);
   try {
     await withEnv({ GBRAIN_HOME: home }, async () => {
       await disposePersistenceConsumer(engine);
@@ -242,8 +241,7 @@ export async function exerciseManagedAtoms(engine: BrainEngine, scenario: Case):
       }
       await disposePersistenceConsumer(engine);
       const replay = await runPhaseExtractAtoms(engine, opts);
-      // #6325: a malformed batch is retried automatically (one strike per completed failure).
-      expect(calls).toBe(scenario === 'malformed' ? 2 : 1);
+      expect(calls).toBe(1);
       expect(replay.status).toBe(scenario === 'malformed' ? 'warn' : 'ok');
       const atoms = await engine.executeRaw<{ slug: string; visibility: string }>("SELECT slug,frontmatter->>'visibility' AS visibility FROM pages WHERE source_id=$1 AND type='atom'", [sourceId]);
       expect(atoms).toHaveLength(scenario === 'zero_yield' || scenario === 'malformed' ? 0 : 1);
@@ -262,22 +260,15 @@ export async function exerciseManagedAtoms(engine: BrainEngine, scenario: Case):
       if (scenario !== 'malformed' && !transcript) expect(await countExtractAtomsBacklog(engine, sourceId)).toBe(0);
       expect((await engine.getPage(page.slug, { sourceId }))?.frontmatter).not.toHaveProperty('atoms_scan_hash');
       if (scenario === 'zero_yield' || scenario === 'malformed') {
-        // #6325: the third malformed attempt holds the page; a held page is neither re-run nor re-struck.
-        if (scenario === 'malformed') {
-          await disposePersistenceConsumer(engine);
-          await runPhaseExtractAtoms(engine, opts);
-          expect(calls).toBe(3);
-          expect(await countExtractAtomsBacklog(engine, sourceId)).toBe(0);
-        }
         const state = await readState();
         await disposePersistenceConsumer(engine);
         await runPhaseExtractAtoms(engine, opts);
-        expect(calls).toBe(scenario === 'malformed' ? 3 : 1);
+        expect(calls).toBe(1);
         expect(await readState()).toEqual(state);
-        expect(state).toEqual([{ content_hash: page.content_hash!, fail_count: scenario === 'malformed' ? 3 : 0, tombstoned: scenario === 'zero_yield' }]);
+        expect(state).toEqual([{ content_hash: page.content_hash!, fail_count: scenario === 'malformed' ? 1 : 0, tombstoned: scenario === 'zero_yield' }]);
       }
     });
-  } finally { restoreWait(); await disposePersistenceConsumer(engine); await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1'); __setChatTransportForTests(null); rmSync(home, { recursive: true, force: true }); }
+  } finally { __setMaintenanceWriteWaitForTests(null); await disposePersistenceConsumer(engine); await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1'); __setChatTransportForTests(null); rmSync(home, { recursive: true, force: true }); }
 }
 
 export async function exerciseManagedAtomReconciliation(engine: BrainEngine): Promise<void> {

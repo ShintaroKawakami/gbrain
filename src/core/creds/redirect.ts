@@ -17,7 +17,6 @@
  */
 
 import { CredentialError } from './errors.ts';
-import { bunSpawn } from '../spawn.ts';
 
 export type RedirectStrategy = 'loopback' | 'paste' | 'hosted-callback';
 
@@ -240,8 +239,7 @@ export function openBrowser(url: string, platform: NodeJS.Platform = process.pla
         ? ['cmd', '/c', 'start', '', url.replace(/&/g, '^&')]
         : ['xdg-open', url];
   try {
-    // The one launch that must stay visible: `cmd /c start` hands the URL to the user's browser (#4992).
-    bunSpawn(argv, { stdout: 'ignore', stderr: 'ignore', stdin: 'ignore', windowsHide: false });
+    Bun.spawn(argv, { stdout: 'ignore', stderr: 'ignore', stdin: 'ignore' });
     return true;
   } catch {
     return false;

@@ -28,7 +28,6 @@ import {
   type EndorsementsFile,
   type RegistryTier,
 } from './registry-schema.ts';
-import { gitChildEnv } from '../git-env.ts';
 
 export interface EndorseOptions {
   /** Absolute path to a clone of the registry repo. */
@@ -186,16 +185,14 @@ export function runEndorse(opts: EndorseOptions): EndorseResult {
   let commitSha: string | null = null;
   try {
     execFileSync('git', ['-C', opts.registryRepoRoot, 'add', 'endorsements.json'], {
-      env: gitChildEnv(),
       encoding: 'utf-8',
     });
     execFileSync(
       'git',
       ['-C', opts.registryRepoRoot, 'commit', '-m', `endorse: ${opts.packName} -> ${tier}`],
-      { env: gitChildEnv(), encoding: 'utf-8' },
+      { encoding: 'utf-8' },
     );
     commitSha = execFileSync('git', ['-C', opts.registryRepoRoot, 'rev-parse', '--short', 'HEAD'], {
-      env: gitChildEnv(),
       encoding: 'utf-8',
     }).trim();
   } catch (err) {
@@ -209,7 +206,6 @@ export function runEndorse(opts: EndorseOptions): EndorseResult {
   if (opts.push) {
     try {
       execFileSync('git', ['-C', opts.registryRepoRoot, 'push', 'origin', 'HEAD'], {
-        env: gitChildEnv(),
         encoding: 'utf-8',
       });
       pushed = true;

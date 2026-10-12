@@ -39,9 +39,6 @@ import {
   type BaselineThresholds,
 } from '../core/bench/baseline-file.ts';
 import { createAuditWriter } from '../core/audit/audit-writer.ts';
-import { jsonRequested, writeJsonLine } from '../core/cli-force-exit.ts';
-import { opError, type OperationError } from '../core/ops/contract.ts';
-import { usageError, writeCliRefusal } from '../cli/cli-error.ts';
 
 interface PublishOpts {
   help?: boolean;
@@ -276,24 +273,24 @@ export async function runBenchPublish(args: string[]): Promise<void> {
     return;
   }
 
-  // USAGE checks (exit 2). D2: each refusal keeps its stderr line; under
-  // --json the stream ends with the status:error envelope line.
-  const json = jsonRequested(args);
-  const fail: (e: OperationError) => never = e => process.exit(writeCliRefusal(e, 'bench', { json }));
-  const example = 'Example: gbrain bench publish --from captured.ndjson --to personal.baseline.ndjson --json';
+  // USAGE checks (exit 2)
   if (!opts.from) {
+    console.error('Error: --from FILE is required\n');
     printHelp();
-    fail(usageError('Error: --from FILE is required', example));
+    process.exit(2);
   }
   if (!opts.to) {
+    console.error('Error: --to FILE is required\n');
     printHelp();
-    fail(usageError('Error: --to FILE is required', example));
+    process.exit(2);
   }
   if (!existsSync(opts.from)) {
-    fail(opError('not_found', `Error: --from file not found: ${opts.from}`, 'Capture one first: gbrain eval export --tool query > captured.ndjson'));
+    console.error(`Error: --from file not found: ${opts.from}`);
+    process.exit(1);
   }
   if (existsSync(opts.to) && !opts.force) {
-    fail(usageError(`Error: --to path already exists: ${opts.to}\nUse --force to overwrite.`, 'Pass --force to overwrite it, or choose another --to path.'));
+    console.error(`Error: --to path already exists: ${opts.to}\nUse --force to overwrite.`);
+    process.exit(2);
   }
 
   const label = opts.label ?? deriveLabel(opts.to);
@@ -304,6 +301,7 @@ export async function runBenchPublish(args: string[]): Promise<void> {
     input = readInputNdjson(opts.from);
   } catch (err) {
     const msg = (err as Error).message;
+    console.error(`Error: ${msg}`);
     auditWriter.log({
       label,
       source_hash: '',
@@ -313,7 +311,7 @@ export async function runBenchPublish(args: string[]): Promise<void> {
       success: false,
       failure_reason: msg,
     });
-    fail(opError('parse_error', `Error: ${msg}`, 'Pass an NDJSON file written by `gbrain eval export` (one captured row per line).'));
+    process.exit(1);
   }
 
   let file: BaselineFile;
@@ -324,6 +322,7 @@ export async function runBenchPublish(args: string[]): Promise<void> {
     });
   } catch (err) {
     const msg = (err as Error).message;
+    console.error(`Error: ${msg}`);
     auditWriter.log({
       label,
       source_hash: '',
@@ -333,7 +332,7 @@ export async function runBenchPublish(args: string[]): Promise<void> {
       success: false,
       failure_reason: msg,
     });
-    fail(opError('parse_error', `Error: ${msg}`, 'Fix the captured rows named above (or de-duplicate them as the message shows), then publish again.'));
+    process.exit(1);
   }
 
   const serialized = serializeBaselineFile(file);
@@ -342,6 +341,7 @@ export async function runBenchPublish(args: string[]): Promise<void> {
     writeFileSync(outputPath, serialized);
   } catch (err) {
     const msg = (err as Error).message;
+    console.error(`Error: could not write baseline to ${outputPath}: ${msg}`);
     auditWriter.log({
       label,
       source_hash: file.metadata.source_hash,
@@ -351,7 +351,7 @@ export async function runBenchPublish(args: string[]): Promise<void> {
       success: false,
       failure_reason: msg,
     });
-    fail(opError('storage_error', `Error: could not write baseline to ${outputPath}: ${msg}`, 'Choose a writable --to path.'));
+    process.exit(1);
   }
 
   auditWriter.log({
@@ -364,7 +364,7 @@ export async function runBenchPublish(args: string[]): Promise<void> {
   });
 
   if (opts.json) {
-    const doc = {
+    console.log(JSON.stringify({
       schema_version: 1,
       output_path: outputPath,
       label: file.metadata.label,
@@ -372,9 +372,7 @@ export async function runBenchPublish(args: string[]): Promise<void> {
       row_count: file.rows.length,
       baseline_mean_latency_ms: file.metadata.baseline_mean_latency_ms,
       thresholds: file.metadata.thresholds,
-    };
-    // D2: one NDJSON line under the --json guard; the legacy pretty document otherwise.
-    await writeJsonLine(doc, () => console.log(JSON.stringify(doc, null, 2)));
+    }, null, 2));
   } else {
     console.log(`Wrote ${outputPath}`);
     console.log(`  Label:    ${file.metadata.label}`);

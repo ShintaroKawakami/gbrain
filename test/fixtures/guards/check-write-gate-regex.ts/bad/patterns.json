@@ -1,9 +1,0 @@
-[
-  {
-    "name": "unbounded",
-    "source": "\\bignore\\s+previous\\s+instructions",
-    "anchors": [
-      "ignore"
-    ]
-  }
-]

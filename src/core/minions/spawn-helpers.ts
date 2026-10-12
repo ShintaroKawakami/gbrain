@@ -15,7 +15,7 @@
  * any module mocking.
  */
 
-import { execFileSync } from '../spawn.ts';
+import { execFileSync } from 'child_process';
 
 /**
  * Resolve the tini binary path, or return an empty string when not on PATH.

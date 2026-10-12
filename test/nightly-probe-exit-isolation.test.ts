@@ -18,8 +18,6 @@ function run(script: string) {
   }
 }
 
-// isolation-lint: R5-subprocess-only — configureGateway() below runs inside the
-// spawned child's script string, never in this shard process, so it cannot leak.
 describe('embedded nightly probe failures (#5095)', () => {
   test('missing chat configuration is audited before embedding work and rate-limited', () => {
     const child = run(`

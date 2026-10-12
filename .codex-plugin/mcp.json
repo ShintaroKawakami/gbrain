@@ -5,7 +5,7 @@
       "args": [
         "serve",
         "--surface",
-        "full",
+        "starter",
         "--source-guard"
       ],
       "cwd": ".",
@@ -20,7 +20,6 @@
         "GBRAIN_BIN",
         "GBRAIN_BRAIN_ID",
         "GBRAIN_CHAT_FALLBACK_CHAIN",
-        "GBRAIN_CHAT_FALLBACK_ON_REFUSAL",
         "GBRAIN_CHAT_MODEL",
         "GBRAIN_DATABASE_URL",
         "GBRAIN_EMBEDDING_DIMENSIONS",
@@ -46,7 +45,6 @@
         "GBRAIN_SURFACE",
         "GEMINI_API_KEY",
         "GOOGLE_GENERATIVE_AI_API_KEY",
-        "GOOGLE_GENERATIVE_AI_BASE_URL",
         "GROQ_API_KEY",
         "HOME",
         "JEV_TYPESAFE_API_KEY",

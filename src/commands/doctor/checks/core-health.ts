@@ -14,7 +14,6 @@ import { loadConfig } from '../../../core/config.ts';
 import type { ProgressReporter } from '../../../core/progress.ts';
 import type { Check } from '../../doctor.ts';
 import { PAGE_CHILD_FK_TARGETS, orphanPredicate } from '../../../core/repair/orphan-children.ts';
-import { checkError } from '../check-fix.ts';
 
 /**
  * Doctor check: takes.weight grid integrity (v0.32 — EXP-2).
@@ -125,7 +124,11 @@ export async function whoknowsHealthCheck(_engine: BrainEngine): Promise<Check> 
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return checkError('whoknows_health', 'check whoknows fixture', msg);
+    return {
+      name: 'whoknows_health',
+      status: 'warn',
+      message: `Could not check whoknows fixture: ${msg}`,
+    };
   }
 }
 
@@ -147,7 +150,7 @@ export async function pgvectorCheck(engine: BrainEngine): Promise<Check> {
     }
     return { name: 'pgvector', status: 'fail', message: 'Extension not found. Run: CREATE EXTENSION vector;' };
   } catch {
-    return checkError('pgvector', 'check pgvector extension');
+    return { name: 'pgvector', status: 'warn', message: 'Could not check pgvector extension' };
   }
 }
 
@@ -185,7 +188,7 @@ export async function pagesUpsertArbiterCheck(engine: BrainEngine): Promise<Chec
         `Run \`gbrain apply-migrations --yes\` to heal it.`,
     };
   } catch {
-    return checkError('pages_upsert_arbiter', 'check the pages upsert arbiter');
+    return { name: 'pages_upsert_arbiter', status: 'warn', message: 'Could not check the pages upsert arbiter' };
   }
 }
 
@@ -228,7 +231,7 @@ export async function linkSourceCheckConstraintCheck(engine: BrainEngine): Promi
         : `links_link_source_check is NOT VALID — existing rows were never validated. ${heal}`,
     };
   } catch {
-    return checkError(name, 'check the links_link_source_check constraint');
+    return { name, status: 'warn', message: 'Could not check the links_link_source_check constraint' };
   }
 }
 
@@ -289,7 +292,7 @@ export async function jsonbIntegrityCheck(
       message: `${totalBad} row(s) double-encoded (${breakdown.join(', ')}). Fix: gbrain repair-jsonb`,
     };
   } catch {
-    return checkError('jsonb_integrity', 'check JSONB integrity');
+    return { name: 'jsonb_integrity', status: 'warn', message: 'Could not check JSONB integrity' };
   }
 }
 
@@ -445,7 +448,11 @@ export async function takesWeightGridCheck(engine: BrainEngine): Promise<Check> 
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     // takes table missing on a fresh pre-v37 brain — warn, don't fail.
-    return checkError('takes_weight_grid', 'check takes weight grid', msg);
+    return {
+      name: 'takes_weight_grid',
+      status: 'warn',
+      message: `Could not check takes weight grid: ${msg}`,
+    };
   }
 }
 
@@ -573,7 +580,7 @@ export async function rawProvenanceCheck(engine: BrainEngine): Promise<Check> {
         `raw_trace_exempt_reason in frontmatter. Warn-only (#1978).`,
     };
   } catch {
-    return checkError('raw_provenance', 'check raw provenance (older schema?)');
+    return { name: 'raw_provenance', status: 'warn', message: 'Could not check raw provenance (older schema?)' };
   }
 }
 
@@ -684,7 +691,7 @@ export async function checkPgliteScratchProbe(opts: {
             `A scratch PGLite store initialized, wrote and read back fine on this machine (${secs}s), ` +
             `so the runtime is healthy and YOUR STORE is damaged — not the WASM runtime. ` +
             `Your markdown is unaffected: the DB holds derived data (chunks, embeddings, links, facts) that a re-sync rebuilds. ` +
-            `Recover: \`gbrain pglite-repair --dry-run\` diagnoses it and prints the plan-bound in-place WAL repair command (data preserved) to run once the user approves; ` +
+            `Recover: \`gbrain pglite-repair --dry-run\` to diagnose, \`gbrain pglite-repair --yes\` for in-place WAL repair (data preserved); ` +
             `if that can't fix it, restore a backup of the store directory or run \`gbrain reinit-pglite\` (wipes + re-inits + re-syncs; ` +
             `defaults embedding flags from your config file).`,
           details: { scratch_ok: true, duration_ms: r.duration_ms },

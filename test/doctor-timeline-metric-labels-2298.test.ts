@@ -28,7 +28,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { sqlQueryForEngine } from '../src/core/sql-query.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { buildChecks } from '../src/commands/doctor.ts';
-import { formatResult } from '../src/cli/main.ts';
+import { formatResult } from '../src/cli.ts';
 
 let engine: PGLiteEngine;
 

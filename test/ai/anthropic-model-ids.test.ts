@@ -53,13 +53,8 @@ describe('newerAnthropicModel', () => {
   });
 
   test('dated and undated forms of the current version get no hint', () => {
-    expect(newerAnthropicModel('claude-haiku-5-5')).toBeNull();
-    expect(newerAnthropicModel('anthropic:claude-haiku-5-5')).toBeNull();
-  });
-
-  test('dated and undated forms of an older version get the same hint (#6335 lists claude-haiku-5-5)', () => {
-    expect(newerAnthropicModel('claude-haiku-4-5')?.id).toBe('claude-haiku-5-5');
-    expect(newerAnthropicModel('anthropic:claude-haiku-4-5-20251001')?.id).toBe('claude-haiku-5-5');
+    expect(newerAnthropicModel('claude-haiku-4-5')).toBeNull();
+    expect(newerAnthropicModel('anthropic:claude-haiku-4-5-20251001')).toBeNull();
   });
 
   test('current, newer-than-recipe, fable, non-Anthropic and unparseable ids get none', () => {

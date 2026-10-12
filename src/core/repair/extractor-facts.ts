@@ -9,8 +9,7 @@
  * transaction. The fix stopped new expiries; this kind restores the old ones.
  *
  * Candidates: `source` starts with `cli:extract-conversation-facts`,
- * `expired_at` set, `row_num` NULL (the projection's signature), and not
- * retired by `gbrain repair conversation-labels` (its context marker). Each is
+ * `expired_at` set, `row_num` NULL (the projection's signature). Each is
  * classified, in this order:
  *   - excluded (listed, never restored): the page is missing or deleted; the
  *     fact was superseded (`superseded_by`, E-T5); its claim was withdrawn
@@ -50,8 +49,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { PreparedMutation } from '../persistence/coordinator.ts';
 import type { WriteRequest } from '../persistence/model.ts';
 import { VERSION } from '../../version.ts';
-import { opError, OperationError } from '../ops/contract.ts';
-import { readFix } from '../ops/op-fix.ts';
+import { OperationError } from '../ops/contract.ts';
 import { parseFactsFence } from '../facts-fence.ts';
 import { digest } from '../persistence/digest.ts';
 import { isTerminal } from '../persistence/model.ts';
@@ -63,13 +61,9 @@ import { maintenancePreflight, submitDatabaseMaintenanceIntent } from '../persis
 import { compareWriterVersions, recentWriterVersions, writerVersionLabel } from '../persistence/writer-versions.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { afterCursor, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairListing, type RepairPlan, type RepairScope } from './core.ts';
-import { maintenanceTransaction } from '../persistence/attribution.ts';
 
 export const EXTRACTOR_FACTS_INTENT = 'managed_maintenance_restore_extractor_facts';
 export const EXTRACTOR_FACTS_SOURCE_PREFIX = 'cli:extract-conversation-facts';
-const extractorPreviewFix = (sourceId: string) => readFix('Previews the extractor-facts repair without changing anything.',
-  { argv: ['gbrain', 'repair', 'extractor-facts', '--source', sourceId, '--json'] });
-
 /** The first release whose canonical projection leaves fenceless extractor facts alone. */
 export const EXTRACTOR_FACTS_FIX_VERSION = '0.60.11.0';
 
@@ -130,7 +124,6 @@ export async function classifyExtractorFacts(db: BrainEngine, sourceIds: string[
         FROM facts f
        WHERE f.source_id=ANY($1::text[]) AND f.source LIKE '${EXTRACTOR_FACTS_SOURCE_PREFIX}%'
          AND f.expired_at IS NOT NULL AND f.row_num IS NULL AND f.source_markdown_slug IS NOT NULL
-         AND COALESCE(f.context, '') NOT LIKE '%retired: conversation-labels%'
          AND ($2::text IS NULL OR f.source_markdown_slug=$2::text)
     ), receipts AS (
       SELECT DISTINCT ON (r.source_id, r.slug, r.completed_at) r.source_id, r.slug, r.completed_at,
@@ -306,8 +299,7 @@ export const extractorFactsRepair: RepairHandler = {
         `Preview first: ${command} — then run the apply command it prints: ${command} --apply --expect <preview-hash>`,
         'docs/guides/repair.md#explicit-only-repair-kinds');
     }
-    const approved = await loadApprovedSet<ExtractorFactsPage>(engine, { command: 'extractor-facts', hash: opts.expect, previewCommand: command,
-      emptyHash: async () => previewHash(await hashParts(engine, scope, includeAmbiguous, [])) });
+    const approved = await loadApprovedSet<ExtractorFactsPage>(engine, { command: 'extractor-facts', hash: opts.expect, previewCommand: command });
     const scopeKey = JSON.stringify(scope.source_ids);
     if (approved.items.some(page => page.include_ambiguous !== includeAmbiguous || JSON.stringify(page.scope) !== scopeKey)) {
       throw previewChangedError(opts.expect, command);
@@ -323,8 +315,8 @@ export const extractorFactsRepair: RepairHandler = {
   async apply(ctx, entry): Promise<RepairItemOutcome> {
     const { page, hash, last } = entry as PageItem;
     const result = await managedPersistenceEnabled(ctx.engine)
-      ? await restoreManaged(ctx.engine, ctx.config, page, hash, ctx.writeWaitMs)
-      : await maintenanceTransaction(ctx.engine, async tx => {
+      ? await restoreManaged(ctx.engine, ctx.config, page, hash)
+      : await ctx.engine.transaction(async tx => {
         await tx.lockPageKeys([{ sourceId: page.source_id, slug: page.slug }]);
         return restorePageFacts(tx, page, false);
       });
@@ -337,8 +329,7 @@ export const extractorFactsRepair: RepairHandler = {
 
 interface RestoreResult { restored: number[]; changed: number[] }
 
-async function restoreManaged(engine: BrainEngine, config: Parameters<typeof waitForWrite>[2], page: ExtractorFactsPage, hash: string,
-  writeWaitMs: number | undefined): Promise<RestoreResult> {
+async function restoreManaged(engine: BrainEngine, config: Parameters<typeof waitForWrite>[2], page: ExtractorFactsPage, hash: string): Promise<RestoreResult> {
   const unchanged: RestoreResult = { restored: [], changed: page.facts.map(f => f.id) };
   const authority = (await maintenancePreflight(engine, page.source_id))!;
   for (let attempt = 0; ; attempt++) {
@@ -349,8 +340,7 @@ async function restoreManaged(engine: BrainEngine, config: Parameters<typeof wai
       let receipt: Record<string, unknown>;
       if (prior) {
         await authorizeStoredRequest(engine, prior);
-        // #6185: a pending restore replayed by a resumed apply waits like the apply's own writes.
-        receipt = writeResponse(await waitForWrite(engine, prior, config, writeWaitMs));
+        receipt = writeResponse(await waitForWrite(engine, prior, config));
       } else {
         const snapshot = await engine.readPageSnapshot(page.slug, { sourceId: page.source_id });
         if (!snapshot || snapshot.page.id !== page.page_id) return unchanged;
@@ -404,16 +394,10 @@ export async function prepareExtractorFactsRestore(engine: BrainEngine, row: Wri
   const intent = row.intent as { page?: ExtractorFactsPage; preview_hash?: unknown } | null;
   const page = intent?.page;
   if (!page || page.source_id !== row.source_id || page.slug !== row.slug || typeof intent?.preview_hash !== 'string' || !Array.isArray(page.facts)) {
-    throw opError('invalid_params', 'The extractor facts restore intent does not name its page.',
-      `Request ${row.request_id} for ${row.slug} in source ${row.source_id} does not name the page and preview it restores, so nothing changed. Preview the repair again and apply the new preview after the user approves.`,
-      { fix: extractorPreviewFix(row.source_id) });
+    throw new OperationError('invalid_params', 'The extractor facts restore intent does not name its page.');
   }
   const snapshot = await engine.readPageSnapshot(row.slug, { sourceId: row.source_id });
-  if (!snapshot || snapshot.page.id !== Number(row.page_id)) {
-    throw opError('page_identity_changed', 'The conversation page was deleted or replaced before its facts were restored.',
-      `Conversation page ${row.slug} in source ${row.source_id} was deleted or replaced after the preview, so request ${row.request_id} restored nothing. Preview the repair again; it reflects the current pages.`,
-      { fix: extractorPreviewFix(row.source_id) });
-  }
+  if (!snapshot || snapshot.page.id !== Number(row.page_id)) throw new OperationError('page_identity_changed', 'The conversation page was deleted or replaced before its facts were restored.');
   await authorizeWrite(engine, row.authority, 'submit_job', row.slug);
   return { observedRevision: snapshot.revision, noop: true,
     validate: async tx => { await authorizeWrite(tx, row.authority, 'submit_job', row.slug); },

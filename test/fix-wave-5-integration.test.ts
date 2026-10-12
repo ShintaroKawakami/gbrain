@@ -49,7 +49,6 @@ import { runExtractConversationFactsCore } from '../src/commands/extract-convers
 import { writeSingleFact } from '../src/core/facts/write-single.ts';
 import { postUpgradeRecoveryBanner } from '../src/commands/doctor/upgrade-banner.ts';
 import { runRemediate, runRemediationPlan } from '../src/commands/doctor/remediate.ts';
-import { approvedRemediateArgs } from './helpers/remediate-approval.ts';
 import { AUTO_REPAIR_REGISTRY } from '../src/core/repair/registry.ts';
 import { HOOK_EVENTS, runHook } from '../src/commands/hook.ts';
 import { CORPUS_INGESTED_SUFFIX, runMaintenanceSweep } from '../src/core/sweep.ts';
@@ -194,8 +193,7 @@ for (const backend of testBackends()) {
         const activeFacts = async () => (await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM facts WHERE source_markdown_slug='conversations/expired' AND expired_at IS NULL"))[0].n;
         const untouched = async () => { expect(await liveAtoms()).toBe(30); expect(await activeFacts()).toBe(0); };
         const previews = { 'google-file-modes': 'gbrain repair google-file-modes', 'stale-atoms': 'gbrain repair stale-atoms', 'extractor-facts': 'gbrain repair extractor-facts',
-          'conversation-labels': 'gbrain repair conversation-labels', 'captured-facts': 'gbrain repair captured-facts', 'loop-facts': 'gbrain repair loop-facts', 'ontology-facts': 'gbrain repair ontology-facts', 'orphan-children': 'gbrain repair orphan-children', 'failed-writes': 'gbrain repair failed-writes',
-          frontmatter: 'gbrain repair frontmatter', 'timeline-comments': 'gbrain repair timeline-comments', 'managed-sync-orphans': 'gbrain repair managed-sync-orphans' };
+          'captured-facts': 'gbrain repair captured-facts', 'loop-facts': 'gbrain repair loop-facts', 'orphan-children': 'gbrain repair orphan-children', 'failed-writes': 'gbrain repair failed-writes' };
 
         // The post-upgrade banner names both findings with the kind's read-only preview.
         const banner = await postUpgradeRecoveryBanner(engine, 'host');
@@ -222,7 +220,7 @@ for (const backend of testBackends()) {
         expect(planText).not.toMatch(/gbrain repair (stale-atoms|extractor-facts) --apply/);
 
         // gbrain doctor --remediate --include-repairs never runs them; each finding says explicit_kind_required with the preview.
-        const run = JSON.parse((await capture(async () => runRemediate(engine, await approvedRemediateArgs(engine, ['--remediate', '--yes', '--include-repairs', '--no-embed', '--max-usd', '0', '--json'])))).out) as {
+        const run = JSON.parse((await capture(() => runRemediate(engine, ['--remediate', '--yes', '--include-repairs', '--no-embed', '--max-usd', '0', '--json']))).out) as {
           repairs?: Array<{ kind: string }>; findings: Array<{ check_id: string; class: string; repair_kind?: string; command?: string }> };
         expect((run.repairs ?? []).map(r => r.kind).filter(kind => kind in previews)).toEqual([]);
         expect(run.findings.filter(f => f.class === 'explicit_kind_required').map(f => [f.check_id, f.repair_kind, f.command])).toEqual([
@@ -275,13 +273,11 @@ for (const backend of testBackends()) {
           }
 
           // Session capture: session-end wrote A's transcript to the corpus, and the sweep ingests it.
-          // #6268: session files land in the corpus spool, the session's source stamped in the name.
-          const corpusRoot = join(hookHome, '.gbrain', 'transcripts', 'corpus');
-          const corpus = join(corpusRoot, 'sourced');
+          const corpus = join(hookHome, '.gbrain', 'transcripts', 'corpus');
           const files = readdirSync(corpus).filter(name => name.endsWith('.txt'));
           expect(files.some(name => name.startsWith('sess-a'))).toBe(true);
           for (const name of files) for (const secret of secrets) expect(readFileSync(join(corpus, name), 'utf8')).not.toContain(secret);
-          await engine.setConfig('dream.synthesize.session_corpus_dir', corpusRoot);
+          await engine.setConfig('dream.synthesize.session_corpus_dir', corpus);
           const prompts: string[] = [];
           __setChatTransportForTests(async (req: unknown): Promise<ChatResult> => {
             const prompt = JSON.stringify(req);
@@ -317,7 +313,7 @@ for (const backend of testBackends()) {
           writeFileSync(join(root, 'TODOS.md'), '# Todos\n\n- keep the mirror pullable\n');
           mkdirSync(join(root, 'journal'));
           for (const day of ['2026-09-29', '2026-09-30']) writeFileSync(join(root, 'journal', `${day}.md`), `# ${day}\n\nA journal entry without frontmatter.\n`);
-          git('init', '-q'); git('config', 'gc.auto', '0'); git('config', 'maintenance.auto', 'false'); commit('upstream');
+          git('init', '-q'); commit('upstream');
           const tracked = () => git('status', '--porcelain', '--untracked-files=no');
 
           await registerLocalWriter(engine, 'cli');

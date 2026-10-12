@@ -105,17 +105,11 @@ gbrain query "<topic keywords>"
 #    Cite every claim.
 #    """
 
-# 3. Call Perplexity's Agent API (or the host's perplexity binary). The
-#    Sonar chat-completions endpoint (/chat/completions with
-#    "model": "sonar-pro") is being retired and refuses migrated accounts
-#    with 403 agent_api_migration_required; use POST /v1/agent:
-#    curl https://api.perplexity.ai/v1/agent \
+# 3. Call Perplexity API or the host's perplexity binary:
+#    curl https://api.perplexity.ai/chat/completions \
 #      -H "Authorization: Bearer $PERPLEXITY_API_KEY" \
 #      -H "Content-Type: application/json" \
-#      -d '{"preset": "low", "instructions": "Cite every claim.", "input": "..."}'
-#    Read the answer from the output item with "type": "message" (SDKs
-#    expose it as output_text) and the citations from the search results
-#    in the output array; inline [n] markers refer to them.
+#      -d '{"model": "sonar-pro", "messages": [{"role":"user","content":"..."}]}'
 
 # 4. Write the structured research page via put_page:
 gbrain put research/<slug>      # via the put_page operation
@@ -123,16 +117,15 @@ gbrain put research/<slug>      # via the put_page operation
 # 5. Cross-link entities mentioned (people, companies) per Iron Law.
 ```
 
-## Presets
+## Models
 
-| Agent API preset | Replaces | Use when |
+| Model | Cost / query | Use when |
 |-------|-------------|----------|
-| `"preset": "low"` | Sonar Pro | Deep analysis, entity enrichment, deal research (multi-step search) |
-| `"preset": "fast"` | Sonar | Quick lookups, bulk monitoring, briefing pipelines |
+| Perplexity sonar-pro | ~\$0.04 | Deep analysis, entity enrichment, deal research |
+| Perplexity sonar | ~\$0.007 | Quick lookups, bulk monitoring, briefing pipelines |
 
-Default to `low`. Drop to `fast` for bulk / cron contexts where cost
-matters more than depth. Perplexity does not publish a fixed per-request
-price for presets; check its pricing page before running bulk jobs.
+Default to sonar-pro. Drop to sonar for bulk / cron contexts where cost
+matters more than depth.
 
 ## Integration patterns
 
@@ -162,19 +155,8 @@ the agent doesn't re-narrate already-known facts.
 
 ## Recency filter
 
-Pass the recency filter on the web search tool:
-`"tools": [{"type": "web_search", "filters": {"search_recency_filter": "week"}}]`
-with `hour | day | week | month | year`. Useful for news-cycle topics; omit
-for evergreen research. Record the value as `recency_filter` in the page
-frontmatter.
-
-## When it fails
-
-Follow the [agent operator protocol](../conventions/agent-operator-protocol.md) for any gbrain error `code`, exit code, `[AGENT]` block or notice block. Specific to this skill:
-
-- `PERPLEXITY_API_KEY` missing or rejected: tell the user the web arm cannot run; answer from the brain only and say so.
-- `rate_limited`: retry after the stated delay; for bulk work drop to the cheaper model rather than looping.
-- The brain-context search is empty with a degraded notice: the "what's new vs what the brain knows" diff is unreliable; say the brain side was keyword-only.
+Pass `recency_filter` to Perplexity: `hour | day | week | month`. Useful
+for news-cycle topics; omit for evergreen research.
 
 ## Anti-Patterns
 

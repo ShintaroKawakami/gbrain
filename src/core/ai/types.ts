@@ -54,13 +54,6 @@ export interface EmbeddingTouchpoint {
    */
   model_dims?: Readonly<Record<string, number>>;
   /**
-   * PR #5921 / wave 14: models whose endpoint returns the native width whatever `dimensions` asked, and whose model
-   * card documents dynamic sizes as "slice from the start, then L2-normalize". Keyed by folded model id
-   * (`modelMatchKey`). When such a model answers at `native` and the brain expects one of `prefixes`, the gateway fits
-   * the vector (`fitMatryoshkaPrefix`); any other width keeps the dim-mismatch refusal. Partial by design.
-   */
-  matryoshka?: Readonly<Record<string, { native: number; prefixes: readonly number[] }>>;
-  /**
    * #4530: per-model maximum tokens PER SINGLE INPUT, keyed like model_dims
    * (partial by design — declare only the models whose limit is known).
    * Distinct from max_batch_tokens (whole-request budget): some hosted
@@ -351,23 +344,6 @@ export interface Recipe {
   tier: 'native' | 'openai-compat';
   /** Maps to the gateway's implementation switch. */
   implementation: Implementation;
-  /**
-   * How the provider bills. `subscription`: calls draw on a flat-rate plan
-   * (claude-cli), so the operator may price every model of the provider at
-   * once with a `<provider>:*` key in `pricing.overrides`. Unset means per
-   * token, where a provider wildcard is refused (one rate cannot be right
-   * for every model of a per-token API).
-   */
-  billing?: 'subscription';
-  /**
-   * Model ids this recipe lists in a touchpoint that gbrain ships no price
-   * for. They run under a default cost cap with a warning; a cap the user
-   * set refuses them with the no_pricing guidance until the operator
-   * registers a rate (`gbrain pricing set`). `bun run check:recipe-pricing`
-   * requires every listed model to be priced or named here, and fails on a
-   * stale entry (now priced, or no longer listed).
-   */
-  unpriced_models?: string[];
   /** For openai-compatible tier: default base URL. May be overridden by env or wizard. */
   base_url_default?: string;
   /** Env var name(s) for auth; first is required, rest are optional. */
@@ -517,13 +493,11 @@ export interface AIGatewayConfig {
 
   reranker_model?: string;
   /**
-   * Optional chat fallback chain ("provider:modelId" entries), walked by
-   * `chatWithFallback()` (chat-fallback.ts) when a chat call fails or refuses.
-   * Judge, critic and eval call sites opt out with `allowFallback: false`.
+   * Optional silent-refusal fallback chain ("provider:modelId" entries).
+   * Plumbed for `chatWithFallback()` (commit 3). Blocked from critic/judge/
+   * synthesize flows in their respective handlers.
    */
   chat_fallback_chain?: string[];
-  /** `false` keeps outage fallback but never sends a refused request to the next chain entry. Default true. */
-  chat_fallback_on_refusal?: boolean;
   /** Optional per-provider base URL override (openai-compatible variants). */
   base_urls?: Record<string, string>;
   /** Optional chat providerOptions overrides keyed by recipe id or "recipe:modelId". */

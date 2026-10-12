@@ -39,7 +39,6 @@ import {
 } from '../core/resolvers/index.ts';
 import { registerBuiltinResolvers } from './resolvers.ts';
 import { tweetCitation } from '../core/output/scaffold.ts';
-import { INTEGRITY_SUBCOMMANDS, ROUTERS, subcommandHelpRequested } from '../cli/subcommands.ts';
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -223,13 +222,11 @@ function ensureDir(path: string): void {
 // CLI entry point
 // ---------------------------------------------------------------------------
 
-export { INTEGRITY_SUBCOMMANDS as SUBCOMMANDS } from '../cli/subcommands.ts';
-
 export async function runIntegrity(args: string[]): Promise<void> {
-  const sub = args[0] as (typeof INTEGRITY_SUBCOMMANDS)[number] | undefined;
+  const sub = args[0];
 
-  if (!sub || subcommandHelpRequested(args, ROUTERS.integrity)) {
-    printUsage();
+  if (!sub || sub === '--help' || sub === '-h') {
+    printHelp();
     return;
   }
 
@@ -252,7 +249,7 @@ export async function runIntegrity(args: string[]): Promise<void> {
   }
 
   console.error(`Unknown subcommand: ${sub}`);
-  printUsage();
+  printHelp();
   process.exit(1);
 }
 
@@ -804,7 +801,7 @@ function truncate(s: string, n: number): string {
   return s.length <= n ? s : s.slice(0, n - 3) + '...';
 }
 
-export function printUsage(): void {
+function printHelp(): void {
   console.log(`Usage: gbrain integrity <subcommand> [options]
 
 Subcommands:

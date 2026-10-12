@@ -15,9 +15,6 @@
  * back to the cached verdict + age (cache-derived exit code), never a crash;
  */
 
-import { OperationError, opError } from '../core/ops/contract.ts';
-import { redactUrlsInText } from '../core/url-redact.ts';
-import { redactConnectionInfo } from '../core/audit/redact-connection-info.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { getCliOptions } from '../core/cli-options.ts';
 import { getBackupStatus } from '../core/backup/coverage.ts';
@@ -32,40 +29,6 @@ import {
   type BackupAssetVerdict,
   type BackupStatus,
 } from '../core/backup/status-file.ts';
-
-const BACKUP_USAGE: Record<string, { usage: string; example: string }> = {
-  create: { usage: 'gbrain backup create --output /absolute/private/path/archive.gbrain-backup [--json]',
-    example: 'gbrain backup create --output /srv/private/brain-2026-10-03.gbrain-backup' },
-  restore: { usage: 'gbrain backup restore ARCHIVE --into /absolute/new-root [--mode new-brain|recovery] [--confirm-quiesced] [--confirm-backup-compatible] [--confirm-authority-reviewed] [--json]',
-    example: 'gbrain backup restore /srv/private/brain-2026-10-03.gbrain-backup --into /srv/gbrain-restored' },
-};
-
-/** A3/D4: a malformed `backup create|restore` invocation is a caller mistake (exit 2) with the usage and an example. */
-function backupUsageError(sub: string, message: string): OperationError {
-  const u = BACKUP_USAGE[sub] ?? BACKUP_USAGE.create!;
-  return opError('invalid_params', message, `Usage: ${u.usage}. Example: ${u.example}`);
-}
-
-const SAFE_ERROR_FIELD = /^[A-Za-z0-9_.:-]{1,64}$/;
-
-/**
- * A nonempty diagnostic for a failed create/restore (#5312). An error's own
- * message is used, URL- and connection-redacted. A message-less thrown value
- * (PGLite's ErrnoError) is described only by its bounded name/code/errno,
- * never `String(object)`, which prints `[object Object]` or serializes
- * whatever the object carries.
- */
-export function backupFailureMessage(error: unknown): string {
-  const e = (typeof error === 'object' && error !== null ? error : {}) as { message?: unknown; name?: unknown; code?: unknown; errno?: unknown };
-  const own = typeof error === 'string' ? error : typeof e.message === 'string' ? e.message : '';
-  if (own.trim()) return redactConnectionInfo(redactUrlsInText(own));
-  const fields = [
-    typeof e.name === 'string' && SAFE_ERROR_FIELD.test(e.name) && e.name !== 'Error' ? e.name : null,
-    typeof e.code === 'string' && SAFE_ERROR_FIELD.test(e.code) ? `code ${e.code}` : null,
-    typeof e.errno === 'number' && Number.isInteger(e.errno) ? `errno ${e.errno}` : null,
-  ].filter((f): f is string => f !== null);
-  return fields.length ? `Backup failed with no error message (${fields.join(', ')}).` : 'Backup failed with no error message.';
-}
 
 export interface BackupCliResult {
   exitCode: 0 | 1 | 2;
@@ -165,20 +128,20 @@ export async function runBackupCli(
         const arg = args[i];
         if (arg === '--json') continue;
         if (arg === '--output' || arg === '--into' || arg === '--mode') {
-          if (!args[i + 1] || args[i + 1].startsWith('--')) throw backupUsageError(sub, `Missing value for ${arg}.`);
+          if (!args[i + 1] || args[i + 1].startsWith('--')) throw new Error(`Missing value for ${arg}`);
           values[arg] = args[++i];
         } else if (['--confirm-quiesced', '--confirm-backup-compatible', '--confirm-authority-reviewed'].includes(arg)) confirmations.add(arg);
-        else if (arg.startsWith('-')) throw backupUsageError(sub, `Unknown backup option: ${arg}.`);
+        else if (arg.startsWith('-')) throw new Error(`Unknown backup option: ${arg}`);
         else positional.push(arg);
       }
       const { createPgliteBackup, restorePgliteBackup } = await import('../core/backup/snapshot.ts');
       if (sub === 'create') {
-        if (!values['--output'] || values['--into'] || values['--mode'] || confirmations.size || positional.length) throw backupUsageError(sub, 'gbrain backup create takes exactly --output <absolute archive path>.');
+        if (!values['--output'] || values['--into'] || values['--mode'] || confirmations.size || positional.length) throw new Error('Usage: gbrain backup create --output /absolute/private/path/archive.gbrain-backup');
         const result = await createPgliteBackup({ output: values['--output'] });
         if (json) console.log(JSON.stringify({ ok: true, ...result }));
         else console.log(`Backup created: ${result.archive}\nSensitive full database state; protect any off-VM copy.\nExcluded assets: ${(result.manifest.omitted as string[]).join('; ')}`);
       } else {
-        if (!values['--into'] || values['--output'] || positional.length !== 1) throw backupUsageError(sub, 'gbrain backup restore takes one ARCHIVE and --into <absolute new root>.');
+        if (!values['--into'] || values['--output'] || positional.length !== 1) throw new Error('Usage: gbrain backup restore ARCHIVE --into /absolute/new-root');
         if (values['--mode'] !== undefined && !['new-brain', 'recovery'].includes(values['--mode'])) throw new Error('Restore --mode must be new-brain or recovery.');
         const result = await restorePgliteBackup({ archive: positional[0], into: values['--into'], mode: values['--mode'] === 'recovery' ? 'recovery' : 'new_brain',
           confirmQuiesced: confirmations.has('--confirm-quiesced'), confirmBackupCompatible: confirmations.has('--confirm-backup-compatible'),
@@ -188,21 +151,9 @@ export async function runBackupCli(
       }
       return { exitCode: 0 };
     } catch (error) {
-      if (error instanceof OperationError && error.code === 'invalid_params') {
-        const { writeCliError } = await import('../cli/cli-error.ts');
-        writeCliError(error, 'backup', { json, legacy: { ok: false, reason: 'invalid_params', message: error.message } });
-        return { exitCode: 2 };
-      }
-      const detail = (typeof error === 'object' && error !== null ? error : {}) as { code?: unknown; retryable?: unknown };
-      const reason = typeof detail.code === 'string' && SAFE_ERROR_FIELD.test(detail.code) ? detail.code : 'backup_failed';
-      const message = backupFailureMessage(error);
-      const { writeCliError } = await import('../cli/cli-error.ts');
-      writeCliError(opError('storage_error', message,
-        'Tell the user the backup failed with this message, then run `gbrain doctor --json` to check storage and locks before retrying.', {
-          why: `gbrain backup ${sub} stopped on a database or filesystem error before it finished.`,
-          fix: { argv: ['gbrain', 'doctor', '--json'], consent: [], actor: 'agent', requires_exclusive: false,
-            why: 'Doctor reports the brain\'s storage, lock and connection state, read-only.', verify: { argv: ['gbrain', 'doctor', '--json'] } },
-        }), 'backup', { json, legacy: { ok: false, reason, message, ...(detail.retryable === true ? { retryable: true } : {}) } });
+      const detail = error as Error & { code?: string; retryable?: boolean };
+      if (json) console.log(JSON.stringify({ ok: false, reason: detail.code ?? 'backup_failed', message: detail.message, ...(detail.retryable ? { retryable: true } : {}) }));
+      else console.error(detail.message);
       return { exitCode: 1 };
     }
   }

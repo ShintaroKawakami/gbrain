@@ -15,25 +15,7 @@ export function normalizeLoweredClaim(claim: string): string {
   return out.replace(/ +/g, ' ').replace(/\.(?=[. ]|$)/g, ' ').replace(/ +/g, ' ').replace(/^ | $/g, '');
 }
 
-// Built-ins are schema-qualified instead of pinning search_path on these SQL
-// functions, which must stay inlinable (an index expression uses them); the
-// results are byte-identical (test/fact-fingerprint-search-path.test.ts).
-const NORMALIZE_CLAIM_SQL = `pg_catalog.btrim(pg_catalog.regexp_replace(pg_catalog.regexp_replace(pg_catalog.regexp_replace(pg_catalog.translate(pg_catalog.lower(claim), '${FINGERPRINT_PUNCTUATION.replace(/'/g, "''")}', '${' '.repeat([...FINGERPRINT_PUNCTUATION].length)}'), '[[:space:]]+', ' ', 'g'), '\\.(?=[. ]|$)', ' ', 'g'), ' +', ' ', 'g'), ' ')`;
-
-/** The fingerprint SQL functions, also re-created on their own by the search_path migration. */
-export const FACT_FINGERPRINT_FUNCTION_STATEMENTS = [
-  `CREATE OR REPLACE FUNCTION gbrain_fact_fingerprint_v1(claim TEXT) RETURNS TEXT
-    LANGUAGE SQL IMMUTABLE STRICT AS $fn$
-      SELECT pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(pg_catalog.regexp_replace(pg_catalog.lower(pg_catalog.btrim(claim)), '[[:space:]]+', ' ', 'g'), 'UTF8')), 'hex')
-    $fn$`,
-  `CREATE OR REPLACE FUNCTION gbrain_fact_normalize(claim TEXT) RETURNS TEXT
-    LANGUAGE SQL IMMUTABLE STRICT AS $fn$ SELECT ${NORMALIZE_CLAIM_SQL} $fn$`,
-  // Inlined rather than calling gbrain_fact_normalize: index builds resolve
-  // functions with a restricted search_path, so the index expression must
-  // reference only built-ins.
-  `CREATE OR REPLACE FUNCTION gbrain_fact_fingerprint(claim TEXT) RETURNS TEXT
-    LANGUAGE SQL IMMUTABLE STRICT AS $fn$ SELECT pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(${NORMALIZE_CLAIM_SQL}, 'UTF8')), 'hex') $fn$`,
-] as const;
+const NORMALIZE_CLAIM_SQL = `btrim(regexp_replace(regexp_replace(regexp_replace(translate(lower(claim), '${FINGERPRINT_PUNCTUATION.replace(/'/g, "''")}', '${' '.repeat([...FINGERPRINT_PUNCTUATION].length)}'), '[[:space:]]+', ' ', 'g'), '\\.(?=[. ]|$)', ' ', 'g'), ' +', ' ', 'g'), ' ')`;
 
 /**
  * Durable withdrawal survives deletion/recreation of the derived facts index.
@@ -56,9 +38,19 @@ export const FACT_WITHDRAWAL_SCHEMA_STATEMENTS = [
     withdrawn_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (source_id, visibility, subject, fact_hash)
   )`,
-  ...FACT_FINGERPRINT_FUNCTION_STATEMENTS,
+  `CREATE OR REPLACE FUNCTION gbrain_fact_fingerprint_v1(claim TEXT) RETURNS TEXT
+    LANGUAGE SQL IMMUTABLE STRICT AS $fn$
+      SELECT encode(sha256(convert_to(regexp_replace(lower(btrim(claim)), '[[:space:]]+', ' ', 'g'), 'UTF8')), 'hex')
+    $fn$`,
+  `CREATE OR REPLACE FUNCTION gbrain_fact_normalize(claim TEXT) RETURNS TEXT
+    LANGUAGE SQL IMMUTABLE STRICT AS $fn$ SELECT ${NORMALIZE_CLAIM_SQL} $fn$`,
+  // Inlined rather than calling gbrain_fact_normalize: index builds resolve
+  // functions with a restricted search_path, so the index expression must
+  // reference only built-ins.
+  `CREATE OR REPLACE FUNCTION gbrain_fact_fingerprint(claim TEXT) RETURNS TEXT
+    LANGUAGE SQL IMMUTABLE STRICT AS $fn$ SELECT encode(sha256(convert_to(${NORMALIZE_CLAIM_SQL}, 'UTF8')), 'hex') $fn$`,
   `CREATE OR REPLACE FUNCTION gbrain_preserve_fact_withdrawal() RETURNS trigger
-    LANGUAGE plpgsql SET search_path = pg_catalog, public AS $fn$
+    LANGUAGE plpgsql AS $fn$
     DECLARE withdrawn TIMESTAMPTZ;
     BEGIN
       IF NEW.expired_at IS NULL THEN

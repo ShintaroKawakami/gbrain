@@ -4,11 +4,9 @@ import { join, relative, resolve, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { SyncOpts } from '../../commands/sync.ts';
 import { parseMarkdown } from '../markdown.ts';
-import { OperationError, opError } from '../ops/contract.ts';
-import type { Action } from '../agent-output.ts';
-import type { RegistryCode } from '../error-registry.ts';
+import { OperationError } from '../ops/contract.ts';
 import { buildDetachedWorkingTreeManifest, computeSyncDelta } from '../sync-delta.ts';
-import { isSyncable, isCodeFilePath, isImageFilePath, matchesAnyGlob, resolveSlugForPath } from '../sync.ts';
+import { isSyncable, isCodeFilePath, matchesAnyGlob, resolveSlugForPath } from '../sync.ts';
 import { resolveSlugRootMode } from '../sync-anchor.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
 import { getWorktreeBinding, type WorktreeBinding } from './ownership.ts';
@@ -21,78 +19,39 @@ import type { CompanyBrainPlan } from '../company-brain/types.ts';
 import { assertDistinctSyncOrigins, legacySyncOrigin, sameSyncOrigin, syncOriginPath, type SyncOriginScope } from './sync-origin.ts';
 import { assertManagedSyncActive } from './sync-authority.ts';
 import { isReservedSkillBundlePath } from '../skill-reserved-paths.ts';
-import { holdRescreenDue, readGitHoldRetryPaths, readGitSourceHolds } from './sync-holds.ts';
-import { readBlobContents, readTreeBlobs } from './sync-blobs.ts';
-import { gitChildEnv } from '../git-env.ts';
 
 /** The page an import takes over from its previous origin: a Git rename, or a file that replaced a vanished origin at the same slug. */
 export interface SyncRename { sourcePath: string; slug: string; pageId: number; revision: string; }
 export interface SyncEntry { path: string; sourcePath: string; action: 'import' | 'delete'; working: boolean; slug?: string; pageId?: number | null; revision?: string | null;
   renameFrom?: SyncRename;
   /** #5565: a deleted file no page records as its origin; its slug's page keeps another origin, so the deletion is a fenced no-op. */
-  unownedDeletion?: boolean;
-  /** #5988: a held rename destination whose source page changed since the rename was recorded; the freeze screen holds it as `rename_held`. */
-  renameHeld?: SyncRename; }
+  unownedDeletion?: boolean; }
 /** Files that map to a slug another origin keeps; they are left out of the manifest until one is renamed. */
 export interface SyncSlugCollision { slug: string; kept: string; skipped: string[]; }
 /** #5032: a file sync skipped on this host with a named refusal, without failing the run. */
 export interface SyncFileRefusal { path: string; code: 'colon_slug_windows_write_through'; message: string; suggestion: string; docs: string; }
 export interface SyncDiscovery { binding: WorktreeBinding; root: string; gitRoot: string; sourceId: string; incarnation: string;
   companyPlan?: CompanyBrainPlan; slugCollisions?: SyncSlugCollision[]; fileRefusals?: SyncFileRefusal[];
-  from: string | null; target: string; entries: SyncEntry[]; uncommitted?: { added: number; modified: number; deleted: number }; slugMode: 'git-root' | 'source-root';
-  /** #5988: when this discovery ran; holds this run writes or clears are conditional on it. */
-  discoveredAt?: string;
-  /** #5988: held paths that left the source (now excluded); their holds clear when the run checkpoints. */
-  releasedHolds?: string[];
-  /** #5988: `sources retry-held` paths this discovery consumed (screened as an entry or a candidate, or no longer eligible); cleared with the cursor save. */
-  retryTaken?: string[];
-  /** #6349: the checkout's HEAD when the delta to it exceeded the cursor bound and `target` is a staged first-parent commit short of it. */
-  stagedHead?: string; }
+  from: string | null; target: string; entries: SyncEntry[]; uncommitted?: { added: number; modified: number; deleted: number }; slugMode: 'git-root' | 'source-root'; }
 export interface ManagedSyncContext { binding: WorktreeBinding; root: string; gitRoot: string; sourceId: string; incarnation: string;
   source: { last_commit: string | null; config: Record<string, unknown> }; }
-/** The persisted `sync.exclude` globs (plus a run's `--exclude`), as discovery matches them against a path relative to the source root. */
-export async function syncExcludePatterns(engine: Pick<BrainEngine, 'getConfig'>, extra: readonly string[] = []): Promise<string[]> {
-  return [...extra, ...(await engine.getConfig('sync.exclude') ?? '').split(/[\n,]/).map(v => v.trim()).filter(Boolean)]
-    .map(v => v.endsWith('/') ? `${v}**` : v);
-}
 export function syncGit(root: string, args: string[]): string {
   return execFileSync('git', ['-c', 'core.quotepath=false', '-C', root, ...args],
-    { env: gitChildEnv(), encoding: 'utf8', timeout: 30_000, maxBuffer: 32 * 1024 ** 2, stdio: ['ignore', 'pipe', 'pipe'] });
-}
-/**
- * A sync file or root failed a confinement or identity check. These helpers
- * know no source id, so the read-only fix lists every registered root.
- */
-function syncTargetRefusal(code: RegistryCode, message: string, cause: string): OperationError {
-  return opError(code, message, `${cause} Nothing was written for it. Inspect the source on its owner (gbrain sources writer status --json lists every registered root), `
-    + 'fix the checkout there, then sync that source again; do not bypass the check or change ownership to force it.', {
-    fix: { argv: ['gbrain', 'sources', 'writer', 'status', '--json'], consent: [], actor: 'agent', requires_exclusive: false,
-      why: 'Shows each source\'s registered root and owner to compare with the checkout.' },
-  });
-}
-/** The supported managed sync run of one source: local HEAD, no git pull, every guard kept. */
-function managedSyncFix(sourceId: string, why: string): Action {
-  return { argv: ['gbrain', 'sync', '--no-pull', '--source', sourceId], consent: [], actor: 'agent', requires_exclusive: false, why,
-    verify: { argv: ['gbrain', 'sources', 'status', sourceId] } };
+    { encoding: 'utf8', timeout: 30_000, maxBuffer: 32 * 1024 ** 2, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 export function readSyncFile(root: string, path: string): Buffer | null {
-  if (realpathSync(root) !== resolve(root)) throw syncTargetRefusal('source_changed', 'The registered source root was replaced by a symlink.',
-    `The registered root holding ${path} is now a symlink.`);
+  if (realpathSync(root) !== resolve(root)) throw new OperationError('source_changed', 'The registered source root was replaced by a symlink.');
   const absolute = resolve(root, path);
-  if (!isWriteTargetContained(absolute, root)) throw syncTargetRefusal('source_changed', 'Sync file escaped its registered root.',
-    `${path} resolves outside its registered source root.`);
+  if (!isWriteTargetContained(absolute, root)) throw new OperationError('source_changed', 'Sync file escaped its registered root.');
   try {
     // Reject symlink components, including ones targeting another path inside the root.
     let current = root;
     for (const part of relative(root, absolute).split(sep)) {
       current = join(current, part);
-      if (lstatSync(current).isSymbolicLink()) throw syncTargetRefusal('source_changed', 'Sync cannot publish through a symlink.',
-        `A component of ${path} is a symlink; sync reads and publishes only real files inside the root.`);
+      if (lstatSync(current).isSymbolicLink()) throw new OperationError('source_changed', 'Sync cannot publish through a symlink.');
     }
-    if (!lstatSync(absolute).isFile()) throw syncTargetRefusal('source_changed', 'Sync target is not a regular file.',
-      `${path} is not a regular file.`);
-    if (lstatSync(absolute).size > 10 * 1024 ** 2) throw opError('request_too_large', 'Sync file exceeds the bounded import size.',
-      `${path} is larger than the 10 MiB sync import bound, so nothing was imported from it. Shrink or split the file, or add it to the sync.exclude config, then sync its source again.`);
+    if (!lstatSync(absolute).isFile()) throw new OperationError('source_changed', 'Sync target is not a regular file.');
+    if (lstatSync(absolute).size > 10 * 1024 ** 2) throw new OperationError('request_too_large', 'Sync file exceeds the bounded import size.');
     return readFileSync(absolute);
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
 }
@@ -100,10 +59,9 @@ export const syncRawHash = (root: string, path: string): string | null => { cons
 export function assertConfiguredSyncRoot(root: string, configuredRoot: string | null): void {
   if (configuredRoot === null) return;
   try { if (realpathSync.native(resolve(configuredRoot)) === realpathSync.native(root) && realpathSync(root) === root) return; } catch {}
-  throw syncTargetRefusal('source_changed', 'The configured source directory no longer matches the accepted sync owner.',
-    'The configured directory of this source no longer resolves to the owner\'s registered root (it moved, was re-pointed, or became a symlink).');
+  throw new OperationError('source_changed', 'The configured source directory no longer matches the accepted sync owner.');
 }
-export function syncGitPath(context: Pick<SyncDiscovery, 'root' | 'gitRoot'>, path: string): string {
+function syncGitPath(context: Pick<SyncDiscovery, 'root' | 'gitRoot'>, path: string): string {
   return relative(realpathSync.native(context.gitRoot), resolve(realpathSync.native(context.root), path)).split(sep).join('/');
 }
 export function assertSyncEntryOrigin(context: Pick<SyncDiscovery, 'root' | 'gitRoot' | 'target' | 'slugMode'>,
@@ -111,14 +69,12 @@ export function assertSyncEntryOrigin(context: Pick<SyncDiscovery, 'root' | 'git
   const gitPath = syncGitPath(context, entry.path);
   const expected = context.slugMode === 'source-root' ? relative(context.root, resolve(context.root, entry.path)).split(sep).join('/') : gitPath;
   const origin = syncOriginPath(entry.sourcePath);
-  if (origin !== syncOriginPath(expected)) throw syncTargetRefusal('page_identity_changed', 'The sync path does not match its accepted origin.',
-    `${entry.path} no longer maps to its recorded origin ${entry.sourcePath} under this source's root.`);
+  if (origin !== syncOriginPath(expected)) throw new OperationError('page_identity_changed', 'The sync path does not match its accepted origin.');
   if (entry.action !== 'delete') return;
   if (typeof entry.working !== 'boolean') throw new OperationError('page_identity_changed', 'The legacy deletion does not identify its Git or working-tree origin.',
     'Inspect the source identity, then explicitly retry failed sync discovery; the accepted request has not been rewritten.');
   if (entry.working === true) {
-    if (readSyncFile(context.root, entry.path) !== null) throw syncTargetRefusal('source_changed', 'The working-tree deletion no longer exists.',
-      `${entry.path} is back in the working tree after its deletion was recorded, so the deletion was not applied.`);
+    if (readSyncFile(context.root, entry.path) !== null) throw new OperationError('source_changed', 'The working-tree deletion no longer exists.');
     return;
   }
   let tree = context.target;
@@ -136,72 +92,30 @@ export function assertSyncEntryOrigin(context: Pick<SyncDiscovery, 'root' | 'git
     tree = matches[0].object;
   }
 }
-/** A managed-sync `writer_coordinator_required` refusal whose fix is the supported `gbrain sync --no-pull --source <id>` run. */
-function managedSyncRefusal(sourceId: string, message: string, suggestion: string): OperationError {
-  return opError('writer_coordinator_required', message, suggestion, {
-    fix: managedSyncFix(sourceId, 'A managed brain syncs its registered checkout through the persistence coordinator: it imports local HEAD without git pull and keeps every ignored-file and failed-receipt guard.'),
-  });
-}
 /** Validate the current owner and source without enumerating a new manifest. */
 export async function resolveManagedSyncContext(engine: BrainEngine, opts: SyncOpts): Promise<ManagedSyncContext> {
   await assertManagedSyncActive(engine);
+  if (!opts.noPull && !opts.dryRun) throw new OperationError('writer_coordinator_required', 'Managed sync requires --no-pull; Git pull/rebase needs an explicit drained maintenance window.', `Fast-forward and sync the checkout with gbrain sources refresh ${opts.sourceId ?? 'default'}`);
+  if (opts.includeGitignored || opts.skipFailed) throw new OperationError('writer_coordinator_required', 'Managed sync cannot bypass ignored-file or failed-receipt guards.');
   const sourceId = opts.sourceId ?? 'default';
-  if (!opts.noPull && !opts.dryRun) throw managedSyncRefusal(sourceId, 'Managed sync requires skipping the Git pull (CLI `--no-pull`, sync_brain `no_pull: true`); Git pull/rebase needs an explicit drained maintenance window.',
-    `Sync without pulling to import the checkout as it is (CLI: gbrain sync --no-pull --source ${sourceId}; MCP: sync_brain with no_pull: true), or fast-forward and sync the checkout with gbrain sources refresh ${sourceId}.`);
-  if (opts.includeGitignored || opts.skipFailed) throw managedSyncRefusal(sourceId, 'Managed sync cannot bypass ignored-file or failed-receipt guards.',
-    `Run gbrain sync --no-pull --source ${sourceId} without --include-gitignored or --skip-failed; resolve failed files with --retry-failed after fixing them.`);
   const [source] = await engine.executeRaw<{ incarnation: string; archived: boolean; local_path: string | null; last_commit: string | null; config: Record<string, unknown> }>(
     'SELECT incarnation,archived,local_path,last_commit,config FROM sources WHERE id=$1', [sourceId]);
   const binding = await getWorktreeBinding(engine, sourceId);
   if (!source || source.archived || !binding || binding.source_incarnation !== source.incarnation ||
       binding.owner_host_id !== localHostId() || binding.state !== 'active' || !binding.local_path) {
-    throw opError('owner_unavailable', 'Sync must run on the active registered worktree owner.',
-      `Source ${sourceId} is archived, re-registered, or not bound to an active worktree owned by this host. Run its sync on the owner host that gbrain sources writer status --source ${sourceId} --json names; do not claim or transfer the source to make this host the owner.`,
-      { fix: { argv: ['gbrain', 'sources', 'writer', 'status', '--source', sourceId, '--json'], consent: [], actor: 'agent', requires_exclusive: false,
-        why: 'Shows the owning host, binding state and incarnation of the source.' } });
+    throw new OperationError('owner_unavailable', 'Sync must run on the active registered worktree owner.');
   }
   const registeredRoot = resolve(binding.local_path, binding.relative_path);
   const root = realpathSync(registeredRoot);
-  if (root !== registeredRoot) throw opError('source_changed', 'The registered source root identity changed.',
-    `The registered root of ${sourceId} now resolves somewhere else (a symlink or a moved directory), so nothing was synced. Restore the directory on the owner, then run gbrain sync --no-pull --source ${sourceId}.`,
-    { fix: { argv: ['gbrain', 'sources', 'writer', 'status', '--source', sourceId, '--json'], consent: [], actor: 'agent', requires_exclusive: false,
-      why: 'Shows the root the owner registered, to compare with the directory on disk.' } });
+  if (root !== registeredRoot) throw new OperationError('source_changed', 'The registered source root identity changed.');
   assertConfiguredSyncRoot(root, source.local_path);
   const gitRoot = realpathSync(syncGit(root, ['rev-parse', '--show-toplevel']).trim());
   const requested = realpathSync(opts.srcSubpath ? resolve(opts.repoPath ?? gitRoot, opts.srcSubpath) : opts.repoPath ?? root);
-  if (realpathSync.native(requested) !== realpathSync.native(root) || !isWriteTargetContained(realpathSync.native(root), realpathSync.native(gitRoot))) throw opError('source_changed', 'Sync path does not match this source binding.',
-    `The repository path or source subpath given for ${sourceId} does not resolve to its registered root. Run gbrain sync --no-pull --source ${sourceId} without --repo or --src-subpath so it uses the registered root.`,
-    { fix: managedSyncFix(sourceId, 'Without a path override, sync reads the registered root of the source.') });
-  if (source.config?.kind != null) throw opError('writer_coordinator_required', 'Connector sync requires its dedicated coordinator.',
-    `Source ${sourceId} is a connector source, so the Git sync path does not apply. Run gbrain sync --source ${sourceId} without --repo, --src-subpath or other Git options; it dispatches to the connector.`,
-    { fix: { argv: ['gbrain', 'sync', '--source', sourceId], consent: [], actor: 'agent', requires_exclusive: false,
-      why: 'The sync command routes a connector source to its own coordinator.' } });
+  if (realpathSync.native(requested) !== realpathSync.native(root) || !isWriteTargetContained(realpathSync.native(root), realpathSync.native(gitRoot))) throw new OperationError('source_changed', 'Sync path does not match this source binding.');
+  if (source.config?.kind != null) throw new OperationError('writer_coordinator_required', 'Connector sync requires its dedicated coordinator.');
   return { binding, root, gitRoot, sourceId, incarnation: source.incarnation, source };
 }
-/** The cursor bound: entries and serialized bytes one frozen manifest may hold. */
-let cursorBound = { entries: 100_000, bytes: 16 * 1024 ** 2 };
-/** Test seam: a smaller cursor bound (call with no argument to restore the default). */
-export function _setCursorBoundForTest(bound?: { entries: number; bytes: number }): void { cursorBound = bound ?? { entries: 100_000, bytes: 16 * 1024 ** 2 }; }
-const manifestFits = (entries: readonly unknown[]) => entries.length <= cursorBound.entries && Buffer.byteLength(JSON.stringify(entries)) <= cursorBound.bytes;
-
-/**
- * #6349: the furthest first-parent commit after `from` whose delta from `from` fits the cursor bound, found by a forward
- * gallop that verifies every candidate it accepts (a net delta from a fixed base is not monotone along history: an add
- * reverted later shrinks it again, so a binary search has no valid predicate). Null when even the first commit does not fit.
- */
-export function stagedSyncTarget(gitRoot: string, from: string, target: string, fits: (commit: string) => boolean): { commit: string; first: string } | { oversized: string } {
-  const commits = syncGit(gitRoot, ['rev-list', '--first-parent', '--reverse', `${from}..${target}`]).split('\n').map(line => line.trim()).filter(Boolean);
-  let good = -1, step = 1;
-  while (good < commits.length - 1) {
-    const at = Math.min(good + step, commits.length - 1);
-    if (fits(commits[at]!)) { good = at; step *= 2; continue; }
-    if (step === 1 || at === good + 1) break;
-    step = Math.max(1, Math.floor((at - good) / 2));
-  }
-  return good < 0 ? { oversized: commits[0] ?? target } : { commit: commits[good]!, first: commits[0]! };
-}
-
-export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, context?: ManagedSyncContext, stage?: { target: string; head: string }): Promise<SyncDiscovery> {
+export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, context?: ManagedSyncContext): Promise<SyncDiscovery> {
   const { binding, root, gitRoot, sourceId, incarnation, source } = context ?? await resolveManagedSyncContext(engine, opts);
   const company = currentCompanyBrainSync(sourceId);
   const strategy = opts.strategy ?? source.config?.strategy ?? 'markdown';
@@ -212,28 +126,21 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
     slugPrefix: probe.slice(0, -2), dryRun: true }) : 'git-root';
   const sourcePath = (path: string) => slugMode === 'source-root' && scope ? path.slice(scope.length + 1) : path;
   const originScope: SyncOriginScope = { sourceId, root, scope, slugMode };
-  const exclude = await syncExcludePatterns(engine, opts.exclude);
+  const exclude = [...(opts.exclude ?? []), ...(await engine.getConfig('sync.exclude') ?? '').split(/[\n,]/).map(v => v.trim()).filter(Boolean)]
+    .map(v => v.endsWith('/') ? `${v}**` : v);
   const includeHidden = [...new Set([...(opts.includeHidden ?? []), ...(await engine.getConfig('sync.include_hidden') ?? '')
     .split(/[\n,]/).map(v => v.trim()).filter(Boolean)].map(v => v.endsWith('/') ? `${v}**` : v))];
   // Reserved skillpack paths belong to the shared skill publisher; the managed importer always refuses them.
   const eligible = (path: string) => (!scope || path.startsWith(`${scope}/`)) &&
     !matchesAnyGlob(scope ? path.slice(scope.length + 1) : path, exclude) && !isReservedSkillBundlePath(sourcePath(path)) &&
     isSyncable(path, { strategy: strategy as 'markdown', includeHidden });
-  const target = stage?.target ?? company?.plan.revision?.commit ?? syncGit(gitRoot, ['rev-parse', 'HEAD']).trim();
+  const target = company?.plan.revision?.commit ?? syncGit(gitRoot, ['rev-parse', 'HEAD']).trim();
   const detached = !company && syncGit(gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() === 'HEAD';
-  // #6349: a staged run stops at a commit, so uncommitted working-tree changes wait for the stage that reaches HEAD.
-  const working = !company && !stage && (detached || (opts.workingTree ?? (await engine.getConfig('sync.include_working_tree') === 'true')));
+  const working = !company && (detached || (opts.workingTree ?? (await engine.getConfig('sync.include_working_tree') === 'true')));
   const dirty = company ? { added: [], modified: [], deleted: [], renamed: [] } : buildDetachedWorkingTreeManifest(gitRoot);
   const delta = !opts.full && source.last_commit ? computeSyncDelta(gitRoot, source.last_commit, target) : null;
   const entries = new Map<string, SyncEntry>();
   const renamedFrom = new Map<string, string>();
-  const discoveredAt = new Date().toISOString();
-  // #5988: active holds are re-screened when their file changed, left, or a newer reader may import it.
-  const holds = company ? [] : (await readGitSourceHolds(engine, { sourceIds: [sourceId] }))[0]?.holds.filter(hold => hold.incarnation === incarnation) ?? [];
-  const retry = new Set(company ? [] : await readGitHoldRetryPaths(engine, sourceId, incarnation));
-  const toGitPath = (path: string) => scope ? `${scope}/${path}` : path;
-  const holdByPath = new Map(holds.map(hold => [hold.path, hold]));
-  const holdRenameOrigins = new Set(holds.flatMap(hold => hold.meta.rename_from ? [syncOriginPath(hold.meta.rename_from.sourcePath)] : []));
   // #5032: a ':' path has no file on Windows. Each eligible one gets a named
   // refusal and takes no part in this run, including the origin checks below.
   // A deletion or rename touching one is refused on both sides, so the page
@@ -255,8 +162,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
   };
   const storable = <T extends { source_path: string | null }>(page: T) => page.source_path === null || !isWindowsColonTarget(page.source_path);
   const put = (path: string, action: SyncEntry['action'], working = false) => {
-    if (process.platform === 'win32' && path.includes('\\')) throw opError('page_identity_changed', 'Git paths containing literal backslashes are not safe Windows sync targets.',
-      `${path} in ${sourceId} has a literal backslash in its name, which Windows cannot store; nothing was synced. Rename it on a macOS or Linux checkout and commit, then run gbrain sync --no-pull --source ${sourceId}.`);
+    if (process.platform === 'win32' && path.includes('\\')) throw new OperationError('page_identity_changed', 'Git paths containing literal backslashes are not safe Windows sync targets.');
     if (refuse(path, action)) return;
     if (eligible(path)) entries.set(path, { path: relative(nativeRoot, join(nativeGitRoot, path)).split(sep).join('/'), sourcePath: sourcePath(path), action, working });
   };
@@ -290,8 +196,6 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
       const origin = syncOriginPath(page.source_path);
       const stripped = slugMode === 'source-root' && scope && origin.startsWith(`${scope}/`) ? origin.slice(scope.length + 1) : null;
       if (present.has(origin) || stripped !== null && present.has(stripped) && sameSyncOrigin(origin, stripped, originScope, page.slug)) continue;
-      // #5988: the old page of a held rename keeps its origin until the renamed file imports.
-      if (holdRenameOrigins.has(origin)) continue;
       put(gitPathOf(origin), 'delete');
     }
   }
@@ -299,37 +203,6 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
     for (const path of [...dirty.added, ...dirty.modified]) put(path, 'import', true);
     for (const path of dirty.deleted) put(path, 'delete', true);
     for (const rename of dirty.renamed) putRename(rename, true);
-  }
-  // #6278 (B7): every scheduled path is consumed by this discovery: it is screened as an entry (the file changed in Git),
-  // re-screened as a candidate below, or can never be screened (no longer eligible), so none may outlive the run.
-  const released: string[] = [], retryTaken = [...retry];
-  if (holds.length || retry.size) {
-    const candidates = [...new Set([...holds.map(hold => hold.path), ...retry])].filter(path => !entries.has(toGitPath(path)));
-    for (const path of candidates.filter(path => holdByPath.has(path) && !eligible(toGitPath(path)))) released.push(path);
-    const checked = candidates.filter(path => eligible(toGitPath(path)));
-    const blobs = readTreeBlobs(gitRoot, target, checked.map(toGitPath));
-    const unversioned = checked.flatMap(path => {
-      const hold = holdByPath.get(path), blob = blobs.get(toGitPath(path));
-      return hold && !hold.meta.blob_oid && !hold.meta.working && blob ? [blob] : [];
-    });
-    const contents = readBlobContents(gitRoot, unversioned);
-    for (const path of checked) {
-      const hold = holdByPath.get(path), gitPath = toGitPath(path), blob = blobs.get(gitPath);
-      const workingHold = working && (hold?.meta.working === true || !blob);
-      let changed = !hold || holdRescreenDue(hold, retry.has(path));
-      let present = !!blob;
-      if (workingHold) {
-        let bytes: Buffer | null = null;
-        try { bytes = readSyncFile(root, path); } catch { changed = true; }
-        present = bytes !== null || changed;
-        if (!changed) changed = bytes === null || sha256(bytes.toString('utf8')) !== hold!.upstream_version;
-      } else if (!changed) {
-        // #6278: a held deletion has no bytes to compare; the file reappearing is the change.
-        changed = hold!.meta.deleted ? !!blob : !blob || (hold!.meta.blob_oid ? blob.oid !== hold!.meta.blob_oid : sha256(contents.get(blob.oid) ?? '') !== hold!.upstream_version);
-      }
-      if (!changed) continue;
-      put(gitPath, present ? 'import' : 'delete', workingHold);
-    }
   }
   if (company) {
     entries.clear();
@@ -345,34 +218,9 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
     }
   }
   const selected = [...entries.values()].sort((a, b) => a.action.localeCompare(b.action) || a.path.localeCompare(b.path));
-  // #5493: an image import is held at freeze (managed_image_sync_unsupported); an image deletion needs no importer.
-  const unsupported = selected.find(e => e.action === 'import' && !/\.mdx?$/i.test(e.path) && !isCodeFilePath(e.path) && (company || !isImageFilePath(e.path)));
-  if (unsupported) throw opError('writer_coordinator_required', 'Managed image sync requires a prepared importer; this sync was refused before any page write.',
-    `Managed sync of ${sourceId} imports only Markdown and code files, and this run selected others (for example ${unsupported.path}). Exclude them with --exclude or the sync.exclude config, then run gbrain sync --no-pull --source ${sourceId}.`);
-  if (!manifestFits(selected)) {
-    // #6349: an incremental delta past the bound is synced in stages: the furthest first-parent commit whose delta fits,
-    // then the next stage from there (the CLI loops; a scheduled sync takes one stage per run).
-    if (delta?.status === 'ok' && !company && source.last_commit) {
-      const last = source.last_commit;
-      const deltaEntries = (commit: string) => {
-        const step = computeSyncDelta(gitRoot, last, commit);
-        if (step.status !== 'ok') return null;
-        const paths = [...step.manifest.added, ...step.manifest.modified, ...step.manifest.deleted, ...step.manifest.renamed.flatMap(r => [r.from, r.to])].filter(eligible);
-        return paths.map(path => ({ path: relative(nativeRoot, join(nativeGitRoot, path)).split(sep).join('/'), sourcePath: sourcePath(path), action: 'import', working: false }));
-      };
-      const staged = stagedSyncTarget(gitRoot, last, stage?.head ?? target, commit => { const entries = deltaEntries(commit); return !!entries && manifestFits(entries); });
-      if ('commit' in staged && staged.commit !== target) return discoverManagedSync(engine, opts, context, { target: staged.commit, head: stage?.head ?? target });
-      if ('oversized' in staged) {
-        const size = deltaEntries(staged.oversized)?.length ?? selected.length;
-        throw opError('request_too_large', 'One commit exceeds the bounded cursor size.',
-          `Commit ${staged.oversized.slice(0, 12)} alone changes ${size} syncable entries in ${sourceId} (from ${last.slice(0, 12)}), above the ${cursorBound.entries.toLocaleString('en-US')}-entry and ${Math.round(cursorBound.bytes / 1024 ** 2)} MiB cursor bound, so it cannot be synced in stages; nothing was written. Exclude part of it with --exclude or the sync.exclude config, then run gbrain sync --no-pull --source ${sourceId}.`);
-      }
-    }
-    throw opError('request_too_large', 'Sync discovery exceeds the bounded cursor size.',
-      `This sync of ${sourceId} selected ${selected.length} entries, above the 100,000-entry and 16 MiB cursor bound; nothing was written. Narrow it with --exclude or the sync.exclude config, then run gbrain sync --no-pull --source ${sourceId}.`);
-  }
-  const discovered: SyncDiscovery = { discoveredAt, ...(released.length ? { releasedHolds: released } : {}), ...(retryTaken.length ? { retryTaken } : {}),
-    ...(refused.size ? { fileRefusals: [...refused.values()] } : {}), binding: { ...binding, owner_epoch: String(binding.owner_epoch), topology_generation: String(binding.topology_generation) }, root, gitRoot, sourceId, incarnation, from: source.last_commit, target, entries: selected, slugMode, ...(company ? { companyPlan: company.plan } : {}), ...(stage ? { stagedHead: stage.head } : {}) };
+  if (selected.some(e => !/\.mdx?$/i.test(e.path) && !isCodeFilePath(e.path))) throw new OperationError('writer_coordinator_required', 'Managed image sync requires a prepared importer; this sync was refused before any page write.');
+  if (selected.length > 100_000 || Buffer.byteLength(JSON.stringify(selected)) > 16 * 1024 ** 2) throw new OperationError('request_too_large', 'Sync discovery exceeds the bounded cursor size.');
+  const discovered: SyncDiscovery = { ...(refused.size ? { fileRefusals: [...refused.values()] } : {}), binding: { ...binding, owner_epoch: String(binding.owner_epoch), topology_generation: String(binding.topology_generation) }, root, gitRoot, sourceId, incarnation, from: source.last_commit, target, entries: selected, slugMode, ...(company ? { companyPlan: company.plan } : {}) };
   // Freeze all logical identities in one database statement, before yielding
   // between pages. A later interactive edit must conflict with this scan.
   const identities = await engine.executeRaw<{ id: number; slug: string; source_path: string | null; knowledge_revision: string }>(
@@ -391,14 +239,10 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
     const legacy = legacySyncOrigin(originScope, syncOriginPath(entry.sourcePath));
     const origins = [...byPath.get(syncOriginPath(entry.sourcePath)) ?? [],
       ...(legacy ? byPath.get(legacy) ?? [] : []).filter(page => sameSyncOrigin(page.source_path!, entry.sourcePath, originScope, page.slug))];
-    if (origins.length > 1) throw opError('page_identity_changed', 'Several pages claim the same imported origin.',
-      `Pages ${origins.map(page => page.slug).join(', ')} in ${sourceId} all record ${entry.sourcePath} as their origin; nothing was written. Keep one, remove or re-point the others, then run gbrain sync --no-pull --source ${sourceId}.`,
-      { fix: { argv: ['gbrain', 'get', '--source', sourceId, '--', origins[0]!.slug], consent: [], actor: 'agent', requires_exclusive: false,
-        why: 'Shows one of the pages that claim the origin, to decide which one keeps it.' } });
+    if (origins.length > 1) throw new OperationError('page_identity_changed', 'Several pages claim the same imported origin.');
     let slug = entry.slug ?? origins[0]?.slug ?? resolveSlugForPath(entry.sourcePath);
     if (!slug && entry.action === 'import') slug = parseMarkdown(readSyncContent(discovered, entry), '').slug;
-    if (!slug) throw opError('invalid_params', 'The imported file has no usable page slug.',
-      `${entry.sourcePath} in ${sourceId} yields no page slug from its path or frontmatter; nothing was written. Rename the file or set a frontmatter slug and commit, then run gbrain sync --no-pull --source ${sourceId}.`);
+    if (!slug) throw new OperationError('invalid_params', 'The imported file has no usable page slug.');
     if (!company && entry.action === 'import' && !origins.length && !isCodeFilePath(entry.sourcePath)) {
       entry.slug = slug;
       claims.set(slug, [...(claims.get(slug) ?? []), entry]);
@@ -434,8 +278,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
       ? recorded.slice(prefix.length) : recorded;
     const respelled = holderOrigin !== null && !holderOrigin.includes('\\') && deletions.has(holderOrigin);
     const spellings = [...(holderOrigin === null || respelled ? [] : [holderOrigin]), ...candidates.map(entry => syncOriginPath(entry.sourcePath))].map(spelling);
-    if (new Set(spellings).size !== spellings.length) throw opError('page_identity_changed', 'Sync origins for one slug differ only by case or separator spelling.',
-      `Files mapping to page ${slug} in ${sourceId} differ only by case or separator spelling (${candidates.slice(0, 3).map(entry => entry.sourcePath).join(', ')}); nothing was written. Keep one spelling, rename or remove the others and commit, then run gbrain sync --no-pull --source ${sourceId}.`);
+    if (new Set(spellings).size !== spellings.length) throw new OperationError('page_identity_changed', 'Sync origins for one slug differ only by case or separator spelling.');
     // A live page keeps its slug while its own file is still in the tree; the newcomer is the collision.
     const kept = holder && !deleted.has(holder.id) && holderOrigin !== null && !deletions.has(holderOrigin) ? holderOrigin : null;
     const winner = kept === null ? candidates.find(entry => /\.mdx?$/i.test(entry.sourcePath) && entry.sourcePath.replace(/\.mdx?$/i, '') === slug) ?? candidates[0] : null;
@@ -461,14 +304,6 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
       // A Git rename moves the page to its new slug, like the library path's updateSlug: same page id, inbound links and an alias.
       winner.renameFrom = { sourcePath: moved.source_path, slug: moved.slug, pageId: moved.id, revision: moved.knowledge_revision };
       retired.add(deletion);
-      continue;
-    }
-    // #5988: a held rename destination (or a held one renamed again) still owes its page the move; the deletion of a held path stays to clear its hold.
-    const held = holdByPath.get(winner.path)?.meta.rename_from ?? (deletion ? holdByPath.get(deletion.path)?.meta.rename_from : undefined);
-    const origin = held ? identities.find(page => page.id === held.pageId) : undefined;
-    if (held && origin && !deleted.has(origin.id) && origin.source_path != null && sameSyncOrigin(origin.source_path, held.sourcePath, originScope, origin.slug)) {
-      if (origin.knowledge_revision === held.revision) winner.renameFrom = held;
-      else winner.renameHeld = held;
     }
   }
   if (retired.size) discovered.entries = selected.filter(entry => !retired.has(entry));
@@ -484,9 +319,7 @@ export async function discoverManagedSync(engine: BrainEngine, opts: SyncOpts, c
 export function readSyncContent(discovery: SyncDiscovery, entry: SyncEntry): string {
   if (entry.working) {
     const bytes = readSyncFile(discovery.root, entry.path);
-    if (bytes === null) throw opError('source_changed', 'The discovered working-tree file disappeared.',
-      `${entry.path} left the working tree of ${discovery.sourceId} between discovery and import, so nothing was imported from it. Run gbrain sync --no-pull --source ${discovery.sourceId} to rediscover the tree.`,
-      { fix: managedSyncFix(discovery.sourceId, 'A new discovery reads the working tree as it is now.') });
+    if (bytes === null) throw new OperationError('source_changed', 'The discovered working-tree file disappeared.');
     return bytes.toString('utf8');
   }
   return syncGit(discovery.gitRoot, ['show', `${discovery.target}:${syncGitPath(discovery, entry.path)}`]);

@@ -38,7 +38,7 @@
 
 import { existsSync, readFileSync, realpathSync, statSync } from 'fs';
 import { basename, join, relative, resolve } from 'path';
-import { FAILSAFE_SCHEMA, load } from 'js-yaml';
+import { FAILSAFE_SCHEMA, safeLoad } from 'js-yaml';
 import {
   autoDetectSkillsDir,
   autoDetectSkillsDirReadOnly,
@@ -217,20 +217,18 @@ export function resolveSkillsDir(
 // Path confinement (the security boundary)
 // ---------------------------------------------------------------------------
 
-const SKILL_NAME_HINT = `Pass name exactly as list_skills returned it: a lookup key of at most ${MAX_SKILL_NAME_LEN} characters with no slashes, spaces or "..", never a path.`;
-
 /** Validate the client-supplied skill name BEFORE any filesystem access. */
 function assertSkillNameShape(name: unknown): asserts name is string {
   if (typeof name !== 'string' || name.length === 0) {
-    throw new OperationError('invalid_params', 'skill name must be a non-empty string', SKILL_NAME_HINT);
+    throw new OperationError('invalid_params', 'skill name must be a non-empty string');
   }
   if (name.length > MAX_SKILL_NAME_LEN) {
-    throw new OperationError('invalid_params', `skill name exceeds ${MAX_SKILL_NAME_LEN} characters`, SKILL_NAME_HINT);
+    throw new OperationError('invalid_params', `skill name exceeds ${MAX_SKILL_NAME_LEN} characters`);
   }
   // No path separators, no traversal, no null byte. The name is a manifest
   // LOOKUP KEY — it must never look like a path component.
   if (/[/\\]|\.\.| /.test(name)) {
-    throw new OperationError('invalid_params', `Invalid skill name: ${name}`, SKILL_NAME_HINT);
+    throw new OperationError('invalid_params', `Invalid skill name: ${name}`);
   }
 }
 
@@ -266,31 +264,28 @@ export function confineManifestPath(skillsDir: string, entry: ManifestEntry): st
   try {
     realRoot = realpathSync(skillsDir);
   } catch {
-    throw new OperationError('storage_error', `Cannot resolve skills dir: ${skillsDir}`,
-      'The skills directory on the brain host is missing or unreadable. The host\'s operator checks mcp.skills_dir (gbrain config get mcp.skills_dir) or unsets it so gbrain autodetects the directory.');
+    throw new OperationError('storage_error', `Cannot resolve skills dir: ${skillsDir}`);
   }
   const candidate = join(realRoot, entry.path);
   try {
     realCandidate = realpathSync(candidate);
   } catch {
-    throw new OperationError('page_not_found', `Skill file not found: ${entry.name}`, `The skills manifest lists ${entry.name} but its SKILL.md is missing on the brain host. Call list_skills for the skills that are available; the host's operator restores the file or regenerates the manifest.`);
+    throw new OperationError('page_not_found', `Skill file not found: ${entry.name}`);
   }
   const rel = relative(realRoot, realCandidate);
   if (rel.startsWith('..') || resolve(realRoot, rel) !== realCandidate) {
-    throw new OperationError('invalid_params', `Skill path escapes skills dir: ${entry.name}`,
-      `The manifest entry for ${entry.name} points outside the skills directory, so it is refused. Pick another skill from list_skills; the brain host's operator fixes the manifest.`);
+    throw new OperationError('invalid_params', `Skill path escapes skills dir: ${entry.name}`);
   }
   let st;
   try {
     st = statSync(realCandidate);
   } catch {
-    throw new OperationError('page_not_found', `Skill file not found: ${entry.name}`, `The skills manifest lists ${entry.name} but its SKILL.md is missing on the brain host. Call list_skills for the skills that are available; the host's operator restores the file or regenerates the manifest.`);
+    throw new OperationError('page_not_found', `Skill file not found: ${entry.name}`);
   }
   if (!st.isFile() || basename(realCandidate) !== 'SKILL.md') {
     throw new OperationError(
       'invalid_params',
       `Skill target is not a SKILL.md regular file: ${entry.name}`,
-      `The manifest entry for ${entry.name} does not point at a regular SKILL.md file, so it is refused. Pick another skill from list_skills; the brain host's operator fixes the manifest.`,
     );
   }
   return realCandidate;
@@ -356,7 +351,7 @@ function resolveSkillTools(
   if (parsed?.tools !== undefined) return crossReferenceTools(parsed.tools, ctx, gateDisabled);
   if (parsed) {
     try {
-      const data = load(parsed.raw, { schema: FAILSAFE_SCHEMA });
+      const data = safeLoad(parsed.raw, { schema: FAILSAFE_SCHEMA });
       if (data && typeof data === 'object' && !Array.isArray(data) && !Object.hasOwn(data, 'tools')) {
         return { usable_tools: availableBrainTools(ctx, gateDisabled), unavailable_tools: [] };
       }
@@ -563,8 +558,7 @@ export function getSkillDetail(
   }
   const content = readFileSync(path, 'utf-8');
   if (Buffer.byteLength(content, 'utf8') > MAX_SKILL_MD_BYTES) {
-    throw new OperationError('payload_too_large', `Skill ${name} exceeds the size cap.`,
-      `Skill ${name} is over ${MAX_SKILL_MD_BYTES} bytes, so it is not served. The brain host's operator can raise GBRAIN_MAX_SKILL_MD_BYTES if it is legitimately large.`);
+    throw new OperationError('payload_too_large', `Skill ${name} exceeds the size cap.`);
   }
 
   const parsed = parseSkillFrontmatter(content);

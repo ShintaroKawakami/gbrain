@@ -1,7 +1,5 @@
 /** Own-write receipt controls. UUID knowledge alone never grants access. */
-import { OperationError, opError, type Operation, type OperationContext } from './contract.ts';
-import { invalidParam, readFix } from './op-fix.ts';
-import { isValidSourceId } from '../source-id.ts';
+import { OperationError, type Operation, type OperationContext } from './contract.ts';
 import { enforceBoundClientOpAllowList, enforceClientSlugFence, enforceSubagentSlugFence, normalizeSlugPrefix, parseSourceIdParam } from './context.ts';
 import { hasScope } from '../scope.ts';
 import { normalizeTokenScopes } from '../legacy-token-scope.ts';
@@ -13,19 +11,9 @@ import type { WriteHealthFacts } from '../persistence/health.ts';
 
 const RECEIPT_NAMES = ['get_write_request', 'list_write_requests', 'cancel_write_request'] as const;
 type ReceiptOperation = typeof RECEIPT_NAMES[number];
-const denied = () => opError('permission_denied', 'This writer grant does not include the requested receipt operation.',
+const denied = () => new OperationError('permission_denied', 'This writer grant does not include the requested receipt operation.',
   'Explicitly regrant the required receipt operation. Existing operation snapshots do not expand during upgrades.');
-function callerSource(ctx: OperationContext): string | undefined {
-  const id = ctx.auth?.sourceId ?? ctx.sourceId;
-  return isValidSourceId(id) ? id : undefined;
-}
-/** Foreign, missing and inaccessible requests share one answer (anti-enumeration); the fix lists the caller's own receipts. */
-const missing = (sourceId?: string) => opError('not_found', 'No accessible write request has that request_id.',
-  'Check the request_id; list_write_requests shows the receipts this connection can read in its source, newest first.',
-  { fix: readFix('Lists your own write receipts in this source, newest first.', {
-    argv: ['gbrain', 'write-requests', ...(sourceId ? ['--source', sourceId] : [])],
-    mcp: { tool: 'list_write_requests', arguments: sourceId ? { source_id: sourceId } : {} },
-  }) });
+const missing = () => new OperationError('not_found', 'No accessible write request has that request_id.');
 
 function operationAllowed(operations: unknown, operation: string): boolean {
   return operations == null || Array.isArray(operations) && operations.every(value => typeof value === 'string') && operations.includes(operation);
@@ -110,12 +98,9 @@ async function publicReceipt(ctx: OperationContext, row: WriteRequest, facts?: W
   const intent = row.intent as Pick<import('../persistence/sync-prepare.ts').SyncIntent, 'processingOptions' | 'syncOptions' | 'repoPath'> | null;
   const checkpoint = row.error_code === CHECKPOINT_VALIDATION_TIMEOUT ? await checkpointTimeoutHint(ctx.engine, { requestId: row.request_id, sourceId: row.source_id,
     processingOptions: intent?.processingOptions, syncOptions: intent?.syncOptions, repoPath: intent?.repoPath }) : null;
-  // #5929: a trusted local reader learns when the owner that ran the attempt is on another build.
-  const mismatch = ctx.remote === false ? (await import('../persistence/publication-failure.ts')).ownerBuildMismatch(row.error_detail, (await import('../../version.ts')).VERSION) : null;
   return {
     ...publicWriteReceipt(receiptFor(row, facts)),
     operation: row.operation, source_id: row.source_id, slug: row.slug,
-    ...(mismatch ? { owner_build: mismatch } : {}),
     ...(isWriteErrorCode(row.error_code) ? { write_error: row.error_code, write_error_message: writeFailureDiagnostic(row.error_code, row.error_message).message } : {}),
     ...(checkpoint ? { detail: checkpoint.detail, suggestion: checkpoint.suggestion, docs: checkpoint.docs } : {}),
     effects: (await publicEffectsForRequest(ctx.engine, row.id)).map(effect => {
@@ -127,18 +112,17 @@ async function publicReceipt(ctx: OperationContext, row: WriteRequest, facts?: W
 
 function requiredRequestId(value: unknown): string {
   const id = parseWriteRequestId(value);
-  if (!id) throw opError('invalid_params', 'request_id is required.', 'Pass the request_id you sent with the write, or the one its receipt shows; list_write_requests shows recent ones.');
+  if (!id) throw new OperationError('invalid_params', 'request_id is required.');
   return id;
 }
 
-const requestParam = { type: 'string' as const, required: true, description: 'The id you sent, or the receipt\'s.' };
+const requestParam = { type: 'string' as const, required: true, description: 'The UUID you sent with the write.' };
 
 export const persistenceOperations: Operation[] = [
   {
     name: 'get_write_request',
-    idempotent: true,
     outputRedaction: 'no_stored_text',
-    description: 'Read your write\'s receipt by request_id (after write_pending or a lost reply). Poll at retry_after_ms until final.',
+    description: 'Read the receipt of your write by request_id (after write_pending or a lost reply).',
     params: { request_id: requestParam },
     scope: 'write', mutating: false, area: 'pages',
     cliHints: { name: 'write-request', positional: ['request_id'] },
@@ -147,15 +131,14 @@ export const persistenceOperations: Operation[] = [
       const { principal } = await receiptAccess(ctx, 'get_write_request');
       const { getWriteRequest, writeHealthFacts } = await import('../persistence/journal.ts');
       const row = await getWriteRequest(ctx.engine, principal, id);
-      if (!row || !await visible(ctx, row)) throw missing(callerSource(ctx));
+      if (!row || !await visible(ctx, row)) throw missing();
       return publicReceipt(ctx, row, (await writeHealthFacts(ctx.engine, [row])).get(row.id));
     },
   },
   {
     name: 'list_write_requests',
-    idempotent: true,
     outputRedaction: 'no_stored_text',
-    description: 'List your write receipts in one source, newest first. Use when a request_id was lost.',
+    description: 'List your write receipts in one source, newest first.',
     params: {
       source_id: { type: 'string', description: 'Default: yours.' },
       limit: { type: 'number', default: 25, description: '1-100 (default 25).' },
@@ -167,9 +150,9 @@ export const persistenceOperations: Operation[] = [
       const access = await receiptAccess(ctx, 'list_write_requests');
       const sourceId = parseSourceIdParam(params.source_id ?? ctx.sourceId, 'list_write_requests') ?? 'default';
       const limit = params.limit ?? 25;
-      if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 100) throw invalidParam(ctx, 'list_write_requests', 'limit', 'limit must be an integer from 1 to 100.', { example: 25 });
+      if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new OperationError('invalid_params', 'limit must be an integer from 1 to 100.');
       if (params.before !== undefined && (typeof params.before !== 'string' || !/^\d{1,19}$/.test(params.before)
-        || BigInt(params.before) > 9_223_372_036_854_775_807n)) throw opError('invalid_params', 'Invalid write request cursor.', 'Pass `before` exactly as the previous response\'s `next` value, or omit it to start from the newest receipt.');
+        || BigInt(params.before) > 9_223_372_036_854_775_807n)) throw new OperationError('invalid_params', 'Invalid write request cursor.');
       if (access.sourceIds && !access.sourceIds.includes(sourceId)) return { requests: [], next: null };
       const { listWriteRequests } = await import('../persistence/control.ts');
       const slugAllowList = ctx.viaSubagent !== true ? undefined : ctx.allowedSlugPrefixes?.length ? ctx.allowedSlugPrefixes
@@ -186,7 +169,6 @@ export const persistenceOperations: Operation[] = [
   },
   {
     name: 'cancel_write_request',
-    idempotent: true,
     outputRedaction: 'no_stored_text',
     description: 'Cancel your accepted write before it publishes. Returns the actual receipt.',
     params: { request_id: requestParam },
@@ -197,17 +179,17 @@ export const persistenceOperations: Operation[] = [
       const { principal } = await receiptAccess(ctx, 'cancel_write_request');
       const { getWriteRequest, writeHealthFacts } = await import('../persistence/journal.ts');
       const row = await getWriteRequest(ctx.engine, principal, id);
-      if (!row || !await visible(ctx, row)) throw missing(callerSource(ctx));
+      if (!row || !await visible(ctx, row)) throw missing();
       if (ctx.dryRun) return { dry_run: true, action: 'cancel_write_request', request_id: id, state: row.state };
       const { cancelWriteRequest } = await import('../persistence/control.ts');
       const cancelled = await cancelWriteRequest(ctx.engine, principal, id, {
         authorize: async (engine, current) => {
           const lockedCtx = { ...ctx, engine };
           await receiptAccess(lockedCtx, 'cancel_write_request', true);
-          if (!await visible(lockedCtx, current)) throw missing(callerSource(ctx));
+          if (!await visible(lockedCtx, current)) throw missing();
         },
       });
-      if (!cancelled) throw missing(callerSource(ctx));
+      if (!cancelled) throw missing();
       return publicReceipt(ctx, cancelled, (await writeHealthFacts(ctx.engine, [cancelled])).get(cancelled.id));
     },
   },

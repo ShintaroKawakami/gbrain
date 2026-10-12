@@ -104,13 +104,11 @@ describe('PGLite catalog goldens (E4)', () => {
     expect(embedding.udtName).toBe('vector');
   });
 
-  test('non-default FTS language changes only function bodies (search_vector triggers) and the facts keyword index', () => {
+  test('non-default FTS language changes only function bodies (search_vector triggers)', () => {
     for (const path of ['engine', 'blob'] as const) {
       const diff = diffCatalogSnapshots(requireCaptured(`${path}:default`), requireCaptured(`${path}:fts-portuguese`));
       expect(diff.length).toBeGreaterThan(0);
-      // The facts table (and its v237 index) comes from migrations, so only engine init has it.
-      expect([...new Set(diff.map((d) => d.section))].sort()).toEqual(path === 'engine' ? ['functions', 'indexes'] : ['functions']);
-      expect(diff.filter((d) => d.section === 'indexes').map((d) => d.key)).toEqual(path === 'engine' ? ['idx_facts_fts'] : []);
+      expect([...new Set(diff.map((d) => d.section))]).toEqual(['functions']);
       expect(diff.every((d) => d.kind === 'changed')).toBe(true);
     }
   });

@@ -1,5 +1,5 @@
 /** Post-sync human reporting and best-effort nudges for the sync CLI. */
-import { formatManagedSyncFailure, managedSyncRetryCommand } from '../../core/persistence/sync-failures.ts';
+import { formatManagedSyncFailure } from '../../core/persistence/sync-failures.ts';
 import type { BrainEngine } from '../../core/engine.ts';
 import { isEmbeddingInfraCode } from '../../core/sync.ts';
 import { serr } from '../../core/console-prefix.ts';
@@ -61,7 +61,7 @@ export async function maybeBackupCoverageRefresh(engine: BrainEngine): Promise<v
 export async function maybeExtractionNudge(engine: BrainEngine, sourceId?: string): Promise<void> {
   if (process.env.GBRAIN_SYNC_NO_EXTRACT_NUDGE) return;
   try {
-    const { effectiveLinkExtractorWatermark } = await import('../../core/link-extraction-watermark.ts');
+    const { LINK_EXTRACTOR_VERSION_TS } = await import('../../core/link-extraction.ts');
     // D3/C4: resolve the warn threshold + vacuous-skip floor through the SAME
     // helpers the doctor check uses (dynamic import keeps doctor.ts off sync's
     // eager-load path) so "the nudge fires iff doctor would warn" can't drift.
@@ -76,7 +76,7 @@ export async function maybeExtractionNudge(engine: BrainEngine, sourceId?: strin
     // Match doctor's predicate EXACTLY (C4): skip tiny brains only when NOT
     // source-scoped (a small explicit source IS assessed, like orphan_ratio).
     if (total < EXTRACTION_LAG_MIN_PAGES && !sourceId) return;
-    const stale = await engine.countStalePagesForExtraction({ sourceId, versionTs: await effectiveLinkExtractorWatermark(engine) });
+    const stale = await engine.countStalePagesForExtraction({ sourceId, versionTs: LINK_EXTRACTOR_VERSION_TS });
     const warnPct = _resolveEnvNumber('GBRAIN_EXTRACTION_LAG_WARN_PCT', EXTRACTION_LAG_WARN_PCT_DEFAULT, { unit: '%' });
     if ((stale / total) * 100 > warnPct) {
       serr(`[sync] ${stale} page(s) have un-extracted edges — run 'gbrain extract --stale'`);
@@ -126,10 +126,7 @@ export function printSyncResult(result: SyncResult, sink: NodeJS.WriteStream = p
       if (result.runId) {
         write(`Sync BLOCKED at ${result.toCommit}: committed counts are cumulative for run ${result.runId}.`);
         for (const failure of result.failures ?? []) write(`  ${formatManagedSyncFailure(failure)}`);
-        const retries = [...new Set((result.failures ?? []).map(failure => managedSyncRetryCommand(failure)))];
-        write(retries.length
-          ? `  Fix the cause, then run: ${retries.join(' ; ')} (this admits a fresh run after active work drains).`
-          : '  Fix the cause, then run gbrain sync --no-pull --retry-failed with the same source and options; this admits a fresh run after active work drains.');
+        write('  Fix the cause, then run gbrain sync --no-pull --retry-failed with the same source and options; this admits a fresh run after active work drains.');
         break;
       }
       write(`Sync BLOCKED at ${result.toCommit.slice(0, 8)}: ${result.failedFiles ?? 0} file(s) failed.`);
@@ -174,11 +171,6 @@ export function printSyncResult(result: SyncResult, sink: NodeJS.WriteStream = p
           `${result.filesImported ?? result.added + result.modified} page(s) written.`,
         );
         write(`  Check the warnings above (expired or revoked credentials print there), fix the cause, then re-run 'gbrain sync --source <id>'.`);
-        break;
-      }
-      // #5984: a managed cursor knows its manifest size; the drain summary prints the next step.
-      if (result.managedCursor) {
-        write(`Sync PARTIAL at ${result.fromCommit?.slice(0, 8) ?? '<initial>'}: ${result.managedCursor.index} of ${result.managedCursor.total} manifest entries processed, reason=${result.reason ?? 'timeout'} (last_commit unchanged; safe to retry).`);
         break;
       }
       // v0.41.13.0 (T7 / D-V3-5): --timeout fired before the bookmark write

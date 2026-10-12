@@ -67,12 +67,6 @@ export interface FusionListEntry {
   list: SearchResult[];
   k: number;
   weight?: number;
-  /**
-   * Arm INSTANCE label for explain attribution (`vector`, `vector_variant#2`,
-   * `vector_clause#1`, `image`, `keyword`, `title`, `relational`). Labels
-   * never affect fusion math.
-   */
-  arm?: string;
 }
 
 /** Tag-and-append helper: the single way hybrid.ts adds a vector arm. */
@@ -186,17 +180,13 @@ export function composeFusionLists(input: ComposeFusionListsInput): FusionListEn
     budget === null || votingExpansionArms === 0 ? undefined : budget / votingExpansionArms;
 
   const out: FusionListEntry[] = [];
-  const seenByRole = new Map<VectorArmRole, number>();
   for (const arm of arms) {
-    const n = (seenByRole.get(arm.role) ?? 0) + 1;
-    seenByRole.set(arm.role, n);
-    const label = arm.role === 'original' ? 'vector' : arm.role === 'image' ? 'image' : `vector_${arm.role}#${n}`;
     if (arm.role === 'image') {
-      out.push({ list: arm.list, k: imageK, arm: label });
+      out.push({ list: arm.list, k: imageK });
     } else if (isExpansionRole(arm.role) && expansionWeight !== undefined && arm.list.length > 0) {
-      out.push({ list: arm.list, k: textK, weight: expansionWeight, arm: label });
+      out.push({ list: arm.list, k: textK, weight: expansionWeight });
     } else {
-      out.push({ list: arm.list, k: textK, arm: label });
+      out.push({ list: arm.list, k: textK });
     }
   }
   // Arm-confidence weighting (arm-confidence.ts): the keyword AND title
@@ -214,36 +204,12 @@ export function composeFusionLists(input: ComposeFusionListsInput): FusionListEn
     // Meta stamping must never break fusion.
   }
   const lexicalWeight = lexical.weight === undefined ? {} : { weight: lexical.weight };
-  out.push({ list: keywordFusionList, k: ks.keywordK, ...lexicalWeight, arm: 'keyword' });
+  out.push({ list: keywordFusionList, k: ks.keywordK, ...lexicalWeight });
   if (titleFusionList.length > 0) {
-    out.push({ list: titleFusionList, k: ks.keywordK, ...lexicalWeight, arm: 'title' });
+    out.push({ list: titleFusionList, k: ks.keywordK, ...lexicalWeight });
   }
   if (includeRelational && relationalList.length > 0) {
-    out.push({ list: relationalList, k: ks.baseRrfK, arm: 'relational' });
-  }
-  return out;
-}
-
-/**
- * Round-robin interleave for find-the-twin candidate lists (C2): each arm's
- * #1 in arm order, then each arm's #2, and so on, keeping the first
- * occurrence of a key and stopping at `limit`. Rank-only and score-free, so
- * arms whose scores live on different scales (cosine distance, ts_rank)
- * merge without calibration; an empty arm casts no vote. Hybrid search
- * keeps RRF (`composeFusionLists`); this is for small fixed-k candidate sets.
- */
-export function interleaveFusion<T>(arms: ReadonlyArray<ReadonlyArray<T>>, key: (item: T) => string | number, limit = Number.POSITIVE_INFINITY): T[] {
-  const out: T[] = [];
-  const seen = new Set<string | number>();
-  const depth = Math.max(0, ...arms.map(arm => arm.length));
-  for (let rank = 0; rank < depth && out.length < limit; rank++) {
-    for (const arm of arms) {
-      if (rank >= arm.length || out.length >= limit) continue;
-      const id = key(arm[rank]);
-      if (seen.has(id)) continue;
-      seen.add(id);
-      out.push(arm[rank]);
-    }
+    out.push({ list: relationalList, k: ks.baseRrfK });
   }
   return out;
 }

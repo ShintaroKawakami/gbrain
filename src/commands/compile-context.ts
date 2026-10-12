@@ -34,13 +34,10 @@ import { atomicWriteTextFile } from '../core/bootstrap/atomic-write.ts';
 import { compileView, type CompileViewMeta } from '../core/context/compile-view.ts';
 import { formatSensitivityDrop, loadSensitivityConfig } from '../core/context/sensitivity-scan.ts';
 import { resolveSourceId, ALL_SOURCES } from '../core/source-resolver.ts';
-import { homedir } from 'os';
-import { listCorePages, loadCoreBlock } from '../core/core-memory.ts';
-import { ensureGitExcluded, gitRoot, isGitTracked, updateCompiledCoreRecord } from '../core/context/compiled-core.ts';
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
-export const COMPILE_TARGETS = ['claude-code', 'codex', 'openclaw', 'codex-global', 'hermes'] as const;
+export const COMPILE_TARGETS = ['claude-code', 'codex', 'openclaw'] as const;
 export type CompileTarget = (typeof COMPILE_TARGETS)[number];
 
 /** Managed-block markers for the codex (AGENTS.md) target. Exact-line match. */
@@ -65,8 +62,6 @@ interface CompileFlags {
   include?: string[];
   check: boolean;
   json: boolean;
-  includeCore: boolean;
-  removeCore: boolean;
 }
 
 class UsageError extends Error {}
@@ -116,14 +111,8 @@ function parseCompileFlags(args: string[]): CompileFlags {
     ...(include && include.length > 0 ? { include } : {}),
     check: args.includes('--check'),
     json: args.includes('--json'),
-    // codex-global exists to carry core, so it includes core unless told to remove it.
-    includeCore: !args.includes('--remove-core') && (args.includes('--include-core') || target === 'codex-global'),
-    removeCore: args.includes('--remove-core'),
   };
 }
-
-/** Targets whose output is a managed block inside a file the user also edits. */
-const SPLICE_TARGETS: ReadonlySet<CompileTarget> = new Set(['codex', 'codex-global']);
 
 // ── Codex AGENTS.md splice ──────────────────────────────────────────────────
 
@@ -186,22 +175,7 @@ export function defaultOutPath(target: CompileTarget, cwd: string): string {
     case 'openclaw':
       // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
       return join(cwd, '.gbrain', 'compiled-context.md');
-    case 'codex-global':
-      // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
-      return join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'AGENTS.md');
-    case 'hermes':
-      // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
-      return join(gitRoot(cwd) ?? cwd, '.hermes.md');
   }
-}
-
-/** Removes the managed block from a splice target, leaving the user's own text. */
-export function removeCompiledBlock(existing: string): string {
-  const lines = existing.split('\n');
-  const begin = lines.indexOf(COMPILED_BLOCK_BEGIN);
-  const end = lines.indexOf(COMPILED_BLOCK_END);
-  if (begin === -1 || end < begin) return existing;
-  return [...lines.slice(0, begin), ...lines.slice(end + 1)].join('\n');
 }
 
 // ── Help ────────────────────────────────────────────────────────────────────
@@ -222,9 +196,6 @@ Flags:
   --include <p,...>  Extra slug prefixes selected alongside the defaults.
   --check            Recompile in memory and byte-compare against the
                      existing output. Exit 0 same, 1 different, 2 error.
-  --include-core     Render always-loaded core memory first, in full. Refused
-                     when the output file is tracked by git.
-  --remove-core      Recompile without core (codex-global: remove the block).
   --json             Machine-readable result envelope on stdout.
   --help             Show this help.
 
@@ -232,10 +203,6 @@ Targets:
   claude-code   .claude/gbrain-context.md + a one-line CLAUDE.md import.
   codex         AGENTS.md managed block (also loads natively in opencode).
   openclaw      .gbrain/compiled-context.md in the workspace.
-  codex-global  $CODEX_HOME/AGENTS.md managed block: the default source's
-                core memory, loaded in every Codex session.
-  hermes        .hermes.md at the git root, kept out of git via
-                .git/info/exclude.
 `);
 }
 
@@ -282,9 +249,8 @@ export async function runCompileContext(
 
   try {
     // Source resolution runs even when the source flag is omitted (6-tier
-    // resolution: flag > env > dotfile > ... > 'default'). The user-global
-    // codex file holds the default source's core only.
-    const sourceId = flags.target === 'codex-global' ? 'default' : await resolveSourceId(engine, flags.source ?? null, cwd);
+    // resolution: flag > env > dotfile > ... > 'default').
+    const sourceId = await resolveSourceId(engine, flags.source ?? null, cwd);
     if (sourceId === ALL_SOURCES) {
       process.stderr.write(
         'compile-context: compiles exactly ONE source — pass a concrete source id.\n',
@@ -297,25 +263,6 @@ export async function runCompileContext(
     // could be written.
     const scanConfig = loadSensitivityConfig({ workspaceRoot: cwd });
 
-    const outPath = flags.out ?? defaultOutPath(flags.target, cwd);
-    // Core reaches every session that loads this file, so it never goes into a shared (git-tracked) file.
-    if (flags.includeCore && !flags.stdout) {
-      if (flags.target === 'hermes' && !isGitTracked(outPath)) ensureGitExcluded(outPath);
-      if (isGitTracked(outPath)) {
-        process.stderr.write(`compile-context: ${outPath} is tracked by git, so always-loaded core memory will not be written into it (it would be committed and shared). `
-          + 'Use a local target (--target claude-code, hermes or codex-global) or --out <untracked path>, or drop --include-core.\n');
-        return EXIT_ERROR;
-      }
-    }
-    // Core pages leave the arms either way: with --include-core they render in full, without it they stay out.
-    const excludeSlugs = new Set((await listCorePages(engine, { sourceIds: [sourceId] })).map(p => p.slug));
-    let core: { text: string; revision: string; command: string } | undefined;
-    if (flags.includeCore) {
-      const block = await loadCoreBlock(engine, { sessionSourceId: sourceId, excludePrivate: true, notices: [] });
-      const command = `gbrain compile-context --target ${flags.target}${flags.target === 'codex-global' ? '' : ' --include-core'}${flags.out ? ` --out ${flags.out}` : ''}`;
-      core = { text: block.text, revision: block.revision, command };
-    }
-
     const { text, meta } = await compileView({
       engine,
       sourceId,
@@ -323,9 +270,6 @@ export async function runCompileContext(
       budget: flags.budget,
       ...(flags.include ? { includePrefixes: flags.include } : {}),
       scanConfig,
-      excludeSlugs,
-      ...(core ? { core } : {}),
-      ...(flags.target === 'codex-global' ? { coreOnly: true } : {}),
     });
 
     // Drops are always reported: slug + family + fingerprint, never the text.
@@ -333,6 +277,7 @@ export async function runCompileContext(
       process.stderr.write(`compile-context: ${formatSensitivityDrop(d, cwd)}\n`);
     }
 
+    const outPath = flags.out ?? defaultOutPath(flags.target, cwd);
     const existing = existsSync(outPath) ? readFileSync(outPath, 'utf-8') : null;
 
     const envelope = (extra: Partial<CompileEnvelope>): CompileEnvelope => ({
@@ -346,7 +291,7 @@ export async function runCompileContext(
 
     if (flags.check) {
       let same: boolean;
-      if (SPLICE_TARGETS.has(flags.target)) {
+      if (flags.target === 'codex') {
         // "Would a write change the file?" — includes missing/absent block.
         same = existing !== null && spliceCompiledBlock(existing, text) === existing;
       } else {
@@ -374,16 +319,9 @@ export async function runCompileContext(
       return EXIT_OK;
     }
 
-    if (flags.target === 'codex-global' && flags.removeCore) {
-      if (existing !== null) atomicWriteTextFile(outPath, removeCompiledBlock(existing), { freshMode: 0o644 });
-      updateCompiledCoreRecord(outPath, null);
-      process.stdout.write(flags.json ? `${JSON.stringify(envelope({}))}\n` : `compile-context: removed core memory from ${outPath}\n`);
-      return EXIT_OK;
-    }
     const fileText =
-      SPLICE_TARGETS.has(flags.target) ? spliceCompiledBlock(existing ?? '', text) : text;
+      flags.target === 'codex' ? spliceCompiledBlock(existing ?? '', text) : text;
     atomicWriteTextFile(outPath, fileText, { freshMode: 0o644 });
-    updateCompiledCoreRecord(outPath, core ? { target: flags.target, source_id: sourceId, revision: core.revision, command: core.command } : null);
 
     if (flags.json) {
       process.stdout.write(`${JSON.stringify(envelope({}))}\n`);

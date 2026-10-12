@@ -28,7 +28,6 @@ import {
   OPS_CHECK_NAMES,
   META_CHECK_NAMES,
 } from './doctor-categories.ts';
-import type { RenderedAction } from './agent-output.ts';
 
 /** Minimal structural shape of a doctor Check that ranking needs. */
 export interface RankableCheck {
@@ -36,8 +35,6 @@ export interface RankableCheck {
   status: 'ok' | 'warn' | 'fail';
   message: string;
   details?: Record<string, unknown>;
-  /** Agent contract v1: the check's rendered fix, when it has one. */
-  fix?: unknown;
 }
 
 export interface RankedIssue {
@@ -56,12 +53,6 @@ export interface RankedIssue {
   downstream_of?: string;
   /** One-line fix. Prefers `details.fix_hint`; falls back to the check message. */
   fix: string;
-  /**
-   * Agent contract v1: the check's structured fix (RenderedAction: `next`,
-   * `command`/`argv`, `consent`, `verify`). Additive sibling of the legacy
-   * `fix` string, which keeps its type.
-   */
-  action?: RenderedAction;
 }
 
 /**
@@ -103,10 +94,6 @@ const DOWNSTREAM_EDGES: Readonly<Record<string, string>> = {
   supervisor: 'worker_oom_loop',
 };
 
-function isRenderedAction(v: unknown): v is RenderedAction {
-  return !!v && typeof v === 'object' && typeof (v as RenderedAction).next === 'string';
-}
-
 function tierOf(name: string): 'root' | 'symptom' {
   return ROOT_CAUSE_CHECKS.has(name) ? 'root' : 'symptom';
 }
@@ -131,7 +118,6 @@ export function rankIssues(checks: RankableCheck[]): RankedIssue[] {
       tier: tierOf(c.name),
       ...(downstream_of ? { downstream_of } : {}),
       fix,
-      ...(isRenderedAction(c.fix) ? { action: c.fix } : {}),
     };
   });
 

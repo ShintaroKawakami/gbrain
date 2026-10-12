@@ -126,8 +126,7 @@ test(`${backend}: managed extraction classifies the pinned snapshot after a sele
   const originalReadPageSnapshot = engine.readPageSnapshot.bind(engine);
   let editedAfterSelection = false;
   (engine as any).readPageSnapshot = async (selectedSlug: string, options?: { sourceId?: string }) => {
-    // Only the extraction's own read races: the projection rebuild the first write queued reads this page too.
-    if (!editedAfterSelection && selectedSlug === slug && new Error().stack?.includes('extract-takes-from-pages')) {
+    if (!editedAfterSelection && selectedSlug === slug) {
       editedAfterSelection = true;
       (engine as any).readPageSnapshot = originalReadPageSnapshot;
       await engine.transaction(tx => withCoordinatedWrite(tx, ['default'], async () => {

@@ -9,15 +9,10 @@ Without this: the agent misses signals in conversation, wastes money on external
 ## Implementation
 
 ```
-# DISCIPLINE 1: Signal Detection on Every Message (after explicit opt-in)
+# DISCIPLINE 1: Signal Detection on Every Message (MANDATORY)
 on every_inbound_message(message):
-    # Automatic capture is off by default. Run this loop only after the
-    # user explicitly opted in to automatic capture for this brain (the
-    # stored choice skills/signal-detector/SKILL.md checks before writing),
-    # and honor narrower per-message instructions. Without the opt-in,
-    # write only what the user asks to save.
-    if not automatic_capture_opted_in():
-        return
+    # No exceptions. If the user thinks out loud and the brain doesn't
+    # capture it, the system is broken. This is the #1 discipline.
 
     entities = detect_entities(message)
     #   people, companies, deals, original ideas
