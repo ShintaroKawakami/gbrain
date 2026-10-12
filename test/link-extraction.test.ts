@@ -166,6 +166,38 @@ describe('extractEntityRefs', () => {
     expect(wikiRefs[0].needsResolution).toBe(true);
   });
 
+  test('#2336: unicode slash path is exact while alias and anchor stay intact', () => {
+    const refs = extractEntityRefs(
+      'See [[判断軸/疑われたらまず実績を数える#確認|実績を確認する]].',
+    );
+    expect(refs).toHaveLength(1);
+    expect(refs[0]).toMatchObject({
+      name: '実績を確認する',
+      slug: '判断軸/疑われたらまず実績を数える',
+      dir: '判断軸',
+      exactPath: true,
+    });
+    expect(refs[0].needsResolution).toBeUndefined();
+  });
+
+  test('#2336: extracts every unicode path when six wikilinks share one section', () => {
+    const targets = [
+      '判断軸/疑われたらまず実績を数える',
+      '判断軸/できなかった報告はまず本題か環境かを分ける',
+      '判断軸/できないと言われたらまず同じ手順で再現する',
+      '判断軸/破られても壊れない形を先に考える',
+      '判断軸/正しく振る舞っている人に我慢を強いる対策を選ばない',
+      '判断軸/記録は見られる形になって初めて完成',
+    ];
+    const content = targets.map(target => `- [[${target}]]`).join('\n');
+
+    const refs = extractEntityRefs(content);
+
+    expect(refs.map(ref => ref.slug)).toEqual(targets);
+    expect(refs.every(ref => ref.exactPath === true)).toBe(true);
+    expect(refs.every(ref => ref.needsResolution === undefined)).toBe(true);
+  });
+
   test('recognizes reference-page wikilinks as concrete targets', () => {
     const refs = extractEntityRefs('See [[reference/mcminnville-market-data]] for source context.');
     expect(refs.length).toBe(1);

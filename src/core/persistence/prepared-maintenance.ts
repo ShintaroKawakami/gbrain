@@ -28,6 +28,7 @@ import { assertPhysicalRoot } from './physical-root.ts';
 import { isConnectorSourceKind } from './connector-identity.ts';
 import { MaintenanceWriteWait } from './maintenance-wait.ts';
 import { declaredWriteTrust, lowerToDerivedTier, readDerivationDeclaration, recordTaintEdges, type DerivationDeclaration } from '../trust/taint.ts';
+import { prepareEntitylessProposalAccept } from './entityless-proposal-evidence.ts';
 
 export interface MaintenanceAuthority {
   writer: WriteAuthority;
@@ -73,8 +74,9 @@ export async function maintenanceCallerPreflight(engine: BrainEngine, sourceId: 
 }
 
 export async function maintenancePreflight(engine: BrainEngine, sourceId: string, root?: string,
-  opts: { deadlineAtMs?: number | null } = {}): Promise<MaintenanceAuthority | null> {
-  if (!await managedPersistenceEnabled(engine)) return null;
+  opts: { deadlineAtMs?: number | null; allowUnmanagedDatabaseOnly?: boolean } = {}): Promise<MaintenanceAuthority | null> {
+  const managed = await managedPersistenceEnabled(engine);
+  if (!managed && !opts.allowUnmanagedDatabaseOnly) return null;
   assertPersistenceAccepting(engine);
   const job = currentSubmissionAuthority();
   const verified = currentVerifiedLocalWriter();
@@ -92,6 +94,16 @@ export async function maintenancePreflight(engine: BrainEngine, sourceId: string
   if (writer.slugPrefixes !== null) throw opError('permission_denied', 'Managed maintenance requires a source-wide grant.',
     `The CLI writer registration is limited to slug prefixes, but maintenance on '${sourceId}' writes anywhere in the source. Review the grant with the command in fix; widening it is the user's decision.`,
     { fix: readFix('Shows the CLI writer registration and its source, operation and slug-prefix grant.', { argv: ['gbrain', 'auth', 'local-writer', 'list', '--json'] }) });
+  if (!managed) {
+    const writeThrough = !/^(false|0|off|no)$/i.test(await engine.getConfig('sync.write_through') ?? 'true');
+    const configuredRoot = source.local_path || (sourceId === 'default' ? await engine.getConfig('sync.repo_path') : null);
+    if (writeThrough && (root || configuredRoot)) {
+      throw opError('owner_unavailable', 'The explicit target source needs an active canonical owner before proposal acceptance.',
+        'Start the source owner (gbrain serve or the jobs worker) for this source, then retry the same proposal ID.');
+    }
+    writer.databaseOnlyReason = writeThrough ? 'no_repo_configured' : 'disabled_by_config';
+    return { writer, binding: null, wait: new MaintenanceWriteWait(opts.deadlineAtMs) };
+  }
   const binding = await getWorktreeBinding(engine, sourceId);
   // An unbound Google or GitHub source publishes database-only, exactly as its own connector sync does
   // (its local_path is the connector's state directory, not a canonical checkout).
@@ -192,7 +204,19 @@ export async function publishMaintenancePage(engine: BrainEngine, authority: Mai
 /** A maintenance request with its own intent kind, keyed by the intent (a retry replays its receipt). */
 export async function submitMaintenanceIntent(engine: BrainEngine, authority: MaintenanceAuthority, slug: string,
   intent: Record<string, unknown> & { kind: string; expected_revision: string | null }, requestId?: string): Promise<Record<string, unknown>> {
-  return submitMaintenance(engine, authority, slug, intent, requestId ?? maintenanceRequestId({ authority: authority.writer, slug, intent }));
+  if (intent.kind !== 'managed_maintenance_entityless_proposal_accept') {
+    return submitMaintenance(engine, authority, slug, intent, requestId ?? maintenanceRequestId({ authority: authority.writer, slug, intent }));
+  }
+  // Entityless review retries preserve pending/running and committed receipts,
+  // but a terminal failed or conflicted receipt must not pin this proposal to
+  // an attempt that can never publish. Keep this behavior scoped to this intent.
+  for (let attempt = 0; ; attempt++) {
+    const id = maintenanceRequestId({ authority: authority.writer, slug, intent, ...(attempt ? { attempt } : {}) });
+    const prior = await getWriteRequest(engine, authority.writer.principal, id);
+    if (!prior || prior.state === 'committed' || !isTerminal(prior)) {
+      return submitMaintenance(engine, authority, slug, intent, id);
+    }
+  }
 }
 
 /**
@@ -425,6 +449,9 @@ export async function prepareMaintenanceMutation(engine: BrainEngine, row: Write
 async function prepareMaintenanceKind(engine: BrainEngine, row: WriteRequest, config: GBrainConfig, clock?: ClaimPhaseClock): Promise<PreparedMutation> {
   if (row.authority.remote) throw trustedCliRequired('Remote maintenance publication is not supported.');
   enterClaimStep(clock, 'maintenance_dispatch');
+  if (row.intent?.kind === 'managed_maintenance_entityless_proposal_accept') {
+    return prepareEntitylessProposalAccept(engine, row, config);
+  }
   if (row.intent?.kind === 'managed_maintenance_restore_extractor_facts') return (await import('../repair/extractor-facts.ts')).prepareExtractorFactsRestore(engine, row);
   if (row.intent?.kind === 'managed_maintenance_expire_captured_facts') return (await import('../repair/captured-facts.ts')).prepareCapturedFactsExpiry(engine, row);
   if (row.intent?.kind === 'managed_maintenance_conversation_label_retire') return (await import('../repair/conversation-labels.ts')).prepareConversationLabelRetirement(engine, row);

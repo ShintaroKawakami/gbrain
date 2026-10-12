@@ -404,7 +404,12 @@ async function cmdPropose(engine: BrainEngine, args: string[], sourceId: string)
       console.error(`Invalid --kind "${kind}". Expected fact, take, bet or hunch.`);
       process.exit(1);
     }
-    const brainDir = await resolveBrainDir(engine, dirArg ?? null);
+        let brainDir: string | undefined;
+    if (dirArg) brainDir = await resolveBrainDir(engine, dirArg);
+    else {
+      const configured = await engine.getConfig('sync.repo_path');
+      if (configured && existsSync(configured)) brainDir = configured;
+    }
     try {
       const { proposal, rowNum } = await acceptProposal({ engine, brainDir, sourceId, actedBy, config: loadConfig() ?? { engine: 'pglite' },
         ...(dirArg ? { localDir: resolvePath(dirArg) } : {}) }, id, { claim: flagValue(args, '--claim'), weight, holder: flagValue(args, '--who'), kind });
@@ -452,11 +457,34 @@ async function cmdPropose(engine: BrainEngine, args: string[], sourceId: string)
   }
   console.log(`# Pending take proposals (${pending.length})\n`);
   for (const p of pending) {
+    if (p.status === 'evidence_pending' || p.status === 'evidence_accepting') {
+      let evidence: unknown = p.evidence;
+      if (typeof evidence === 'string') {
+        try { evidence = JSON.parse(evidence); } catch { /* malformed evidence remains visible as stored */ }
+      }
+      const record = evidence && typeof evidence === 'object' ? evidence as Record<string, unknown> : {};
+      const visibility = record.visibility === 'private' ? 'private' : 'world';
+      const action = p.status === 'evidence_accepting'
+        ? visibility === 'private'
+          ? '  Publication is marked in progress, but private evidence cannot be published; retrying acceptance will still refuse publication.\n'
+          : `  Publication is in progress. If interrupted, retry with the same proposal ID: \`gbrain takes propose --accept ${p.id}\`.\n`
+        : visibility === 'private'
+          ? '  Private evidence cannot be published; reject with `gbrain takes propose --reject <id>`.\n'
+          : `  Accept unchanged evidence with \`gbrain takes propose --accept ${p.id}\`.\n`;
+      console.log(`#${p.id} ${p.page_slug} [ENTITYLESS REVIEW • ${visibility} • reason=subject_unknown • contradictions=unverified]\n` +
+        `  ${p.claim_text}\n` +
+        `  Similarity is only candidate grouping. The subject is unknown; an allowed acceptance authorizes this claim on the explicit target and does not assign identity or edit source facts.\n` +
+        `  Evidence (local CLI only):\n${JSON.stringify(evidence, null, 2).split('\n').map(line => `  ${line}`).join('\n')}\n` +
+        action);
+      continue;
+    }
     const w = Number(p.weight).toFixed(2);
     const domain = p.domain ? ` • ${p.domain}` : '';
     console.log(`#${p.id} ${p.page_slug} [${p.kind} • ${p.holder} • w=${w}${domain}]\n  ${p.claim_text}\n`);
   }
-  console.log('Accept with `gbrain takes propose --accept <id>`; reject with `--reject <id>`.');
+  if (!pending.some(p => p.status === 'evidence_accepting')) {
+    console.log('Accept with `gbrain takes propose --accept <id>`; reject with `--reject <id>`.');
+  }
 }
 
 // --- Dispatcher ---
@@ -488,7 +516,7 @@ Subcommands:
   takes remove <slug> --row N             Remove one take row from the fence and the DB (other row numbers stay)
   takes rebuild <slug> [--source-id <id>] [--json]
                                           Rebuild one page's takes index from its canonical fence
-  takes propose [--limit N] [--json]      List pending LLM-proposed takes (propose_takes queue)
+  takes propose [--limit N] [--json]      List pending take and entityless fact-review proposals
   takes propose --accept <id> [--dir <path>] [--claim "..."] [--weight 0.6] [--who <holder>] [--kind <k>]
                                           Promote a proposal into the page's takes fence (source take_proposals#<id>;
                                           edits mark it "(edited)" and the queue keeps the original text)
