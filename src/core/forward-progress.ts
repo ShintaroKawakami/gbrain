@@ -36,3 +36,19 @@ export function onForwardProgress(listener: ForwardProgressListener): () => void
 export function lastForwardProgressAt(): number {
   return lastProgressAt;
 }
+
+/**
+ * #5984: the process's out-of-band stop time, registered by the CLI when it
+ * arms the sync watchdog. `strict` deadlines stop at `atMs` regardless of
+ * progress; progress-aware ones extend while progress keeps arriving. A
+ * long-running loop stops itself before a strict deadline so it, not the
+ * watchdog, writes the final result.
+ */
+export interface RunDeadline { atMs: number; strict: boolean }
+let runDeadline: RunDeadline | null = null;
+export function registerRunDeadline(deadline: RunDeadline | null): void {
+  runDeadline = deadline;
+}
+export function currentRunDeadline(): RunDeadline | null {
+  return runDeadline;
+}

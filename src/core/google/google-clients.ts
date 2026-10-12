@@ -233,6 +233,17 @@ function header(msg: RawGmailMessage, name: string): string {
   return partHeader(msg.payload, name);
 }
 
+/**
+ * RFC 3834 `Auto-Submitted`: any keyword other than `no` (`auto-generated`,
+ * `auto-replied`, `auto-notified`, extensions) marks machine mail, matched
+ * case-insensitively with parameters and comments ignored. An absent or empty
+ * header is human mail.
+ */
+function isAutoSubmittedHeader(value: string): boolean {
+  const keyword = value.replace(/\([^)]*\)/g, ' ').split(';')[0]!.trim().toLowerCase();
+  return keyword !== '' && keyword !== 'no';
+}
+
 /** iCalendar METHOD parameter of a Content-Type value (quoted or bare). */
 const CALENDAR_METHOD_RE = /method\s*=\s*"?([a-z]+)"?/i;
 
@@ -311,6 +322,12 @@ export function extractCalendarMethod(part: RawGmailPart | undefined): string | 
 export class GmailClient extends GoogleApiClient {
   async getProfile(opts: { signal?: AbortSignal } = {}): Promise<{ emailAddress: string; historyId: string }> {
     return this.fetchJSON(`${GMAIL_BASE}/users/me/profile`, 'gmail', opts);
+  }
+
+  /** The account's labels (system and user), for resolving `g_loops_exclude_labels` names to ids once per sweep (#5445). */
+  async getLabels(opts: { signal?: AbortSignal } = {}): Promise<Array<{ id: string; name: string; type: string }>> {
+    const body = await this.fetchJSON<{ labels?: Array<{ id?: string; name?: string; type?: string }> }>(`${GMAIL_BASE}/users/me/labels`, 'gmail', opts);
+    return (body.labels ?? []).flatMap((l) => typeof l.id === 'string' && typeof l.name === 'string' ? [{ id: l.id, name: l.name, type: l.type ?? 'user' }] : []);
   }
 
   /** Message ids matching a Gmail search query (includes SENT; excludes SPAM/TRASH). */
@@ -439,6 +456,7 @@ export class GmailClient extends GoogleApiClient {
         internalDateMs,
         labelIds: m.labelIds ?? [],
         listUnsubscribe: header(m, 'List-Unsubscribe') !== '',
+        autoSubmitted: isAutoSubmittedHeader(header(m, 'Auto-Submitted')),
         calendarMethod: extractCalendarMethod(m.payload),
         bodyText,
         attachmentInspection,

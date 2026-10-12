@@ -15,6 +15,7 @@ import type { WriteRequest } from '../../src/core/persistence/model.ts';
 import { disposePersistenceConsumer, waitForWrite } from '../../src/core/persistence/service.ts';
 import { sha256 } from '../../src/core/persistence/digest.ts';
 import { withEnv } from './with-env.ts';
+import { waitFor } from './wait-for.ts';
 
 export const atomCompactionCases = ['all_failed', 'mixed_all', 'completion_only', 'failed_child_only', 'committed_child_only', 'changed_target', 'success', 'malformed'] as const;
 export const atomCompactionActions = ['resume', 'retry'] as const;
@@ -61,6 +62,12 @@ export async function exerciseAtomCompaction(engine: BrainEngine, scenario: type
       expect(accepted).toHaveLength(scenario === 'malformed' ? 1 : 3);
       const completion = await waitForWrite(observedEngine, accepted.at(-1)!, { engine: engine.kind });
       expect(completion.state).toBe(['success', 'malformed'].includes(scenario) ? 'committed' : 'conflict');
+      // A committed atom still has its embedding effect running. Stopping the
+      // consumer requeues it, and compaction retains a receipt whose effect is
+      // unfinished, so settle the source's effects before stopping.
+      await waitFor(async () => (await engine.executeRaw(
+        "SELECT 1 FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id WHERE r.source_id=$1 AND e.state IN ('queued','running')", [sourceId])).length === 0,
+        { label: `${engine.kind}: ${scenario} ${action} atom effects settled` });
       await disposePersistenceConsumer(observedEngine);
       const originals = await engine.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE source_id=$1 ORDER BY sequence', [sourceId]);
       if (scenario !== 'malformed') expect(originals.map(row => row.state)).toEqual(scenario === 'success' ? ['committed', 'committed', 'committed'] :
@@ -95,12 +102,14 @@ export async function exerciseAtomCompaction(engine: BrainEngine, scenario: type
       __setChatTransportForTests(providerFree);
       if (action === 'resume') {
         const replay = await runPhaseExtractAtoms(engine, { ...opts, _chat: providerFree });
-        expect(calls).toBe(1);
+        // #6325: a failed batch is retried automatically whether or not its receipt was compacted.
+        expect(calls).toBe(scenario === 'malformed' ? 2 : 1);
         expect(replay.status).toBe(scenario === 'success' ? 'ok' : 'warn');
         if (scenario === 'success') expect(replay.details?.duplicates_skipped).toBe(1);
         const session = (await managedAtomSession(engine, sourceId))!;
         const origin = await readAtomOrigin(engine, session, { kind: 'page', slug: page.slug, content: page.compiled_truth, contentHash: page.content_hash! });
-        if (scenario === 'success') expect(await resumeManagedAtoms(engine, session, origin)).toBe(true);
+        if (scenario === 'success') expect(await resumeManagedAtoms(engine, session, origin)).toBe('done');
+        else if (scenario === 'malformed') expect(await resumeManagedAtoms(engine, session, origin)).toBe('run');
         else {
           let error: unknown;
           try { await resumeManagedAtoms(engine, session, origin); } catch (caught) { error = caught; }
@@ -123,7 +132,7 @@ export async function exerciseAtomCompaction(engine: BrainEngine, scenario: type
         }
       }
       await disposePersistenceConsumer(engine);
-      expect(calls).toBe(1);
+      expect(calls).toBe(action === 'resume' && scenario === 'malformed' ? 2 : 1);
       expect(await engine.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE source_id=$1 ORDER BY sequence', [sourceId])).toEqual(retained);
       expect(await engine.executeRaw('SELECT * FROM pages WHERE source_id=$1 ORDER BY id', [sourceId])).toEqual(pagesBefore);
       expect(await engine.executeRaw("SELECT * FROM op_checkpoints WHERE op='managed-atoms' AND completed_keys->0->>'sourceId'=$1 ORDER BY fingerprint", [sourceId])).toEqual(checkpointsBefore);

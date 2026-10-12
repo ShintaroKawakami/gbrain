@@ -27,6 +27,11 @@
  */
 
 import type { BrainEngine } from '../engine.ts';
+import type { TrustTier } from '../trust/tier.ts';
+import type { ReadEligibility } from '../eligibility/policy.ts';
+import { proactiveEligibility } from '../eligibility/registry.ts';
+import { pageActivationVerdicts, pageKey } from '../eligibility/activation.ts';
+import { renderTrustedInline, trustFields, type TrustFields } from '../eligibility/labels.ts';
 import { normalizeAlias } from '../search/alias-normalize.ts';
 import { CJK_SLUG_CHARS } from '../cjk.ts';
 import { escapeLikePattern } from '../search/sql-ranking.ts';
@@ -54,7 +59,36 @@ const PURE_CJK_RE = new RegExp(`^[${CJK_SLUG_CHARS}]+$`, 'u');
 
 /** Which resolution arm produced a pointer (provenance → honest confidence). */
 /** `recall`: a System One S6 keyword-only retrieval fired by the know-to-ask slot (never produced by the resolver). */
-export type ResolveArm = 'alias' | 'title' | 'slug-suffix' | 'title-surname' | 'cjk-title' | 'recall';
+/**
+ * #6195 arm 2.6 ('weak-title'): a lowercase 2-3-word weak n-gram may match the
+ * exact title of an entity page (person, company, organization) when that
+ * title is globally unique across the considered sources and no other arm
+ * resolved the n-gram. Concepts and other types are excluded: their titles are
+ * common phrases ("open source"). Fail-open: the alias arm already ran.
+ */
+async function weakTitleHits(engine: BrainEngine, sourceIds: string[], privacySql: string, norms: string[]): Promise<PageRow[]> {
+  if (!norms.length) return [];
+  try {
+    const rows = await engine.executeRaw<PageRow>(
+      `SELECT p.slug, p.source_id, p.title, p.type, p.frontmatter, p.compiled_truth
+         FROM pages p
+        WHERE p.deleted_at IS NULL ${privacySql}
+          AND p.source_id = ANY($1::text[])
+          AND lower(p.title) = ANY($2::text[])`,
+      [sourceIds, norms],
+    );
+    const byTitle = new Map<string, PageRow[]>();
+    for (const r of rows) byTitle.set((r.title ?? '').toLowerCase(), [...(byTitle.get((r.title ?? '').toLowerCase()) ?? []), r]);
+    return [...byTitle.values()].filter((list) => list.length === 1 && WEAK_TITLE_ENTITY_TYPES.has(String(list[0].type))).map((list) => list[0]);
+  } catch {
+    return [];
+  }
+}
+
+/** #6195: page types whose exact title a lowercase multi-word n-gram may match. */
+const WEAK_TITLE_ENTITY_TYPES = new Set(['person', 'company', 'organization']);
+
+export type ResolveArm = 'alias' | 'title' | 'slug-suffix' | 'title-surname' | 'cjk-title' | 'weak-title' | 'recall';
 
 /**
  * v0.43 (#2095) — arm → confidence. Lives HERE, next to the arm definitions,
@@ -77,6 +111,7 @@ export const ARM_CONFIDENCE: Record<ResolveArm, number> = {
   title: 0.8,
   'title-surname': 0.72,
   'cjk-title': 0.72,
+  'weak-title': 0.72,
   'slug-suffix': 0.6,
   recall: 0.5,
 };
@@ -100,6 +135,11 @@ export interface ReflexPointer {
    * recover the source candidate.
    */
   matchedNorm?: string;
+  /** #5575 A6: the page's trust tier and short write origin (rendered as a compact label). */
+  trust_tier?: TrustTier;
+  origin?: string;
+  /** #5575 CEO-20: the page carries an unconfirmed instruction-family flag (kept under `trust.agent_activation=allow`). */
+  unconfirmed?: true;
 }
 
 export interface PointerBlock {
@@ -154,6 +194,14 @@ export interface ResolvePointersOpts {
    * via resolveExcludePrivatePages) passes false.
    */
   excludePrivate?: boolean;
+  /**
+   * #5575 (CEO-20, ENG-8): the proactive eligibility the enclosing surface
+   * resolved (read floor plus activation control). Absent: the resolver
+   * applies the `retrieval_reflex` surface policy itself (fail-closed).
+   */
+  eligibility?: ReadEligibility;
+  /** #5575 DX-10: receives the page keys (`source_id:slug`) of deliverable pointers activation control withheld. */
+  onWithheld?: (keys: string[]) => void;
 }
 
 export interface PageRow {
@@ -196,6 +244,7 @@ export async function resolveEntitiesToPointers(
   // norms are tracked so the alias fold can apply the stricter cross-source
   // uniqueness rule to them.
   const weakNorms = new Set<string>();
+  const weakTitleNorms = new Set<string>(); // #6195: multi-word weak n-grams, also probed against exact entity titles (arm 2.6)
   // Surname arm inputs: strong single-token capitalized candidates ≥3 chars.
   const surnamePatterns: string[] = [];
   const surnameTokens: string[] = []; // lower(token), parallel to patterns
@@ -213,6 +262,7 @@ export async function resolveEntitiesToPointers(
       const wnorm = normalizeAlias(c.query);
       if (!wnorm) continue;
       if (!displayByNorm.has(wnorm)) displayByNorm.set(wnorm, c.display);
+      if (c.multiToken) weakTitleNorms.add(wnorm);
       if (!weakNorms.has(wnorm)) {
         weakNorms.add(wnorm);
         aliasNorms.push(wnorm);
@@ -499,12 +549,17 @@ export async function resolveEntitiesToPointers(
     }
   }
 
-  // Build pointers in confidence order, applying suppression + cap.
+  // Arm 2.6 — lowercase multi-word weak exact-title (#6195; see weakTitleHits).
+  if (lexicalArms && weakTitleNorms.size) for (const r of await weakTitleHits(engine, sourceIds, privacySql, [...weakTitleNorms].filter((n) => !resolved.some((x) => x.matchedNorm === n)))) {
+    rowByKey.set(keyOf(r.source_id, r.slug), r); push(r.slug, r.source_id, 'weak-title', (r.title ?? '').toLowerCase());
+  }
+
+  const trust = await gatePointerCandidates(engine, resolved, opts); // #5575 gate; then pointers by confidence, suppression + cap
   const suppression = opts.suppression ?? 'slug-and-title';
   const pointers: ReflexPointer[] = [];
   for (const { slug, source_id, arm, matchedNorm } of resolved) {
     const row = rowByKey.get(keyOf(source_id, slug));
-    if (!row) continue;
+    if (!row || !trust.has(pageKey({ source_id, slug }))) continue;
     // Suppression: already present in PRIOR context. The current turn is
     // deliberately excluded from priorContextText. Under windowing
     // ('slug-only', codex D7) only the slug counts — a slug appears in prior
@@ -519,12 +574,33 @@ export async function resolveEntitiesToPointers(
     }
     const display = displayForRow(row, displayByNorm);
     const synopsis = safeSynopsis(row);
-    pointers.push({ display, slug, source_id, synopsis, arm, confidence: ARM_CONFIDENCE[arm], matchedNorm });
+    pointers.push({ display, slug, source_id, synopsis, arm, confidence: ARM_CONFIDENCE[arm], matchedNorm, ...trust.get(pageKey({ source_id, slug })) });
     if (pointers.length >= maxPointers) break;
   }
 
   if (!pointers.length) return null;
   return { pointers, text: renderPointerBlock(pointers) };
+}
+
+/**
+ * #5575 (CEO-20, A6): one query over every resolved candidate page. Returns
+ * the label fields of the pages a pointer may name; pages below the floor or
+ * unreadable are absent (fail-closed), and activation-suppressed pages are
+ * absent and reported through `opts.onWithheld`.
+ */
+async function gatePointerCandidates(engine: BrainEngine, resolved: ReadonlyArray<{ source_id: string; slug: string }>,
+  opts: ResolvePointersOpts): Promise<Map<string, TrustFields>> {
+  const policy = opts.eligibility ?? await proactiveEligibility({ engine }, 'retrieval_reflex');
+  const verdicts = await pageActivationVerdicts(engine, resolved.map(r => ({ source_id: r.source_id, slug: r.slug })), policy).catch(() => null);
+  const out = new Map<string, TrustFields>();
+  const withheld: string[] = [];
+  for (const [key, v] of verdicts ?? []) {
+    if (v.belowFloor) continue;
+    if (v.suppressed) withheld.push(key.replace('\u0000', ':'));
+    else out.set(key, { ...trustFields(v.tier, v.origin), ...(v.unconfirmed ? { unconfirmed: true as const } : {}) });
+  }
+  if (withheld.length) opts.onWithheld?.(withheld);
+  return out;
 }
 
 /** Recover a display label: prefer the matched candidate surface, else the page title. */
@@ -599,11 +675,19 @@ export function renderPointerBlock(pointers: ReflexPointer[]): string {
     'details — do not answer from memory.',
     '',
   ];
-  for (const p of pointers) {
-    const syn = p.synopsis ? ` — ${p.synopsis}` : '';
-    lines.push(`- **${p.display}** → \`${p.slug}\`${syn} (use get_page before relying on details)`);
-  }
+  for (const p of pointers) lines.push(renderPointerLine(p));
   return lines.join('\n');
+}
+
+/**
+ * One pointer list item. #5575 A6: a labeled pointer carries its compact
+ * trust label before the synopsis (an external page's synopsis is wrapped
+ * inline as data); an unlabeled one renders as before.
+ */
+export function renderPointerLine(p: Pick<ReflexPointer, 'display' | 'slug' | 'synopsis' | 'trust_tier' | 'origin' | 'unconfirmed'>): string {
+  const trusted = p.trust_tier ? ` ${renderTrustedInline(p.synopsis, { trust_tier: p.trust_tier, origin: p.origin ?? 'legacy', ...(p.unconfirmed ? { unconfirmed: true as const } : {}) })}` : '';
+  const syn = p.trust_tier ? (trusted ? ` —${trusted}` : '') : p.synopsis ? ` — ${p.synopsis}` : '';
+  return `- **${p.display}** → \`${p.slug}\`${syn} (use get_page before relying on details)`;
 }
 
 /**

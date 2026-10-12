@@ -8,6 +8,7 @@ import {
   chronicleSettings,
 } from './config.ts';
 import { CHRONICLE_RUN_NOW_ARGV, chronicleBackfillArgv } from './reasons.ts';
+import { agentBlock } from '../agent-markers.ts';
 
 export interface ChronicleProviderView {
   /** Configured chat model id, or null when it cannot be resolved. */
@@ -52,15 +53,27 @@ export async function autoChronicleUpgradeNotice(engine: BrainEngine, view?: Chr
     '[gbrain] Each new or changed meeting, conversation or calendar page gets one',
     '[gbrain] paid chat call that turns it into timeline events (life/events/).',
     '═══════════════════════════════════════════════════════════════',
-    `[AGENT] Relay this to the user: it spends money and sends page text to the configured chat provider${provider.model ? ` (${provider.model})` : ''}.`,
-    `[AGENT] ${cost}`,
-    `[AGENT] Only pages written after this upgrade, dated within ${settings.recentDays} days, run automatically; history is not swept.`,
-    `[AGENT] ${runs}`,
-    ...(provider.chatAvailable ? [] : ['[AGENT] No chat provider is configured, so nothing runs until the user sets one up.']),
-    `[AGENT] Keep it (records the user's answer): ${AUTO_CHRONICLE_KEEP_ARGV.join(' ')}`,
-    `[AGENT] Opt out: ${AUTO_CHRONICLE_OPT_OUT_ARGV.join(' ')}`,
-    `[AGENT] History is paid too; ask before running it. Preview: ${chronicleBackfillArgv({ since, dryRun: true }).join(' ')}`,
-    '[AGENT] Guide: docs/guides/life-chronicle.md',
+    ...agentBlock({
+      ask: 'Keep automatic event extraction on, or turn it off?',
+      why: `It spends money and sends page text to the configured chat provider${provider.model ? ` (${provider.model})` : ''}: one paid chat call per eligible page. ` +
+        `Only pages written after this upgrade, dated within ${settings.recentDays} days, run automatically; history is not swept. ${runs}` +
+        (provider.chatAvailable ? '' : ' No chat provider is configured, so nothing runs until the user sets one up.'),
+      risk: cost,
+      consent: 'paid, egress',
+      actor: 'user',
+      next: 'ask_user',
+      if_yes: `Run ${AUTO_CHRONICLE_KEEP_ARGV.join(' ')} (records the user's answer). History is paid too; ask before running it. ` +
+        `Preview: ${chronicleBackfillArgv({ since, dryRun: true }).join(' ')}. Guide: docs/guides/life-chronicle.md`,
+      if_no: `Run ${AUTO_CHRONICLE_OPT_OUT_ARGV.join(' ')}.`,
+      verify: 'gbrain doctor --only auto_chronicle_default_on --json',
+    }, {
+      showUser: 'Automatic event extraction is now on: each new or changed meeting, conversation or calendar page gets one paid chat call ' +
+        'and its text goes to your chat provider. Keep it on, or turn it off?',
+      decisions: [{ id: 'auto_chronicle', question: 'Keep automatic event extraction on?', default: 'keep',
+        default_reason: 'It is the new default; the user has not answered yet.',
+        options: [{ id: 'keep', label: 'Keep automatic extraction on', argv: [...AUTO_CHRONICLE_KEEP_ARGV] },
+          { id: 'opt_out', label: 'Turn automatic extraction off', argv: [...AUTO_CHRONICLE_OPT_OUT_ARGV] }] }],
+    }).trimEnd().split('\n'),
     '',
   ];
 }

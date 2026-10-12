@@ -25,7 +25,7 @@
  * collapse to the newest row, which carries every entity slug of its group.
  */
 
-import type { BrainEngine, FactRow } from '../engine.ts';
+import type { BrainEngine, FactAttribution, FactRow } from '../engine.ts';
 import { corpusFileSessionId } from '../context/corpus-segments.ts';
 import { writeHeartbeat } from '../context/hook-heartbeat.ts';
 import { normalizeAlias } from '../search/alias-normalize.ts';
@@ -35,7 +35,7 @@ export const CAPTURE_LANES = ['hook:writeback', 'sweep:corpus', 'hook:compact'] 
 export const CAPTURE_DEDUP_WINDOW_MS = 15 * 60 * 1000;
 /** Shadow-mode near-duplicate threshold (measured, never a drop). */
 export const NEAR_DUPLICATE_THRESHOLD = 0.92;
-/** Explicit lanes keep their pre-#5888 cosine rule. */
+/** The bar consolidate clusters untyped facts at (#6023). Explicit-lane supersession reads the per-model threshold instead (supersession-threshold.ts). */
 export const EXPLICIT_DUPLICATE_THRESHOLD = 0.95;
 const CAPTURE_DEDUP_SCAN_LIMIT = 50;
 
@@ -75,10 +75,13 @@ export type CosineVerdict = 'duplicate' | 'near_duplicate' | 'distinct';
 
 /**
  * The one cosine policy for every fact-write decision point. Capture lanes
- * never return `duplicate`; explicit lanes keep the 0.95 rule unchanged.
+ * never return `duplicate`. Explicit lanes return `duplicate` at or above
+ * `explicitThreshold`, the embedding model's calibrated supersession
+ * threshold (supersession-threshold.ts); null (an uncalibrated model) never
+ * returns `duplicate`.
  */
-export function cosineVerdict(source: string | null | undefined, score: number, claim: string, existing: string): CosineVerdict {
-  if (!isCaptureLane(source)) return score >= EXPLICIT_DUPLICATE_THRESHOLD ? 'duplicate' : 'distinct';
+export function cosineVerdict(source: string | null | undefined, score: number, claim: string, existing: string, explicitThreshold: number | null): CosineVerdict {
+  if (!isCaptureLane(source)) return explicitThreshold !== null && score >= explicitThreshold ? 'duplicate' : 'distinct';
   return score >= NEAR_DUPLICATE_THRESHOLD && !claimsDiverge(claim, existing) ? 'near_duplicate' : 'distinct';
 }
 
@@ -121,6 +124,8 @@ export interface CaptureCandidate {
   embedding?: Float32Array | null;
   embeddingModel?: string | null;
   entityInferred?: unknown;
+  /** Speaker of the candidate; a fact another known speaker asserted never matches. */
+  attributedTo?: FactAttribution | null;
 }
 export interface CaptureScope {
   engine: BrainEngine;
@@ -138,8 +143,9 @@ export async function findCaptureDuplicate(scope: CaptureScope, candidate: Captu
   const rows = await scope.engine.executeRaw<{ id: number; entity_slug: string | null; source: string; source_session: string | null; created_at: Date | string }>(
     `SELECT id,entity_slug,source,source_session,created_at FROM facts WHERE source_id=$1 AND visibility=ANY($2::text[])
       AND gbrain_fact_fingerprint(fact)=gbrain_fact_fingerprint($3) AND expired_at IS NULL AND (valid_until IS NULL OR valid_until>now())
+      AND ($4::text IS NULL OR attributed_to IS NULL OR attributed_to=$4)
       ORDER BY created_at DESC, id DESC LIMIT ${CAPTURE_DEDUP_SCAN_LIMIT}`,
-    [scope.sourceId, visibilities, candidate.fact]);
+    [scope.sourceId, visibilities, candidate.fact, candidate.attributedTo ?? null]);
   const conversation = canonicalConversationKey(scope.sessionId);
   const recent = rows.filter(row => Math.abs(new Date(row.created_at).getTime() - scope.anchor.getTime()) <= CAPTURE_DEDUP_WINDOW_MS
     || conversation !== null && isCaptureLane(row.source) && canonicalConversationKey(row.source_session) === conversation);
@@ -156,14 +162,14 @@ export async function findCaptureDuplicate(scope: CaptureScope, candidate: Captu
 export async function findNearDuplicate(scope: CaptureScope, candidate: CaptureCandidate): Promise<number | null> {
   if (!candidate.entitySlug || !candidate.embedding || candidate.entityInferred) return null;
   const found = await scope.engine.findCandidateDuplicates(scope.sourceId, candidate.entitySlug, candidate.fact,
-    { embedding: candidate.embedding, embeddingModel: candidate.embeddingModel, k: 5 });
+    { embedding: candidate.embedding, embeddingModel: candidate.embeddingModel, k: 5, attributedTo: candidate.attributedTo ?? null });
   let best: { id: number; score: number; fact: string } | null = null;
   for (const row of found) {
     if (!row.embedding || row.expired_at || candidate.visibility === 'world' && row.visibility !== 'world') continue;
     const score = cosineSimilarity(candidate.embedding, row.embedding);
     if (!best || score > best.score) best = { id: row.id, score, fact: row.fact };
   }
-  return best && cosineVerdict(scope.lane, best.score, candidate.fact, best.fact) === 'near_duplicate' ? best.id : null;
+  return best && cosineVerdict(scope.lane, best.score, candidate.fact, best.fact, null) === 'near_duplicate' ? best.id : null;
 }
 
 export interface CaptureDedupResult<T> { kept: T[]; duplicateIds: number[]; nearDuplicates: number; }
@@ -172,7 +178,7 @@ export interface CaptureDedupResult<T> { kept: T[]; duplicateIds: number[]; near
  * The shared pre-branch check. `resolve` maps an extracted entity reference
  * to the slug the writers will use (null when unresolved).
  */
-export async function applyCaptureDedup<T extends { fact: string; entity_slug?: string | null; embedding?: Float32Array | null; embedding_model?: string | null; entity_inferred?: unknown }>(
+export async function applyCaptureDedup<T extends { fact: string; entity_slug?: string | null; embedding?: Float32Array | null; embedding_model?: string | null; entity_inferred?: unknown; attributed_to?: FactAttribution | null }>(
   scope: CaptureScope, facts: T[], visibility: 'private' | 'world', resolve: (entity: string | null | undefined) => Promise<string | null>,
 ): Promise<CaptureDedupResult<T>> {
   const started = Date.now();
@@ -180,7 +186,7 @@ export async function applyCaptureDedup<T extends { fact: string; entity_slug?: 
   let failed = false;
   for (const fact of facts) {
     const candidate: CaptureCandidate = { fact: fact.fact, entitySlug: await resolve(fact.entity_slug), visibility,
-      embedding: fact.embedding, embeddingModel: fact.embedding_model, entityInferred: fact.entity_inferred };
+      embedding: fact.embedding, embeddingModel: fact.embedding_model, entityInferred: fact.entity_inferred, attributedTo: fact.attributed_to ?? null };
     try {
       const match = await findCaptureDuplicate(scope, candidate);
       if (match) {
@@ -207,7 +213,7 @@ export async function applyCaptureDedup<T extends { fact: string; entity_slug?: 
  * The backstop's entry point: capture lanes only, slugs resolved the way both
  * writers resolve them, anchored on the turn time when the lane knows it.
  */
-export async function dedupCapturedFacts<T extends { fact: string; entity_slug?: string | null; embedding?: Float32Array | null; embedding_model?: string | null; entity_inferred?: unknown }>(
+export async function dedupCapturedFacts<T extends { fact: string; entity_slug?: string | null; embedding?: Float32Array | null; embedding_model?: string | null; entity_inferred?: unknown; attributed_to?: FactAttribution | null }>(
   ctx: { engine: BrainEngine; sourceId: string; source: string; sessionId: string | null; turnAt?: Date },
   facts: T[], visibility: 'private' | 'world',
   resolveEntity: (engine: BrainEngine, sourceId: string, raw: string) => Promise<{ slug: string; source: string } | null>,
@@ -236,8 +242,11 @@ export type CollapsedHotFact<R extends HotFactRow> = R & { entity_slugs?: string
  * V2 hot-memory collapse: one representative (the newest row) per
  * (fingerprint, entity) group; groups of different entities merge only when
  * the claim names one of them. Input order is preserved by representative.
+ * A group holding claims from two different known speakers (user and
+ * assistant) also splits by speaker, so one never hides the other.
  */
-export async function collapseHotFacts<R extends HotFactRow>(engine: BrainEngine, sourceId: string, rows: R[]): Promise<CollapsedHotFact<R>[]> {
+/** `members` (optional) receives raw row id -> emitted representative id, so delta can advance its facts keyset through raw rows. */
+export async function collapseHotFacts<R extends HotFactRow>(engine: BrainEngine, sourceId: string, rows: R[], members?: Map<number, number>): Promise<CollapsedHotFact<R>[]> {
   const byFingerprint = new Map<string, R[]>();
   for (const row of rows) {
     const key = row.fact_fingerprint ?? `id:${row.id}`;
@@ -250,9 +259,11 @@ export async function collapseHotFacts<R extends HotFactRow>(engine: BrainEngine
   const clusterOf = new Map<R, R[]>();
   for (const group of byFingerprint.values()) {
     const named = group.some(r => r.entity_slug && claimNamesEntity(r.fact, names.get(r.entity_slug) ?? []));
+    const speakers = new Set(group.flatMap(r => r.attributed_to ? [r.attributed_to] : []));
     const clusters = new Map<string, R[]>();
     for (const row of group) {
-      const key = named ? '*' : row.entity_slug ?? '';
+      const entityKey = named ? '*' : row.entity_slug ?? '';
+      const key = speakers.size > 1 ? `${entityKey}\u0000${row.attributed_to ?? ''}` : entityKey;
       clusters.set(key, [...(clusters.get(key) ?? []), row]);
     }
     for (const cluster of clusters.values()) for (const row of cluster) clusterOf.set(row, cluster);
@@ -264,6 +275,7 @@ export async function collapseHotFacts<R extends HotFactRow>(engine: BrainEngine
     if (emitted.has(cluster)) continue;
     emitted.add(cluster);
     const newest = cluster.reduce((a, b) => b.created_at.getTime() > a.created_at.getTime() || b.created_at.getTime() === a.created_at.getTime() && b.id > a.id ? b : a);
+    if (members) for (const r of cluster) members.set(r.id, newest.id);
     const slugs = [...new Set([newest.entity_slug, ...cluster.map(r => r.entity_slug)].filter((s): s is string => !!s))];
     out.push(slugs.length > 1 ? { ...newest, entity_slugs: slugs } : newest);
   }

@@ -4,15 +4,16 @@
  * columns, with a JSONB mirror and fail-closed drift.
  *
  * Protects (spec 4.5): a pre-F3 token authenticates identically on both HTTP
- * paths (2); the unified reader equals lane F's parsers for any stored JSONB,
- * before and after migration (3); `--sources none` after lazy migration denies
+ * paths and its first read converts the row to the columns (2); the unified
+ * reader equals lane F's parsers for any well-formed stored JSONB, before and
+ * after migration, and a malformed one denies every axis (3); `--sources none` after lazy migration denies
  * reads, writes and publication (4); a rescope writes the columns, bumps the
  * revision and leaves the JSONB lane F would have written (5); an older
  * binary's JSONB edit makes that axis deny until an adopt flag resolves it (6);
  * `--if-version` compare-and-set (8); `--migrate-legacy` previews without
  * writing and never changes an effective grant (10). Doctor counts both.
  * The CLI aliases, client path and rotation live in
- * test/auth-rescope-unified.serial.test.ts.
+ * test/auth-rescope-unified.test.ts.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
@@ -84,7 +85,7 @@ function grantFields(row: Record<string, unknown>) {
 }
 
 describe('2. a pre-F3 token authenticates identically on both HTTP paths', () => {
-  test('oauth-provider fallback and the legacy HTTP transport derive the same grant; reads never migrate', async () => {
+  test('oauth-provider fallback and the legacy HTTP transport derive the same grant; the first read converts the row', async () => {
     const t = await legacyToken({ takes_holders: ['world', 'brain'], source_id: ['default', 'other'], allowed_operations: ['get_page', 'search', 'query'] });
     const oauth = await provider().verifyAccessToken(t.token) as unknown as AuthInfo;
     expect(oauth).toMatchObject({ scopes: ['read', 'write'], sourceId: 'default', allowedSources: ['default', 'other'], hasSourceGrant: true,
@@ -100,7 +101,13 @@ describe('2. a pre-F3 token authenticates identically on both HTTP paths', () =>
       const pick = (c: Record<string, unknown>) => ({ scopes: c.scopes, source_id: c.source_id, federated_read: c.federated_read, allowed_operations: c.allowed_operations });
       expect(pick(http)).toEqual(pick(describeAuthCapabilities(oauth)));
     } finally { server.stop?.(true); }
-    expect((await rowOf(t.id)).source_grant).toBeNull();
+    const row = await rowOf(t.id);
+    expect(row).toMatchObject({ source_grant: 'federated', source_id: 'default', federated_read: ['default', 'other'],
+      allowed_operations: ['get_page', 'search', 'query'], takes_holders: ['world', 'brain'], grant_revision: 1 });
+    expect(grantFromTokenRow(row)).toMatchObject({ shape: 'unified', drift: [] });
+    const again = await provider().verifyAccessToken(t.token) as unknown as AuthInfo;
+    expect({ ...again, expiresAt: 0 }).toEqual({ ...oauth, expiresAt: 0 });
+    expect((await rowOf(t.id)).grant_revision).toBe(1);
   }, 60_000);
 });
 
@@ -119,12 +126,17 @@ describe('3. equivalence: the unified reader equals lane F for any stored JSONB,
   const doubleEncoded = values.filter((_, i) => i % 7 === 0).map(v => JSON.stringify(v));
   const garbage = ['{not json', '[1,2]', '"world"'];
 
-  test('legacy rows: authSourcesFromGrant(grantFromTokenRow(row)) equals parseLegacyTokenScope for every value', () => {
+  test('legacy rows: authSourcesFromGrant(grantFromTokenRow(row)) equals parseLegacyTokenScope for every value; malformed rows deny every axis', () => {
     for (const raw of [...values, ...doubleEncoded, ...garbage, [1], 42, null]) {
       const row = { id: randomUUID(), permissions: raw, scopes: null };
       const g = grantFromTokenRow(row);
-      expect({ raw, sources: authSourcesFromGrant(g) }).toEqual({ raw, sources: laneFSources(raw) });
       const permissions = coerceLegacyPermissions(raw);
+      if (raw != null && permissions === undefined) {
+        expect({ raw, malformed: g.permissionsMalformed, sources: authSourcesFromGrant(g), ops: g.allowedOperations, takes: g.takesHolders })
+          .toEqual({ raw, malformed: true, sources: { sourceId: NO_SOURCES, allowedSources: [], hasSourceGrant: true }, ops: [], takes: [] });
+        continue;
+      }
+      expect({ raw, sources: authSourcesFromGrant(g) }).toEqual({ raw, sources: laneFSources(raw) });
       expect({ raw, ops: g.allowedOperations, takes: g.takesHolders }).toEqual({ raw,
         ops: parseLegacyOperationGrant(permissions?.allowed_operations) ?? null, takes: parseTakesHoldersAllowList(permissions?.takes_holders) ?? null });
     }
@@ -150,7 +162,7 @@ describe('3. equivalence: the unified reader equals lane F for any stored JSONB,
   }, 120_000);
 });
 
-describe('4. O-ENG-7 after lazy migration: --sources none denies reads, writes and publication', () => {
+describe('4. O-ENG-7 after on-read conversion: --sources none denies reads, writes and publication', () => {
   test('a pre-F3 token rescoped to none keeps scopes and operations and is denied everywhere', async () => {
     const t = await legacyToken({ takes_holders: ['world'], allowed_operations: ['get_page', 'search', 'query', 'put_page'] });
     const before = await provider().verifyAccessToken(t.token) as unknown as AuthInfo;
@@ -162,8 +174,9 @@ describe('4. O-ENG-7 after lazy migration: --sources none denies reads, writes a
       sourceIncarnation: source.incarnation, slug: 'notes/f3', requestId: randomUUID(), callerIntent: {}, intent: {} });
     await authorizeStoredRequest(engine, admitted);
 
+    expect((await rowOf(t.id)).source_grant).toBe('default');
     const result = await rescope(t.name, '--sources', 'none');
-    expect(result).toMatchObject({ migrated: true, written: true, shape: 'legacy_permissions' });
+    expect(result).toMatchObject({ migrated: false, written: true, shape: 'unified' });
     const row = await rowOf(t.id);
     expect(row).toMatchObject({ source_grant: 'none', source_id: null, federated_read: [], allowed_operations: ['get_page', 'search', 'query', 'put_page'], scopes: ['read', 'write'] });
     await expect(authorizeStoredRequest(engine, admitted)).rejects.toMatchObject({ code: 'permission_denied' });
@@ -207,6 +220,11 @@ describe('5. lazy migration on rescope', () => {
     await rescope(t.name);
     await rescope(t.name, '--sources', 'other', '--dry-run');
     expect((await rowOf(t.id)).source_grant).toBeNull();
+  });
+
+  test('--operations all is client-only and points a token at --reset-default operations', () => {
+    expect(() => parseRescopeTokenArgs(['tok-example', '--operations', 'all'])).toThrow('--reset-default operations');
+    expect(parseRescopeTokenArgs(['tok-example', '--reset-default', 'operations']).reset).toEqual(['operations']);
   });
 });
 

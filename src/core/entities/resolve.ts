@@ -24,6 +24,10 @@
 import type { BrainEngine } from '../engine.ts';
 import { normalizeAlias } from '../search/alias-normalize.ts';
 import { foldNonDecomposingLatin } from '../latin-fold.ts';
+
+/** Lazy: the mentions graph stays out of the OpenClaw plugin's static import graph. */
+const siblingCanonical: typeof import('../mentions/siblings.ts').siblingCanonical = async (...args) =>
+  (await import('../mentions/siblings.ts')).siblingCanonical(...args);
 import { isUndefinedTableError } from '../utils.ts';
 import { privatePagesFilterFragment } from '../search/private-visibility.ts';
 
@@ -173,7 +177,7 @@ async function tryAliasExact(engine: BrainEngine, source_id: string, raw: string
       [source_id, [...new Set(hits.map((h) => h.slug))]],
     );
     const live = [...new Set(rows.map((r) => r.slug))];
-    return live.length === 1 ? live[0] : null;
+    return live.length === 1 ? live[0] : await siblingCanonical(engine, source_id, live);
   } catch (err) {
     if (!isUndefinedTableError(err) && !aliasExactWarned) {
       aliasExactWarned = true;
@@ -277,7 +281,10 @@ export async function resolveEntitySlugWithSource(
   const aliased = await tryAliasExact(engine, source_id, trimmed);
   if (aliased) return { slug: aliased, source: 'alias_exact' };
 
-  if (basenames.length > 1) return { slug: fallbackSlugify(trimmed), source: 'fallback_slugify' };
+  if (basenames.length > 1) {
+    const sibling = await siblingCanonical(engine, source_id, basenames.map(b => b.slug));
+    return sibling ? { slug: sibling, source: 'fuzzy_match' } : { slug: fallbackSlugify(trimmed), source: 'fallback_slugify' };
+  }
 
   if (isBareName(trimmed)) {
     const expanded = await tryUnambiguousPrefixExpansion(engine, source_id, trimmed);
@@ -330,26 +337,36 @@ export async function resolveStrictEntityReference(
       WHERE p.source_id = $1 AND p.deleted_at IS NULL AND p.slug = ANY($2::text[]) ${privacy}`,
     [source_id, [...new Set(slugs)]],
   );
-  const pick = (rows: Array<{ slug: string; type: string | null }>, arm: StrictResolutionArm): StrictResolution | null => {
-    if (rows.length > 1) return { slug: null, miss: 'ambiguous' };
+  // The source pack's linkable entity types (accounts, CRM records, ...) are fact entities too.
+  let linkable: Set<string> | null = null;
+  const isEntity = async (r: { slug: string; type: string | null }) => {
+    if (isFactEntityPage(r.slug, r.type)) return true;
+    linkable ??= new Set((await (await import('../mentions/policy.ts')).loadLinkableTypes(engine, source_id).catch(() => ({ types: [] as string[] }))).types);
+    return r.type != null && linkable.has(r.type);
+  };
+  const pick = async (rows: Array<{ slug: string; type: string | null }>, arm: StrictResolutionArm): Promise<StrictResolution | null> => {
+    if (rows.length > 1) {
+      const sibling = await siblingCanonical(engine, source_id, rows.map(r => r.slug), { excludePrivate: opts.excludePrivate });
+      return sibling ? { slug: sibling, arm } : { slug: null, miss: 'ambiguous' };
+    }
     if (rows.length === 0) return null;
-    return isFactEntityPage(rows[0].slug, rows[0].type) ? { slug: rows[0].slug, arm } : { slug: null, miss: 'not_entity' };
+    return await isEntity(rows[0]) ? { slug: rows[0].slug, arm } : { slug: null, miss: 'not_entity' };
   };
 
   if (looksLikeSlug(trimmed)) {
-    const exact = pick(await live([trimmed]), 'exact_page');
+    const exact = await pick(await live([trimmed]), 'exact_page');
     if (exact) return exact;
   }
   const token = slugify(trimmed);
   if (!trimmed.includes('/') && token.includes('-')) {
-    const basename = pick(await live([...PREFIX_EXPANSION_DIRS, 'concepts'].map(dir => `${dir}/${token}`)), 'basename');
+    const basename = await pick(await live([...PREFIX_EXPANSION_DIRS, 'concepts'].map(dir => `${dir}/${token}`)), 'basename');
     if (basename) return basename;
   }
   const norm = normalizeAlias(trimmed);
   if (norm) {
     try {
       const hits = (await engine.resolveAliases([norm], { sourceId: source_id })).get(norm) ?? [];
-      const aliased = pick(await live(hits.map(h => h.slug)), 'alias_exact');
+      const aliased = await pick(await live(hits.map(h => h.slug)), 'alias_exact');
       if (aliased) return aliased;
     } catch (err) {
       if (!isUndefinedTableError(err)) throw err;
@@ -365,7 +382,7 @@ export async function resolveStrictEntityReference(
           LIMIT 5`,
         [source_id, trimmed.toLowerCase(), token],
       );
-      const named = pick(rows.filter(row => isFactEntityPage(row.slug, row.type) && sameEntityName(trimmed, row.title, row.slug)), 'same_name');
+      const named = await pick(rows.filter(row => isFactEntityPage(row.slug, row.type) && sameEntityName(trimmed, row.title, row.slug)), 'same_name');
       if (named) return named;
     } catch (err) {
       if (!isMissingTrigramError(err)) throw err;
@@ -401,20 +418,53 @@ export async function resolvePhantomCanonical(
   engine: BrainEngine,
   source_id: string,
   phantomSlug: string,
+  opts: { type?: string | null } = {},
 ): Promise<string | null> {
   if (!phantomSlug) return null;
   const trimmed = phantomSlug.trim();
   if (!trimmed) return null;
+  // Type guard: a phantom that declares an entity type only merges into a page
+  // of that type's directory (a company phantom never lands on people/…).
+  const allowedDirs = opts.type ? PHANTOM_TYPE_DIRS[opts.type] : undefined;
+  const typeOk = (slug: string) => !allowedDirs || allowedDirs.some(dir => slug.startsWith(`${dir}/`));
   // The phantom slug is the input; we treat it as the search term too,
   // because phantom slugs ARE the lowercased bare name a fuzzy / prefix
-  // lookup would naturally target.
-  const fuzzy = await tryFuzzyMatch(engine, source_id, trimmed, false);
-  if (fuzzy && fuzzy !== phantomSlug && fuzzy.includes('/')) return fuzzy;
+  // lookup would naturally target. Short or repetitive names carry too little
+  // signal for a trigram match, so they skip the fuzzy tier.
+  if (hasNameSignal(trimmed.replace(/-/g, ' '))) {
+    const fuzzy = await tryFuzzyMatch(engine, source_id, trimmed, false);
+    if (fuzzy && fuzzy !== phantomSlug && fuzzy.includes('/') && typeOk(fuzzy)) return fuzzy;
+  }
 
   const expanded = await tryPrefixExpansion(engine, source_id, slugify(trimmed));
-  if (expanded && expanded !== phantomSlug && expanded.includes('/')) return expanded;
+  if (expanded && expanded !== phantomSlug && expanded.includes('/') && typeOk(expanded)) return expanded;
 
   return null;
+}
+
+/** Entity types whose phantoms may only merge into their own directories. */
+const PHANTOM_TYPE_DIRS: Readonly<Record<string, readonly string[]>> = {
+  person: ['people'],
+  company: ['companies'],
+  project: ['projects'],
+  host: ['hosts'],
+};
+
+/**
+ * Name-specificity gate for fuzzy phantom merges: at least 6 characters or two
+ * tokens, and Shannon character entropy of at least 1.5 bits. Short or
+ * repetitive names ("ai", "aaaa") defer to the stricter prefix tier.
+ */
+export function hasNameSignal(name: string): boolean {
+  const normalized = name.trim().toLowerCase().replace(/\s+/g, ' ');
+  if (normalized.length < 6 && normalized.split(' ').length < 2) return false;
+  const chars = normalized.replace(/ /g, '');
+  if (!chars) return false;
+  const counts = new Map<string, number>();
+  for (const c of chars) counts.set(c, (counts.get(c) ?? 0) + 1);
+  let entropy = 0;
+  for (const n of counts.values()) { const p = n / chars.length; entropy -= p * Math.log2(p); }
+  return entropy >= 1.5;
 }
 
 /**
@@ -585,11 +635,13 @@ async function tryPrefixExpansion(
 }
 
 export function looksLikeSlug(s: string): boolean {
-  // Slug shape: lowercase letters/digits with at least one slash OR matches
-  // [a-z0-9-]+ exactly. Anything with whitespace or capital letters fails.
+  // Slug shape: lowercase Unicode letters/numbers plus the path and slug
+  // separators. Slugs are not ASCII-only: a non-Latin entity page such as
+  // `people/<hangul-name>` must take the exact-match path before fuzzy
+  // matching. Anything with whitespace or uppercase letters still fails.
   if (/\s/.test(s)) return false;
   if (s !== s.toLowerCase()) return false;
-  return /^[a-z0-9/_-]+$/.test(s);
+  return /^[\p{L}\p{N}/_-]+$/u.test(s);
 }
 
 async function tryExactSlug(

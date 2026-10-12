@@ -78,6 +78,8 @@ afterEach(() => {
 });
 
 const home = () => join(tmp, '.gbrain');
+/** #6268: where the hook writes a session file (the spool; no GBRAIN_SOURCE or serve here, so the stamp is unresolved). */
+const spooled = (name: string): string => join(home(), 'transcripts', 'corpus', 'sourced', name.replace(/\.txt(?=$|\.)/, '.src-_unresolved.txt'));
 
 function writePgliteConfig(dataDir: string): void {
   mkdirSync(home(), { recursive: true });
@@ -728,7 +730,7 @@ describe('session-end', () => {
         transcriptRoot: projRoot,
       }),
     ).toBe(0);
-    const corpus = join(home(), 'transcripts', 'corpus', 'sess-red.txt');
+    const corpus = spooled('sess-red.txt');
     expect(existsSync(corpus)).toBe(true);
     const body = readFileSync(corpus, 'utf8');
     expect(body).not.toContain(planted);
@@ -756,11 +758,11 @@ describe('session-end', () => {
       stdin: JSON.stringify({ session_id: 'sess-dup', transcript_path: t2, cwd: ws }),
       transcriptRoot: projRoot,
     });
-    const corpusDir = join(home(), 'transcripts', 'corpus');
+    const corpusDir = join(home(), 'transcripts', 'corpus', 'sourced');
     const files = readdirSync(corpusDir).filter((f) => f.startsWith('sess-dup')).sort();
-    // One corpus file plus the session's one seat sidecar (#4618).
-    expect(files).toEqual(['sess-dup.seat.json', 'sess-dup.txt']);
-    expect(readFileSync(join(corpusDir, 'sess-dup.txt'), 'utf8')).toContain('resumed pass content');
+    // One corpus file plus the session's one seat sidecar (#4618) and its source record (#6268).
+    expect(files).toEqual(['sess-dup.seat.json', 'sess-dup.source.json', 'sess-dup.src-_unresolved.txt']);
+    expect(readFileSync(spooled('sess-dup.txt'), 'utf8')).toContain('resumed pass content');
   });
 
   // #5413: a claude-cli scratch session (gbrain's own LLM call) must never
@@ -780,8 +782,7 @@ describe('session-end', () => {
         transcriptRoot: projRoot,
       }),
     ).toBe(0);
-    const corpusDir = join(home(), 'transcripts', 'corpus');
-    expect(existsSync(join(corpusDir, 'sess-self.txt'))).toBe(false);
+    expect(existsSync(spooled('sess-self.txt'))).toBe(false);
     const hb = await lastHeartbeat();
     expect(hb?.outcome).toBe('ok');
     expect(hb?.segment).toBe('self_transcript');
@@ -798,7 +799,7 @@ describe('session-end', () => {
         transcriptRoot: projRoot,
       }),
     ).toBe(0);
-    expect(existsSync(join(home(), 'transcripts', 'corpus', 'sess-self2.txt'))).toBe(false);
+    expect(existsSync(spooled('sess-self2.txt'))).toBe(false);
     expect((await lastHeartbeat())?.segment).toBe('self_transcript');
   });
 
@@ -813,8 +814,8 @@ describe('session-end', () => {
       stdin: JSON.stringify({ session_id: 'sess-resume', transcript_path: t1, cwd: ws }),
       transcriptRoot: projRoot,
     });
-    const corpusDir = join(home(), 'transcripts', 'corpus');
-    const corpusFile = join(corpusDir, 'sess-resume.txt');
+    const corpusDir = join(home(), 'transcripts', 'corpus', 'sourced');
+    const corpusFile = spooled('sess-resume.txt');
     expect(existsSync(corpusFile)).toBe(true);
 
     // Simulate the sweep having ingested it (completion sidecar) and a stale
@@ -842,11 +843,14 @@ describe('session-end', () => {
     expect(readdirSync(corpusDir).filter((f) => f.includes('.tmp-'))).toEqual([]);
   });
 
-  test('retention prune: corpus files past the default 30d window are removed [G15]', async () => {
+  test('retention prune: extracted corpus files past the default 30d window are removed [G15]', async () => {
     const corpusDir = join(home(), 'transcripts', 'corpus');
     mkdirSync(corpusDir, { recursive: true });
     const oldFile = join(corpusDir, 'ancient.txt');
     writeFileSync(oldFile, 'old corpus\n');
+    // E-N1 (D16): only an extracted file goes at plain retention; an
+    // unextracted one is kept to 3x (test/corpus-retention-uningested.serial.test.ts).
+    writeFileSync(oldFile + '.ingested', '{}\n');
     const old = (Date.now() - 40 * 24 * 3600 * 1000) / 1000;
     utimesSync(oldFile, old, old);
     const freshFile = join(corpusDir, 'fresh.txt');
@@ -884,7 +888,7 @@ describe('session-end', () => {
     const status = JSON.parse(readFileSync(await hookStatusPath(), 'utf8'));
     expect(status.error).toBe('parser_drift');
     // No corpus file for a drift session.
-    expect(existsSync(join(home(), 'transcripts', 'corpus', 'sess-drift.txt'))).toBe(false);
+    expect(existsSync(spooled('sess-drift.txt'))).toBe(false);
   });
 
   test('confinement rejection: degraded heartbeat, no corpus write [S3#8]', async () => {
@@ -897,7 +901,7 @@ describe('session-end', () => {
       transcriptRoot: join(tmp, 'projects'),
     });
     expect((await lastHeartbeat())?.reason).toBe('transcript_outside_projects_dir');
-    expect(existsSync(join(home(), 'transcripts', 'corpus', 'sess-out.txt'))).toBe(false);
+    expect(existsSync(spooled('sess-out.txt'))).toBe(false);
   });
 
   test('GCs this session\'s stop buffer [G15]', async () => {
@@ -1261,6 +1265,38 @@ describe('stop-hook per-turn push [D3]', () => {
     expect(existsSync(join(home(), 'transcripts', 'live', 'sess-stop-push.txt'))).toBe(false);
   });
 
+  test('#5371: tree whose only change is the managed ownership stamp: push_clean, no spawn', async () => {
+    const repo = bootRepo('stop-stamp-only', { clean: true });
+    writeFileSync(join(repo, '.gbrain-owner.json'), '{}');
+    const spawned: string[] = [];
+    await runHook(['stop'], stopIo(repo, spawned));
+    expect(spawned).toEqual([]);
+    expect((await lastHeartbeat())?.reason).toBe('push_clean');
+  });
+
+  test('#5371: a real change beside the ownership stamp is still unpushed work (#6083: its persistence owner pushes it, so no detached push)', async () => {
+    const repo = bootRepo('stop-stamp-dirty', { clean: true });
+    writeFileSync(join(repo, '.gbrain-owner.json'), '{}');
+    writeFileSync(join(repo, 'note.md'), 'unpushed\n');
+    const spawned: string[] = [];
+    await runHook(['stop'], stopIo(repo, spawned));
+    expect(spawned).toEqual([]);
+    expect((await lastHeartbeat())?.reason).toBe('push_managed_coordinator');
+  });
+
+  test('#6083: no hook spawns the refused sources push on a managed canonical worktree', async () => {
+    const repo = bootRepo('managed-all-hooks');
+    writeFileSync(join(repo, '.gbrain-owner.json'), '{}');
+    const spawned: string[] = [];
+    await runHook(['session-start'], { write: () => {}, spawnPush: (root: string) => { spawned.push(root); }, stdin: '', cwd: repo });
+    expect((await lastHeartbeat())?.reason).toBe('push_managed_coordinator');
+    await runHook(['stop'], stopIo(repo, spawned));
+    expect((await lastHeartbeat())?.reason).toBe('push_managed_coordinator');
+    expect(spawned).toEqual([]);
+    await runHook(['session-end'], { write: () => {}, spawnPush: (root: string) => { spawned.push(root); }, stdin: JSON.stringify({ session_id: 'sess-managed-end', cwd: repo }) });
+    expect(spawned).toEqual([]);
+  });
+
   test('corrupt per-root state file is treated as due (fail-open)', async () => {
     process.env.GBRAIN_STOP_PUSH_DEBOUNCE_MIN = '5';
     const repo = bootRepo('stop-corrupt');
@@ -1449,7 +1485,7 @@ const boundaryLine = () =>
   JSON.stringify({ type: 'system', subtype: 'compact_boundary', content: 'conversation compacted' });
 
 describe('compact segment lane (cathedral 5)', () => {
-  const corpus = () => join(home(), 'transcripts', 'corpus');
+  const corpus = () => join(home(), 'transcripts', 'corpus', 'sourced');
 
   test('banks a content-addressed since-last-boundary segment + ledger; heartbeat carries the code', async () => {
     const projRoot = join(tmp, 'projects');
@@ -1546,7 +1582,7 @@ describe('compact segment lane (cathedral 5)', () => {
 });
 
 describe('session-end remainder (cathedral 5 dedup contract)', () => {
-  const corpus = () => join(home(), 'transcripts', 'corpus');
+  const corpus = () => join(home(), 'transcripts', 'corpus', 'sourced');
 
   test('remainder-only when the compact-banked segment covers the boundary window', async () => {
     const projRoot = join(tmp, 'projects');
@@ -1571,7 +1607,7 @@ describe('session-end remainder (cathedral 5 dedup contract)', () => {
       stdin: JSON.stringify({ session_id: 'sess-rem', transcript_path: full, cwd: ws }),
       transcriptRoot: projRoot,
     });
-    const body = readFileSync(join(corpus(), 'sess-rem.txt'), 'utf8');
+    const body = readFileSync(spooled('sess-rem.txt'), 'utf8');
     expect(body).toContain('REMAINDER-TEXT');
     expect(body).not.toContain('W1-ONLY-TEXT'); // already segment-banked — not re-written
     expect((await lastHeartbeat())?.segment).toBe('remainder');
@@ -1590,7 +1626,7 @@ describe('session-end remainder (cathedral 5 dedup contract)', () => {
       stdin: JSON.stringify({ session_id: 'sess-fb', transcript_path: full, cwd: ws }),
       transcriptRoot: projRoot,
     });
-    const body = readFileSync(join(corpus(), 'sess-fb.txt'), 'utf8');
+    const body = readFileSync(spooled('sess-fb.txt'), 'utf8');
     expect(body).toContain('W1-TEXT');
     expect(body).toContain('W2-TEXT');
     expect((await lastHeartbeat())?.segment).toBe('full_fallback');
@@ -1615,7 +1651,7 @@ describe('session-end remainder (cathedral 5 dedup contract)', () => {
       stdin: JSON.stringify({ session_id: 'sess-skip', transcript_path: full, cwd: ws }),
       transcriptRoot: projRoot,
     });
-    expect(existsSync(join(corpus(), 'sess-skip.txt'))).toBe(false);
+    expect(existsSync(spooled('sess-skip.txt'))).toBe(false);
     expect((await lastHeartbeat())?.segment).toBe('skip_covered');
   });
 
@@ -1645,7 +1681,7 @@ describe('session-end remainder (cathedral 5 dedup contract)', () => {
     mkdirSync(corpus(), { recursive: true });
     writeFileSync(join(corpus(), 'gone.txt.progress'), '{}');
     writeFileSync(join(corpus(), 'gone.txt.progress.lock'), '');
-    writeFileSync(join(corpus(), 'sess-prog.txt.progress'), '{"generation":1}');
+    writeFileSync(spooled('sess-prog.txt.progress'), '{"generation":1}');
     const t1 = seedTranscript(join(projRoot, 'p1'), 'r5.jsonl', [userLine('resumed session content')]);
     await runHook(['session-end'], {
       stdin: JSON.stringify({ session_id: 'sess-prog', transcript_path: t1, cwd: ws }),
@@ -1654,7 +1690,7 @@ describe('session-end remainder (cathedral 5 dedup contract)', () => {
     const names = readdirSync(corpus());
     expect(names).not.toContain('gone.txt.progress');
     expect(names).not.toContain('gone.txt.progress.lock');
-    expect(names).toContain('sess-prog.txt');
-    expect(readFileSync(join(corpus(), 'sess-prog.txt.progress'), 'utf8')).toBe('{"generation":1}');
+    expect(names).toContain('sess-prog.src-_unresolved.txt');
+    expect(readFileSync(spooled('sess-prog.txt.progress'), 'utf8')).toBe('{"generation":1}');
   });
 });

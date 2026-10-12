@@ -437,6 +437,7 @@ export async function judgeContradiction(input: JudgeInput): Promise<JudgeOutput
     messages: [{ role: 'user', content: prompt }],
     maxTokens: 1024,
     abortSignal: input.abortSignal,
+    allowFallback: false,
   });
   if (isRefusalResponse(result)) {
     throw new Error('judge refused to answer');

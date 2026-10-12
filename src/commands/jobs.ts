@@ -162,11 +162,13 @@ USAGE
                             [--backoff-jitter 0..1] [--timeout-ms Nms]
                             [--lock-duration-ms Nms]
                             [--idempotency-key K] [--queue Q] [--dry-run]
+                            [--yes] [--max-usd USD|off]  (enrich, subagent: paid)
                             [--redact-secrets]   (shell only; scrubs inherit
                                                   values from stdout/stderr)
   gbrain jobs list [--status S] [--queue Q] [--limit N] [--json]
+  gbrain jobs list --group SPEND_GROUP [--json]
   gbrain jobs get <id> [--json]
-  gbrain jobs cancel <id>
+  gbrain jobs cancel <id> | --group SPEND_GROUP
   gbrain jobs cancel --select "status=waiting|paused,name=synthesize" [--expect <hash> --yes] [--json]
   gbrain jobs retry <id>
   gbrain jobs prune [--older-than 30d] [--dry-run]
@@ -210,8 +212,12 @@ USAGE
       status       Read PID file + audit log, report running / last_start
                    / crashes_24h / max_crashes_exceeded as JSON or human.
                    Exits 0 if running, 1 if not.
-      stop         Send SIGTERM to the supervisor, wait up to 40s for
-                   graceful drain, report outcome. Exits 0 on clean stop.
+      stop         Send SIGTERM to the supervisor, wait up to 45s for
+                   graceful drain, report outcome (--queue names the
+                   queue lock to verify when the audit log cannot).
+                   Exits 0 only on a verified drain: the supervisor's own
+                   stopped row says drained, its workers are gone and its
+                   lock is released; otherwise exits 1 naming the check.
 
     EXIT CODES (start)
       0  clean shutdown (SIGTERM/SIGINT received, worker drained)
@@ -250,7 +256,7 @@ Other subcommands are fully described above.
  * without an entry fall back to JOBS_HELP, which documents them fully.
  */
 const JOBS_SUBCOMMAND_HELP: Record<string, string> = {
-  work: `gbrain jobs work — start a worker daemon (Postgres only)
+  work: `gbrain jobs work — start a worker daemon (PGLite: drain the queue and exit)
 
 USAGE
   gbrain jobs work [--queue Q] [--concurrency N] [--max-rss MB]
@@ -287,8 +293,9 @@ OPTIONS
                        Negative values need root.
 
 NOTES
-  Requires the Postgres engine — PGLite's exclusive file lock cannot host
-  a long-lived daemon. For crash-resilient operation prefer:
+  PGLite's exclusive file lock cannot host a long-lived daemon: there it runs
+  the waiting jobs in the foreground and exits once the queue is drained
+  (stop any running \`gbrain serve\` first). On Postgres prefer:
     gbrain jobs supervisor start --detach --json
 `,
   supervisor: `gbrain jobs supervisor — auto-restarting wrapper around 'gbrain jobs work'
@@ -337,14 +344,15 @@ USAGE
                             [--backoff-type fixed|exponential] [--backoff-delay Nms]
                             [--backoff-jitter 0..1] [--timeout-ms Nms]
                             [--lock-duration-ms Nms]
-                            [--idempotency-key K] [--queue Q] [--dry-run]
-                            [--redact-secrets]
+                            [--idempotency-key K] [--queue Q] [--queue-only]
+                            [--dry-run] [--redact-secrets]
 
 OPTIONS
   --params JSON        Job payload (handler-specific; see HANDLER TYPES in
                        'gbrain jobs --help')
-  --follow             Run inline and stream progress (constructs a real
-                       worker; works on both engines)
+  --follow             Run inline and stream progress (works on both engines;
+                       required on PGLite, which has no background worker)
+  --queue-only         PGLite: queue without running (\`gbrain jobs work\` drains)
   --priority N         Lower runs first (default 0)
   --delay Nms          Delay before the job becomes claimable (default 0)
   --max-attempts N     Retry budget (default 3)
@@ -392,7 +400,7 @@ authorized. IDs, data, schedule and retries persist.
   cancel: `gbrain jobs cancel — cancel a job, or preview-bound bulk cancel of legacy jobs
 
 USAGE
-  gbrain jobs cancel <id>
+  gbrain jobs cancel <id> | --group SPEND_GROUP   (--group: every unfinished job of one paid command's approval)
   gbrain jobs cancel --select "status=waiting|paused,name=synthesize" [--json]
   gbrain jobs cancel --select "status=waiting|paused,name=synthesize" --expect <hash> --yes
 

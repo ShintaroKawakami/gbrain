@@ -1,4 +1,4 @@
-# Sync resumability + lock tuning (v0.42.x, #1794)
+# Sync resumability + lock tuning
 
 `gbrain sync` is resumable and converges under pool exhaustion + repeated kills.
 Progress banks into the append-only `op_checkpoint_paths` table (one row per drained
@@ -15,7 +15,7 @@ hatches — no config-dashboard surface by design):
 | `GBRAIN_SYNC_MAX_CHECKPOINT_FAILURES` | 3 | Consecutive failed flushes (each already retried ~12s) before the run aborts with `reason: 'checkpoint_unavailable'` instead of importing work it can never bank. |
 | `GBRAIN_SYNC_YIELD_EVERY` | 64 | Yield the event loop (`setTimeout(0)`, NOT `setImmediate` — Bun starves the timers phase under a tight setImmediate loop) every N files so the lock-refresh `setInterval` heartbeat fires mid-import. |
 | `GBRAIN_LOCK_STEAL_GRACE_SECONDS` | derived (~600 at 30min TTL) | A holder that refreshed within this window is NOT stolen even if its TTL lapsed (starved-but-alive). Dead holders stop refreshing, age past the grace, and become stealable; TTL stays the backstop. |
-| `GBRAIN_SYNC_STALL_ABORT_SECONDS` | 900 | Progress-aware stall watchdog (#1950): if the import drain makes no forward progress (keyed on file-import progress, NOT the lock heartbeat) for N seconds, abort the run and release the per-source lock so the next `gbrain sync` resumes from the checkpoint. Reports `reason: 'stall_timeout'`. Observed BETWEEN files; a hang inside one file's import isn't interrupted until it returns (the hard deadline is that backstop). 0 disables. Also the progress window of the default hard deadline (see [Large brains](#large-brain-deadlines)); when this is 0 the window stays 900. |
+| `GBRAIN_SYNC_STALL_ABORT_SECONDS` | 900 | Progress-aware stall watchdog: if the import drain makes no forward progress (keyed on file-import progress, NOT the lock heartbeat) for N seconds, abort the run and release the per-source lock so the next `gbrain sync` resumes from the checkpoint. Reports `reason: 'stall_timeout'`. Observed BETWEEN files; a hang inside one file's import isn't interrupted until it returns (the hard deadline is that backstop). 0 disables. Also the progress window of the default hard deadline (see [Large brains](#large-brain-deadlines)); when this is 0 the window stays 900. |
 
 <a id="large-brain-deadlines"></a>
 ## Large brains: deadlines and budgets
@@ -38,17 +38,16 @@ making progress, or stops loudly with the exact command to finish.
 
 A naive `gbrain embed --stale` / large `sync` can saturate a PgBouncer
 transaction-mode pooler and starve the minion supervisor's lock renewals
-(`lock-renewal-failed` → dead jobs). Pacing is the native, composable fix — it
-replaces external SIGSTOP/SIGCONT wrapper scripts. **Opt-in: default mode `off`.**
+(`lock-renewal-failed` → dead jobs). Pacing is built in and composable, so no
+external SIGSTOP/SIGCONT wrapper script is needed. **Opt-in: default mode `off`.**
 
 The composable primitive is `src/core/db-pacer.ts` (`createDbPacer`):
 - **Concurrency cap is the real lever** (caps simultaneous in-flight DB writes =
   pooler slots held). Embed paths set their worker count to `maxConcurrency`
   (single pool, no permit); `sync` uses the shared `acquire()` **permit** because
   each parallel worker owns a separate engine (one budget must span pools).
-- **In-band signal** (`observe(ms)` EWMA from the work's own queries — never
-  blind the way an out-of-band probe pool was). **No probe loop, no
-  `probeLatency` engine method.**
+- **In-band signal** (`observe(ms)` EWMA from the work's own queries). There is
+  no out-of-band probe pool, probe loop, or `probeLatency` engine method.
 - **Cooperative `pace()` sleep** on `setTimeout` (keeps the lock heartbeat
   firing), jittered to avoid a thundering-herd resume. `acquire()`/`pace()` throw
   `AbortError` on cancel; everything else is fail-open (a pacer bug never kills a
@@ -68,18 +67,18 @@ of the search-mode pattern but with **env ABOVE config** (incident escape hatch)
 **Surfaces.** `gbrain embed --stale --pace[=mode]` (bare `--pace` = balanced),
 `--pace-max-concurrency=N`. `--background` carries explicit pace OVERRIDES (not
 the resolved bundle) into the `embed` job payload; the handler re-resolves
-env>config>bundle at execution so `GBRAIN_PACE_*` still wins (CX5). Config-level
+env>config>bundle at execution so `GBRAIN_PACE_*` still wins. Config-level
 `pace.mode` paces EVERY `runEmbedCore` caller (cycle embed, embed-catch-up,
 sync-auto-embed) and the prod `embed-backfill` job automatically. `sync` reads
 env/config. PGLite / mode `off` → no-op pacer.
 
-**Correctness fixes pacing bundles** (longer paced runs widen these): CLI
+**Correctness guards for paced runs** (longer paced runs widen these races): CLI
 `embed --stale` single-flights via the SAME per-source lock key as the
 `embed-backfill` handler (`src/core/embed-backfill-lock.ts`; all-source runs lock
 every source in sorted order) so a hand-run backfill and a queued job can't race
-the NULL→non-NULL upsert (`TODOS:2299`); a **bounded** end-of-run keyset re-entry
+the NULL→non-NULL upsert; a **bounded** end-of-run keyset re-entry
 (max 3 + forward-progress, paced runs only) catches rows inserted behind the
-cursor (`TODOS:2301`); and the embed wall-clock budget timer is re-armed around
+cursor; and the embed wall-clock budget timer is re-armed around
 `pace()` sleeps so paced time doesn't burn the work budget.
 
 `EmbedResult.pacing` carries the end-of-run telemetry (cap, samples, EWMA, slept

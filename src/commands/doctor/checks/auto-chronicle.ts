@@ -12,8 +12,11 @@ import {
   autoChronicleSetting, chronicleSettings,
 } from '../../../core/chronicle/config.ts';
 import { describeChronicleActivity, readChronicleLedgerStats } from '../../../core/chronicle/ledger-stats.ts';
-import { CHRONICLE_REASONS, CHRONICLE_RUN_NOW_ARGV, chronicleBackfillArgv, type ChronicleAction } from '../../../core/chronicle/reasons.ts';
+import { CHRONICLE_REASONS, CHRONICLE_RUN_NOW_ARGV, chronicleBackfillArgv } from '../../../core/chronicle/reasons.ts';
+import type { Action } from '../../../core/agent-output.ts';
+import type { ReadinessState } from '../../../core/readiness.ts';
 import type { Check } from '../../doctor.ts';
+import { doctorVerify, infoCheck } from '../check-fix.ts';
 import { connectedEngine, type DoctorContext, type DoctorEntry } from '../context.ts';
 
 export const AUTO_CHRONICLE_DOCS = 'docs/guides/life-chronicle.md';
@@ -30,10 +33,23 @@ async function chatAvailable(): Promise<boolean> {
   }
 }
 
-function warn(code: string, message: string, fix: ChronicleAction, extra: Record<string, unknown> = {}): Omit<Check, 'name'> {
-  return { status: 'warn', message,
+function warn(code: string, message: string, fix: Action, extra: Record<string, unknown> & { readiness?: ReadinessState } = {}): Omit<Check, 'name'> {
+  return { status: 'warn', message, fix, ...(extra.readiness ? { readiness_state: extra.readiness } : {}),
     details: { code, ...extra, fix, ...(fix.argv ? { fix_hint: command(fix.argv) } : {}), docs: AUTO_CHRONICLE_DOCS } };
 }
+
+/** The two answers to the default-on change; keeping it is the paid choice. */
+const KEEP_FIX: Action = { argv: [...AUTO_CHRONICLE_KEEP_ARGV], consent: ['paid', 'egress'], actor: 'agent', requires_exclusive: false,
+  why: 'Keeping automatic extraction records that the user accepted one paid chat call per eligible page; page text goes to the chat provider.',
+  user_message: 'Automatic event extraction is on: each new or changed meeting, conversation or calendar page gets one paid chat call. Keep it on, or turn it off?',
+  verify: doctorVerify('auto_chronicle_default_on') };
+/** Off by choice: the enable command, information only (turning it on is paid; ask first). */
+const ENABLE_FIX: Action = { argv: [...AUTO_CHRONICLE_KEEP_ARGV], consent: ['paid', 'egress'], actor: 'agent', requires_exclusive: false,
+  why: 'Turns automatic event extraction back on: one paid chat call per eligible new or changed page, page text sent to the chat provider.',
+  verify: doctorVerify('auto_chronicle') };
+const OPT_OUT_FIX: Action = { argv: [...AUTO_CHRONICLE_OPT_OUT_ARGV], consent: [], actor: 'agent', requires_exclusive: false,
+  why: 'Turns automatic extraction off; history stays available on request with chronicle-backfill.',
+  verify: doctorVerify('auto_chronicle_default_on') };
 
 async function runAutoChronicle(ctx: DoctorContext): Promise<Check[]> {
   const engine = connectedEngine(ctx);
@@ -49,9 +65,9 @@ async function runAutoChronicle(ctx: DoctorContext): Promise<Check[]> {
       `Ask the user which they want, then run \`${command(AUTO_CHRONICLE_KEEP_ARGV)}\` or \`${command(AUTO_CHRONICLE_OPT_OUT_ARGV)}\`.`,
       CHRONICLE_REASONS.auto_chronicle_invalid.fix(), { enabled: false, readiness: 'degraded' }) });
   } else if (setting === 'off') {
-    checks.push({ name: 'auto_chronicle', status: 'ok',
-      message: `auto_chronicle is off by choice. History stays available on request (paid; ask the user first): \`${backfillPreview}\`.`,
-      details: { enabled: false, severity: 'info', readiness: 'disabled_by_choice', docs: AUTO_CHRONICLE_DOCS } });
+    checks.push(infoCheck('auto_chronicle',
+      `auto_chronicle is off by choice. History stays available on request (paid; ask the user first): \`${backfillPreview}\`.`,
+      'disabled_by_choice', ENABLE_FIX, { enabled: false, severity: 'info', readiness: 'disabled_by_choice', docs: AUTO_CHRONICLE_DOCS }));
   } else {
     const stats = await readChronicleLedgerStats(engine);
     const chat = await chatAvailable();
@@ -71,7 +87,7 @@ async function runAutoChronicle(ctx: DoctorContext): Promise<Check[]> {
       const [reason] = failures[0];
       const entry = CHRONICLE_REASONS[reason as keyof typeof CHRONICLE_REASONS];
       const ctxFix = { since: daysAgo(7), dailyLimit: settings.dailyLimit, recentDays: settings.recentDays };
-      const fix: ChronicleAction = ('fix' in entry ? entry.fix(ctxFix) : undefined)
+      const fix: Action = ('fix' in entry ? entry.fix(ctxFix) : undefined)
         ?? { argv: ['gbrain', 'doctor', '--json'], consent: [], actor: 'agent', requires_exclusive: false, why: 'Re-check after the next cycle.' };
       checks.push({ name: 'auto_chronicle', ...warn(reason,
         `auto_chronicle is on; ${stats.last7d.failed} automatic extraction(s) failed in 7 days, most often ${reason}: ${entry.meaning(ctxFix)} ${activity}`,
@@ -82,9 +98,10 @@ async function runAutoChronicle(ctx: DoctorContext): Promise<Check[]> {
       const runNow = stats.pending > 0 && !limited
         ? ` Pending pages run in the next autopilot cycle; to run them now: \`${command(CHRONICLE_RUN_NOW_ARGV)}\` (paid).` : limited;
       const noChat = chat ? '' : ' No chat provider is configured, so nothing will be extracted until one is.';
-      checks.push({ name: 'auto_chronicle', status: 'ok',
+      const readiness: ReadinessState = chat ? 'ok' : 'missing';
+      checks.push({ name: 'auto_chronicle', status: 'ok', readiness_state: readiness,
         message: `auto_chronicle is on${raw == null ? ' (default)' : ''}. ${activity}${runNow}${noChat}`,
-        details: { ...summary, severity: 'info', readiness: chat ? 'ok' : 'missing', docs: AUTO_CHRONICLE_DOCS } });
+        details: { ...summary, severity: 'info', readiness, docs: AUTO_CHRONICLE_DOCS } });
     }
   }
 
@@ -103,18 +120,17 @@ async function runAutoChronicle(ctx: DoctorContext): Promise<Check[]> {
 
   if (await autoChronicleNeedsAcknowledgement(engine)) {
     const ceiling = settings.dailyLimit * settings.jobBudgetUsd;
-    checks.push({ name: 'auto_chronicle_default_on', status: 'ok',
-      message: 'Automatic event extraction is on by default and the user has not confirmed it yet. ' +
+    checks.push(infoCheck('auto_chronicle_default_on',
+      'Automatic event extraction is on by default and the user has not confirmed it yet. ' +
         `Each eligible new or changed meeting, conversation or calendar page gets one paid chat call (cap $${settings.jobBudgetUsd.toFixed(2)} per page; ` +
         `at most ${settings.dailyLimit} calls per day, so at most $${ceiling.toFixed(2)} per day for a priced model; an unpriced model has no cap), ` +
         'and page text goes to the configured chat provider. Relay this to the user, then run ' +
         `\`${command(AUTO_CHRONICLE_KEEP_ARGV)}\` to keep it or \`${command(AUTO_CHRONICLE_OPT_OUT_ARGV)}\` to opt out.`,
-      details: { code: 'auto_chronicle_default_on', severity: 'info', ask_user: true, docs: AUTO_CHRONICLE_DOCS,
-        fix: { argv: [...AUTO_CHRONICLE_KEEP_ARGV], consent: ['paid', 'egress'], actor: 'agent', requires_exclusive: false,
-          why: 'Keeping the default records that the user accepted the per-page cost; the alternative is the opt-out.' } satisfies ChronicleAction,
-        decisions: [{ id: 'keep', label: 'Keep automatic extraction on', argv: [...AUTO_CHRONICLE_KEEP_ARGV] },
-          { id: 'opt_out', label: 'Turn automatic extraction off', argv: [...AUTO_CHRONICLE_OPT_OUT_ARGV] }],
-        default: 'keep' } });
+      'ok', KEEP_FIX,
+      { code: 'auto_chronicle_default_on', severity: 'info', ask_user: true, docs: AUTO_CHRONICLE_DOCS, fix: KEEP_FIX,
+        decisions: [{ id: 'keep', label: 'Keep automatic extraction on', argv: [...AUTO_CHRONICLE_KEEP_ARGV], fix: KEEP_FIX },
+          { id: 'opt_out', label: 'Turn automatic extraction off', argv: [...AUTO_CHRONICLE_OPT_OUT_ARGV], fix: OPT_OUT_FIX }],
+        default: 'keep' }));
   } else {
     checks.push({ name: 'auto_chronicle_default_on', status: 'ok', message: 'The auto_chronicle setting is confirmed.' });
   }

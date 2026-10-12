@@ -161,8 +161,11 @@ for (const managed of [true, false]) describe(`${managed ? 'managed' : 'unmanage
     });
   }, 120_000);
 
-  test('patterns credit a seat only when every input reflection shares it', async () => {
-    for (const seats of [['alice-desk', 'alice-desk', 'alice-desk'], ['alice-desk', 'bob-desk', 'alice-desk']]) {
+  // A model updating an existing pattern page copies its frontmatter, seat included; once the reflections
+  // that earned the seat age out of the window, the rewrite must not keep crediting it.
+  test('patterns credit a seat only when every input reflection shares it, and drop one they no longer earn', async () => {
+    for (const [seats, carried] of [[['alice-desk', 'alice-desk', 'alice-desk'], ''], [['alice-desk', 'bob-desk', 'alice-desk'], ''],
+      [['alice-desk', 'bob-desk', 'alice-desk'], 'seat: alice-desk\n']] as const) {
       await fixture(managed, async ({ engine, sourceId, root }) => {
         await engine.setConfig('agent.use_gateway_loop', 'true');
         const ctx = pageCtx(engine, sourceId);
@@ -175,7 +178,7 @@ for (const managed of [true, false]) describe(`${managed ? 'managed' : 'unmanage
           calls++;
           const write = calls === 1;
           return { text: write ? '' : 'Saved the pattern.', blocks: write ? [{ type: 'tool-call', toolCallId: 'pattern-write', toolName: 'brain_put_page', input: {
-            slug: 'wiki/personal/patterns/durability', content: '---\ntitle: Durability pattern\ntype: note\n---\nA recurring theme in [[wiki/personal/reflections/example-0]].',
+            slug: 'wiki/personal/patterns/durability', content: `---\ntitle: Durability pattern\ntype: note\n${carried}---\nA recurring theme in [[wiki/personal/reflections/example-0]].`,
           } }] : [{ type: 'text', text: 'Saved the pattern.' }], stopReason: write ? 'tool_calls' : 'end', usage, model: opts.model!, providerId: 'anthropic' };
         });
         const result = await runPhasePatterns(engine, { brainDir: root, sourceId, dryRun: false, once: true, cycleDate: '2026-09-20' });

@@ -24,13 +24,16 @@ import { loadConfig, toEngineConfig } from '../core/config.ts';
 import { createEngine } from '../core/engine-factory.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { assertAllowedScopes } from '../core/scope.ts';
+import { isTrustTier, TRUST_TIERS, type TrustTier } from '../core/trust/tier.ts';
+import { setMinTrust, setTokenMinTrust } from '../core/trust/min-trust.ts';
 import { generateToken, isUndefinedColumnError, isUndefinedTableError } from '../core/utils.ts';
 import { TOKEN_ID_RE, insertUnifiedToken } from '../core/token-mint.ts';
 import { normalizeTokenScopes } from '../core/legacy-token-scope.ts';
 import { sqlQueryForEngine, type SqlQuery } from '../core/sql-query.ts';
 import { readClientGrant, rescopeClientGrant, resolveGrantProfile, type GrantPatch } from '../core/grants/service.ts';
 import { parseClientRescopeArgs, parseRescopeGrantArgs, splitRescopeTarget, type RescopeGrantArgs } from '../core/grants/cli.ts';
-import { GrantError, grantFromClient } from '../core/grants/model.ts';
+import { GRANT_PROFILES, GrantError, TOKEN_TTL_MAX_SECONDS, TOKEN_TTL_MIN_SECONDS, grantFromClient } from '../core/grants/model.ts';
+import { cliRenderContext, renderAction, type RenderedAction } from '../core/agent-output.ts';
 import { migrateLegacyTokens, parseRescopeTokenArgs, renderLegacyGrantAxis, rescopeLegacyToken, resolveRescopeTarget, type MigrateLegacyResult, type RescopeTokenResult } from '../core/grants/legacy-token.ts';
 
 function hashToken(token: string): string {
@@ -70,8 +73,8 @@ async function withConfiguredSql<T>(
   }
 }
 
-async function create(name: string, opts: { takesHolders?: string[]; scopes?: string[] } = {}) {
-  if (!name) { console.error('Usage: auth create <name> [--takes-holders world,garry] [--scopes read,write]'); process.exit(1); }
+async function create(name: string, opts: { takesHolders?: string[]; scopes?: string[]; minTrust?: TrustTier } = {}) {
+  if (!name) { console.error('Usage: auth create <name> [--takes-holders world,garry] [--scopes read,write] [--min-trust <tier>]'); process.exit(1); }
   // #4043 least-privilege: validate scopes at mint time — the verify path
   // treats a filtered-empty scopes array as DENY, so a typo must fail loudly
   // here, never silently brick (or widen) the token.
@@ -98,14 +101,16 @@ async function create(name: string, opts: { takesHolders?: string[]; scopes?: st
       // permissions JSONB mirror older binaries read). Scopes land in the
       // original-schema scopes TEXT[] column; omitted → NULL → the historical
       // grandfathered full-access grant.
-      await insertUnifiedToken(engine, {
+      const [row] = await insertUnifiedToken(engine, {
         name, tokenHash: hash, ...(opts.scopes !== undefined ? { scopes: opts.scopes } : {}),
         grant: { sources: { kind: 'default' }, takesHolders, allowedOperations: null },
       });
+      // #5575 (CEO-18): the read floor; the CLI is the only writer of it.
+      if (opts.minTrust) await setTokenMinTrust(engine, row!.id, opts.minTrust);
       const scopeLine = opts.scopes !== undefined
         ? `scopes=${JSON.stringify(opts.scopes)}`
         : 'scopes=full access (grandfathered — pass --scopes read,write to narrow)';
-      console.log(`Token created for "${name}" (takes_holders=${JSON.stringify(takesHolders)}, ${scopeLine}):\n`);
+      console.log(`Token created for "${name}" (takes_holders=${JSON.stringify(takesHolders)}, ${scopeLine}${opts.minTrust ? `, min_trust=${opts.minTrust}` : ''}):\n`);
       console.log(`  ${token}\n`);
       console.log('Save this token — it will not be shown again.');
       console.log(`Revoke with: gbrain auth revoke "${name}" (or gbrain auth revoke --id <id> from auth list)`);
@@ -117,6 +122,26 @@ async function create(name: string, opts: { takesHolders?: string[]; scopes?: st
     } else {
       console.error('Error:', e.message);
     }
+    process.exit(1);
+  }
+}
+
+/** `auth set-min-trust <client|token> <tier|none>` (#5575, CEO-18): local-only, the one way to change a read floor. */
+async function setMinTrustCmd(rest: string[]) {
+  const [target, value] = rest.filter(a => !a.startsWith('--'));
+  if (!target || !value || (value !== 'none' && !isTrustTier(value))) {
+    console.error(`Usage: auth set-min-trust <client_id|token id|token name> <${TRUST_TIERS.join('|')}|none>`);
+    process.exit(1);
+  }
+  try {
+    await withConfiguredSql(async (_sql, engine) => {
+      const change = await setMinTrust(engine, target, value === 'none' ? null : value as TrustTier);
+      if (rest.includes('--json')) { console.log(JSON.stringify(change)); return; }
+      console.log(`${change.kind === 'oauth_client' ? 'OAuth client' : 'Token'} "${change.name}" (${change.id}): min_trust ${change.before ?? 'none'} -> ${change.after ?? 'none'}.`);
+      console.log('Applies on its next request: reads never return rows below this tier, whatever min_trust the client asks for.');
+    });
+  } catch (e: any) {
+    console.error('Error:', e.message);
     process.exit(1);
   }
 }
@@ -383,11 +408,10 @@ export interface RegisterClientArgs {
   tokenTtlSeconds: number | undefined;
 }
 
-/** --token-ttl bounds: 1 minute .. 90 days. The SERVER default for CLI-minted
+/** --token-ttl bounds: 1 minute .. 90 days (defined in src/core/grants/model.ts). The SERVER default for CLI-minted
  * access tokens is 3600s (oauth-provider.ts tokenTtl) — NOT 30 days; callers
  * that promise long-lived tokens must write oauth_clients.token_ttl. */
-export const TOKEN_TTL_MIN_SECONDS = 60;
-export const TOKEN_TTL_MAX_SECONDS = 7_776_000;
+export { TOKEN_TTL_MIN_SECONDS, TOKEN_TTL_MAX_SECONDS };
 
 /**
  * Shared --token-ttl value parser (auth register-client + agent register).
@@ -836,8 +860,9 @@ async function rescopeClientWith(engine: BrainEngine, clientId: string, parsed: 
   console.log(`OAuth client ${parsed.dryRun ? 'grant preview' : 'rescoped'}: ${result.after.clientName} (${clientId})`);
   console.log(`  Revision: ${result.before.revision} -> ${result.after.revision}`);
   console.log(`  Scopes: ${result.after.scopes.join(' ') || '<none>'}`);
-  console.log(`  Write source: ${result.after.sourceId}`);
-  console.log(`  Federated reads: ${result.after.federatedRead.join(', ')}`);
+  console.log(`  Write source: ${result.after.sourcesNone ? 'none (every read and write refused)' : result.after.sourceId}`);
+  console.log(`  Federated reads: ${result.after.federatedRead.join(', ') || '<none>'}`);
+  console.log(`  Takes holders: ${result.after.takesHolders === null ? 'world (default)' : result.after.takesHolders.join(', ') || 'none (every take hidden)'}`);
   console.log(`  Tool surface: ${result.after.surface ?? '<server default>'}`);
   console.log(`  Delegated spending: ${result.after.budgetUsdPerDay === null ? 'unlimited' : '$' + result.after.budgetUsdPerDay + '/day'}`);
   console.log('Restrictions apply on the next request. Added scopes require a new access token; the client secret is unchanged.');
@@ -926,6 +951,64 @@ export interface ClientRow {
   surface_set_by: string | null;
   source_id: string | null;
   federated_read: string[] | null;
+  /** The operation snapshot: NULL = none stored; absent = the brain predates the column. */
+  allowed_operations?: string[] | null;
+  /** Soft-revoke stamp (`auth` lifecycle revoke); absent on schemas without it. */
+  deleted_at?: string | Date | null;
+}
+
+/** The operation-snapshot axis of one client, as `auth clients` reports it. */
+export interface ClientOperationsView {
+  /** 'all' = no snapshot (SQL NULL); [] = deny-all; a list = pinned; 'unavailable' = old schema. */
+  operations: 'all' | string[] | 'unavailable';
+  operations_state: 'all' | 'none' | 'list' | 'unavailable';
+  /** true only for 'all': operations later upgrades add are reachable without a regrant. */
+  includes_future_operations: boolean | null;
+  revoked: boolean;
+  /** The re-pin command for a live client with no snapshot. */
+  fix?: RenderedAction;
+}
+
+/**
+ * Four distinct operation states (#6008 visibility): SQL NULL is `all` on the
+ * operation-snapshot axis only (scopes, surface and source limits still
+ * apply); an empty array refuses every operation; a list is pinned; a schema
+ * without the column is `unavailable`, never guessed.
+ */
+export function clientOperationsView(row: ClientRow): ClientOperationsView {
+  const revoked = row.deleted_at != null;
+  const ops = row.allowed_operations;
+  if (ops === undefined) return { operations: 'unavailable', operations_state: 'unavailable', includes_future_operations: null, revoked };
+  if (ops === null) {
+    const view: ClientOperationsView = { operations: 'all', operations_state: 'all', includes_future_operations: true, revoked };
+    if (revoked) return view;
+    view.fix = renderAction({
+      argv: ['gbrain', 'auth', 'rescope', '--client', row.client_id, '--operations', '<OPERATIONS>'],
+      inputs: [{ name: 'OPERATIONS', how: `Ask the user which operations this client should keep (comma-separated, e.g. search,get_page,remember), or pin a profile instead: gbrain auth rescope --client ${row.client_id} --profile <profile> (${GRANT_PROFILES.join(', ')}).` }],
+      consent: [], actor: 'agent', requires_exclusive: false,
+      why: 'This client has no operation snapshot, so it reaches every operation its scopes and surface allow, including operations later upgrades add. A pinned list or profile keeps new operations from arriving without a regrant.',
+      verify: { argv: ['gbrain', 'auth', 'clients', '--json'] },
+    }, cliRenderContext());
+    return view;
+  }
+  return { operations: ops, operations_state: ops.length === 0 ? 'none' : 'list', includes_future_operations: false, revoked };
+}
+
+/** Text lines for the operation axis (and revocation) of one client. */
+export function clientOperationsLines(row: ClientRow): string[] {
+  const view = clientOperationsView(row);
+  const lines: string[] = [];
+  if (view.revoked) lines.push(`  revoked: ${row.deleted_at instanceof Date ? row.deleted_at.toISOString() : String(row.deleted_at)} (credentials no longer work)`);
+  if (view.operations_state === 'unavailable') lines.push('  operations: unavailable (this brain predates per-client operation snapshots)');
+  else if (view.operations_state === 'none') lines.push('  operations: none (deny-all snapshot)');
+  else if (view.operations_state === 'list') {
+    const ops = view.operations as string[];
+    lines.push(`  operations: ${ops.length} pinned (${ops.slice(0, 8).join(', ')}${ops.length > 8 ? ', ...' : ''})`);
+  } else {
+    lines.push('  operations: all (no snapshot; includes operations later upgrades add; scopes, surface and source limits still apply)');
+    if (view.fix) lines.push(`    re-pin: gbrain auth rescope --client ${row.client_id} --operations <op,...>  (or --profile <profile>)`);
+  }
+  return lines;
 }
 
 /**
@@ -943,8 +1026,17 @@ export async function listClientRows(engine: BrainEngine): Promise<ClientRow[]> 
   // 42703 by code; the column list covers message-only (code-less) variants.
   const isSchemaShapeError = (e: unknown): boolean =>
     isUndefinedTableError(e) ||
-    ['surface', 'surface_set_by', 'source_id', 'federated_read']
+    ['allowed_operations', 'deleted_at', 'surface', 'surface_set_by', 'source_id', 'federated_read']
       .some(col => isUndefinedColumnError(e, col));
+  try {
+    return await engine.executeRaw<ClientRow>(
+      `SELECT client_id, client_name, scope, surface, surface_set_by, source_id, federated_read, allowed_operations, deleted_at
+         FROM oauth_clients ORDER BY client_name, client_id`,
+    );
+  } catch (e) {
+    // Brain predates the operation-snapshot columns: operations read `unavailable`.
+    if (!isSchemaShapeError(e)) throw e;
+  }
   try {
     return await engine.executeRaw<ClientRow>(
       `SELECT client_id, client_name, scope, surface, surface_set_by, source_id, federated_read
@@ -970,6 +1062,19 @@ export async function listClientRows(engine: BrainEngine): Promise<ClientRow[]> 
   return bare.map(r => ({ ...r, surface: null, surface_set_by: null, source_id: null, federated_read: null }));
 }
 
+/** Clients whose stored or outstanding access-token lifetime an upgrade brought inside the 90-day maximum. */
+export async function tokenLifetimeClampedClients(engine: BrainEngine): Promise<Set<string>> {
+  try {
+    const rows = await engine.executeRaw<{ client_id: string }>(
+      `SELECT DISTINCT client_id FROM oauth_grant_audit WHERE actor = 'migration' AND action IN ('clamp_token_ttl', 'shorten_access_tokens')`,
+    );
+    return new Set(rows.map(r => r.client_id));
+  } catch (e) {
+    if (isUndefinedTableError(e)) return new Set();
+    throw e;
+  }
+}
+
 async function clientsCmd(args: string[]) {
   const usageLine = 'Usage: auth clients [--usage] [--days N] [--json]';
   let parsed: { usage: boolean; days: number; json: boolean };
@@ -985,6 +1090,7 @@ async function clientsCmd(args: string[]) {
       // Degrade ladder lives in listClientRows: a pre-migration brain still
       // gets the listing (missing columns render as null) instead of an error.
       const clients = await listClientRows(engine);
+      const lifetimeClamped = await tokenLifetimeClampedClients(engine);
 
       const { readClientOpUsage } = await import('../core/mcp-usage.ts');
       const usage = parsed.usage ? await readClientOpUsage(engine, { days: parsed.days }) : [];
@@ -1004,6 +1110,9 @@ async function clientsCmd(args: string[]) {
             surface_set_by: c.surface_set_by,
             source_id: c.source_id,
             federated_read: c.federated_read,
+            ...clientOperationsView(c),
+            revoked_at: c.deleted_at ?? null,
+            token_lifetime_clamped: lifetimeClamped.has(c.client_id),
             usage: usageByToken.get(c.client_id) ?? null,
           })),
           // Legacy bearer tokens seen in the window (no oauth_clients row).
@@ -1026,6 +1135,8 @@ async function clientsCmd(args: string[]) {
           : '<server/config resolution>';
         console.log(`  scopes: ${c.scope ?? '<none>'}    surface: ${surfaceStr}`);
         console.log(`  write source: ${c.source_id ?? '<none>'}    federated reads: ${(c.federated_read ?? []).join(', ') || '<none>'}`);
+        for (const line of clientOperationsLines(c)) console.log(line);
+        if (lifetimeClamped.has(c.client_id)) console.log('  access-token lifetime: clamped to the 90-day maximum by an upgrade (docs/mcp/ADMIN.md#access-token-lifetime)');
         if (parsed.usage) {
           if (u) {
             const auto = u.likely_automation ? '    [automation-shaped: >90% context_pack/delta]' : '';
@@ -1070,7 +1181,7 @@ async function clientsCmd(args: string[]) {
  * register-client #3990 normalization precedent). Validation against the
  * allowed scope set happens in create() so the error path exits cleanly.
  */
-export function parseAuthCreateArgs(rest: string[]): { name: string; takesHolders?: string[]; scopes?: string[]; error?: string } {
+export function parseAuthCreateArgs(rest: string[]): { name: string; takesHolders?: string[]; scopes?: string[]; minTrust?: TrustTier; error?: string } {
   const takesIdx = rest.indexOf('--takes-holders');
   const takesValue = takesIdx >= 0 ? rest[takesIdx + 1] : undefined;
   // Fail closed on a missing/flag-like value: `--scopes` as the last arg
@@ -1090,8 +1201,13 @@ export function parseAuthCreateArgs(rest: string[]): { name: string; takesHolder
   const scopes = scopesValue !== undefined
     ? scopesValue.split(/[\s,]+/).map(s => s.trim()).filter(Boolean)
     : undefined;
-  const positional = rest.find(a => !a.startsWith('--') && a !== takesValue && a !== scopesValue);
-  return { name: positional || '', takesHolders, ...(scopes !== undefined ? { scopes } : {}) };
+  const minIdx = rest.indexOf('--min-trust');
+  const minValue = minIdx >= 0 ? rest[minIdx + 1] : undefined;
+  if (minIdx >= 0 && !isTrustTier(minValue)) {
+    return { name: '', error: `the min-trust flag requires a tier: ${TRUST_TIERS.join(', ')}` };
+  }
+  const positional = rest.find(a => !a.startsWith('--') && a !== takesValue && a !== scopesValue && a !== minValue);
+  return { name: positional || '', takesHolders, ...(scopes !== undefined ? { scopes } : {}), ...(isTrustTier(minValue) ? { minTrust: minValue } : {}) };
 }
 
 const AUTH_USAGE = `GBrain Token Management
@@ -1104,7 +1220,7 @@ Admin dashboard login (running HTTP server):
   This does not create an MCP bearer token. See docs/mcp/DEPLOY.md.
 
 Usage:
-  gbrain auth create <name> [--takes-holders world,garry,brain] [--scopes read,write]
+  gbrain auth create <name> [--takes-holders world,garry,brain] [--scopes read,write] [--min-trust <tier>]
                                                           Create a legacy bearer token. v0.28: --takes-holders
                                                           sets the per-token allow-list for the takes.holder
                                                           field (default: ["world"]). MCP-bound calls to
@@ -1112,6 +1228,12 @@ Usage:
                                                           --scopes narrows the token to the listed op scopes
                                                           (comma or space separated; omit = full access,
                                                           grandfathered).
+                                                          --min-trust sets the token's read floor: reads never
+                                                          return rows below that trust tier (${TRUST_TIERS.join(', ')});
+                                                          memory_confirm in --scopes lets the token confirm
+                                                          memory as you (local CLI only; never via admin API)
+  gbrain auth set-min-trust <client|token> <tier|none>    Set or clear the read floor of an OAuth client (id)
+                                                          or legacy token (id or name). Local CLI only.
   gbrain auth list                                         List all tokens (id, scopes, usage)
   gbrain auth revoke <name>                                Revoke a legacy token (ALL active rows with that name)
   gbrain auth revoke --id <uuid>                           Revoke exactly one token by id (names are not unique)
@@ -1122,10 +1244,13 @@ Usage:
                                                           grants. A bare name matching both a token and a
                                                           client refuses; pass --token or --client.
      --sources <id1,id2,...|none>                         Source grant (first = write source; 'none' = deny-all,
-                                                          tokens only — revoke a client with revoke-client)
+                                                          scopes and secret unchanged)
      --read-sources <id1,id2,...>                         Client only: a read set that differs from --sources
-     --takes-holders <h1,h2,...|none>                     Token only: takes-holder allow-list ('none' = deny-all)
-     --operations <op1,op2,...|none>                      Operation snapshot ('none' = deny-all)
+     --takes-holders <h1,h2,...|none>                     Takes-holder allow-list (default world; 'none' = deny-all)
+     --operations <op1,op2,...|none|all>                  Operation snapshot ('none' = deny-all). Client only:
+                                                          'all' = no snapshot: every operation the scopes and the
+                                                          surface allow, including ones later upgrades add; clears
+                                                          the profile (tokens: --reset-default operations)
      --scopes <read,write,...>                            Replace the scopes
      --reset-default <sources,takes-holders,operations>   Token only: restore the auth create default for those axes
      --refresh-operations [--add <op,...>|--all-new]      Token only: preview operations added since the snapshot;
@@ -1177,7 +1302,9 @@ Usage:
                                                           so server/config resolution applies again). Always
                                                           bounded by the server's --surface ceiling.
   gbrain auth clients [--usage] [--days N] [--json]       List OAuth clients with scopes, write source, federated
-                                                          reads + tool surface. --usage
+                                                          reads, tool surface + operation snapshot ('all' = no
+                                                          snapshot, includes future operations; re-pin with
+                                                          auth rescope --client <id> --operations|--profile). --usage
                                                           joins per-client op-call counts, top ops, and last-seen
                                                           from mcp_request_log (default 30d window; HTTP clients
                                                           only — stdio use is not logged). Automation-shaped
@@ -1214,9 +1341,10 @@ export async function runAuth(args: string[]): Promise<void> {
         console.error(`Error: ${parsed.error}`);
         process.exit(1);
       }
-      await create(parsed.name, { takesHolders: parsed.takesHolders, scopes: parsed.scopes });
+      await create(parsed.name, { takesHolders: parsed.takesHolders, scopes: parsed.scopes, minTrust: parsed.minTrust });
       return;
     }
+    case 'set-min-trust': await setMinTrustCmd(rest); return;
     case 'list': await list(); return;
     case 'revoke': {
       if (rest[0] === '--id') { await revokeById(rest[1] || ''); return; }

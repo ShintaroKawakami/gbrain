@@ -37,10 +37,12 @@ import {
   dcrScopeViolation,
 } from './scope.ts';
 import type { AuthInfo as CoreAuthInfo } from './operations.ts';
-import { authSourcesFromGrant, grantFromRow, grantFromTokenRow, normalizeGrantBrain, intersectGrantedScopes, type GrantPatch } from './grants/model.ts';
+import { TOKEN_TTL_MAX_SECONDS, authSourcesFromGrant, grantFromRow, normalizeGrantBrain, intersectGrantedScopes, type GrantPatch } from './grants/model.ts';
 import { assertValidSlugPrefixes, pgArray } from './grants/encoding.ts';
 import { rescopeOAuthClient, type RescopeClientOptions, type RescopeClientResult } from './grants/rescope.ts';
 import { grantValidationContext, validateClientGrant, insertClientGrant, assertGrantPatch } from './grants/service.ts';
+import { resolveTokenGrant, touchTokenLastUsed } from './grants/legacy-token.ts';
+import { NO_SOURCES } from './source-id.ts';
 
 /**
  * A slug-prefix write binding is only meaningful if every entry actually
@@ -52,6 +54,7 @@ import { grantValidationContext, validateClientGrant, insertClientGrant, assertG
 export { assertValidSlugPrefixes } from './grants/encoding.ts';
 
 import type { SqlQuery, SqlValue } from './sql-query.ts';
+import { storedMinTrust } from './trust/tier.ts';
 export type { SqlQuery, SqlValue };
 
 export interface AgentClientBindings {
@@ -440,60 +443,81 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
     // == write scope). Operators who need narrower / wider scope rescope
     // via the CLI later. Pre-v60/v61 brain falls through to the legacy
     // projection (no source_id / federated_read column yet).
-    try {
-      await this.sql`
-        INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris,
-                                    grant_types, scope, token_endpoint_auth_method,
-                                    client_id_issued_at, source_id, federated_read)
-        VALUES (${clientId}, ${secretHash}, ${client.client_name || 'unnamed'},
-                ${pgArray((client.redirect_uris || []).map(String))},
-                ${pgArray(grantTypes)},
-                ${registeredScope}, ${authMethod},
-                ${now}, ${'default'}, ${pgArray(['default'])})
-      `;
-    } catch (err) {
-      if (isUndefinedColumnError(err, 'federated_read')) {
-        try {
-          await this.sql`
-            INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris,
-                                        grant_types, scope, token_endpoint_auth_method,
-                                        client_id_issued_at, source_id)
-            VALUES (${clientId}, ${secretHash}, ${client.client_name || 'unnamed'},
-                    ${pgArray((client.redirect_uris || []).map(String))},
-                    ${pgArray(grantTypes)},
-                    ${registeredScope}, ${authMethod},
-                    ${now}, ${'default'})
-          `;
-        } catch (err2) {
-          if (isUndefinedColumnError(err2, 'source_id')) {
-            await this.sql`
-              INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris,
-                                          grant_types, scope, token_endpoint_auth_method,
-                                          client_id_issued_at)
-              VALUES (${clientId}, ${secretHash}, ${client.client_name || 'unnamed'},
-                      ${pgArray((client.redirect_uris || []).map(String))},
-                      ${pgArray(grantTypes)},
-                      ${registeredScope}, ${authMethod},
-                      ${now})
-            `;
-          } else {
-            throw err2;
-          }
-        }
-      } else if (isUndefinedColumnError(err, 'source_id')) {
+    // #6202: registered_via='dcr' marks the client as self-registered, so its
+    // owner picks its source at the first consent (OAuthGrants.begin). A brain
+    // without the column yet (new server before the migration) falls through to
+    // the unmarked ladder: the client keeps today's read-only consent.
+    const insertUnmarked = async (): Promise<void> => {
+      try {
         await this.sql`
           INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris,
                                       grant_types, scope, token_endpoint_auth_method,
-                                      client_id_issued_at)
+                                      client_id_issued_at, source_id, federated_read)
           VALUES (${clientId}, ${secretHash}, ${client.client_name || 'unnamed'},
                   ${pgArray((client.redirect_uris || []).map(String))},
                   ${pgArray(grantTypes)},
                   ${registeredScope}, ${authMethod},
-                  ${now})
+                  ${now}, ${'default'}, ${pgArray(['default'])})
         `;
-      } else {
-        throw err;
+      } catch (err) {
+        if (isUndefinedColumnError(err, 'federated_read')) {
+          try {
+            await this.sql`
+              INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris,
+                                          grant_types, scope, token_endpoint_auth_method,
+                                          client_id_issued_at, source_id)
+              VALUES (${clientId}, ${secretHash}, ${client.client_name || 'unnamed'},
+                      ${pgArray((client.redirect_uris || []).map(String))},
+                      ${pgArray(grantTypes)},
+                      ${registeredScope}, ${authMethod},
+                      ${now}, ${'default'})
+            `;
+          } catch (err2) {
+            if (isUndefinedColumnError(err2, 'source_id')) {
+              await this.sql`
+                INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris,
+                                            grant_types, scope, token_endpoint_auth_method,
+                                            client_id_issued_at)
+                VALUES (${clientId}, ${secretHash}, ${client.client_name || 'unnamed'},
+                        ${pgArray((client.redirect_uris || []).map(String))},
+                        ${pgArray(grantTypes)},
+                        ${registeredScope}, ${authMethod},
+                        ${now})
+              `;
+            } else {
+              throw err2;
+            }
+          }
+        } else if (isUndefinedColumnError(err, 'source_id')) {
+          await this.sql`
+            INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris,
+                                        grant_types, scope, token_endpoint_auth_method,
+                                        client_id_issued_at)
+            VALUES (${clientId}, ${secretHash}, ${client.client_name || 'unnamed'},
+                    ${pgArray((client.redirect_uris || []).map(String))},
+                    ${pgArray(grantTypes)},
+                    ${registeredScope}, ${authMethod},
+                    ${now})
+          `;
+        } else {
+          throw err;
+        }
       }
+    };
+    try {
+      await this.sql`
+        INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris,
+                                    grant_types, scope, token_endpoint_auth_method,
+                                    client_id_issued_at, source_id, federated_read, registered_via)
+        VALUES (${clientId}, ${secretHash}, ${client.client_name || 'unnamed'},
+                ${pgArray((client.redirect_uris || []).map(String))},
+                ${pgArray(grantTypes)},
+                ${registeredScope}, ${authMethod},
+                ${now}, ${'default'}, ${pgArray(['default'])}, ${'dcr'})
+      `;
+    } catch (err) {
+      if (!isUndefinedColumnError(err, 'registered_via')) throw err;
+      await insertUnmarked();
     }
 
     // #2179: optional `token_ttl_seconds` hint from the DCR request body,
@@ -564,8 +588,8 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     // token TTL — never a fixed permissive ceiling — so a self-registering
     // client cannot elect a longer-lived token than the server default
     // unless the admin explicitly configured a wider window.
-    const dcrTtlMin = options.dcrTtlMinSeconds ?? DEFAULT_DCR_TTL_MIN_SECONDS;
-    const dcrTtlMax = options.dcrTtlMaxSeconds ?? Math.max(this.tokenTtl, dcrTtlMin);
+    const dcrTtlMin = Math.min(options.dcrTtlMinSeconds ?? DEFAULT_DCR_TTL_MIN_SECONDS, TOKEN_TTL_MAX_SECONDS);
+    const dcrTtlMax = Math.min(options.dcrTtlMaxSeconds ?? Math.max(this.tokenTtl, dcrTtlMin), TOKEN_TTL_MAX_SECONDS);
     this._clientsStore = new GBrainClientsStore(
       this.sql,
       options.allowClientCredentialsDcr === true,
@@ -850,6 +874,11 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       // fail-open by design: the server ceiling still bounds every request.
       const rowSurface = typeof row.surface === 'string' ? row.surface : undefined;
       const rowSurfaceSetBy = typeof row.surface_set_by === 'string' ? row.surface_set_by : undefined;
+      // The explicit no-source grant: every read and write refuses
+      // (NO_SOURCES, the same sentinel a `--sources none` token carries).
+      const sourcesNone = currentGrant.source_grant === 'none';
+      const clientHolders = Array.isArray(currentGrant.takes_holders)
+        ? (currentGrant.takes_holders as unknown[]).filter((h): h is string => typeof h === 'string') : undefined;
       return {
         token,
         clientId: row.client_id as string,
@@ -862,6 +891,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
         grantRevision: Number(row.grant_revision ?? 0),
         grantProfile: typeof row.grant_profile === 'string' ? row.grant_profile : null,
         grantRepairReasons: Array.isArray(row.grant_repair_reasons) ? row.grant_repair_reasons as string[] : [],
+        tokenTtlSeconds: currentGrant.token_ttl == null ? null : Number(currentGrant.token_ttl),
         boundTools: Array.isArray(row.bound_tools) ? row.bound_tools as string[] : null,
         boundSourceId: typeof row.bound_source_id === 'string' ? row.bound_source_id : null,
         boundBrainId: typeof row.bound_brain_id === 'string' ? row.bound_brain_id : null,
@@ -874,11 +904,14 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
         // v0.34.1 (#861, D2): source-isolation scope from oauth_clients.
         // Undefined when the row predates v60 or when the brain itself
         // predates v60 (fell through to the legacy projection above).
-        sourceId: rowSourceId,
+        sourceId: sourcesNone ? NO_SOURCES : rowSourceId,
         // v0.34.1 (#876): federated read scope. sourceScopeOpts in
         // operations.ts prefers this array over scalar sourceId when set
         // and non-empty.
-        allowedSources,
+        allowedSources: sourcesNone ? [] : allowedSources,
+        ...(sourcesNone ? { hasSourceGrant: true } : {}),
+        // Per-client takes holders; undefined → the /mcp dispatch site's fail-closed ['world'].
+        ...(clientHolders ? { takesHoldersAllowList: clientHolders } : {}),
         // v0.42.72.0: write fence — consumed by enforceClientSlugFence in
         // operations.ts on every direct slug-mutating write op.
         boundSlugPrefixes,
@@ -886,6 +919,8 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
         // WP4: per-client surface + operator-lock marker (amendment 19).
         ...(rowSurface !== undefined ? { surface: rowSurface } : {}),
         ...(rowSurfaceSetBy !== undefined ? { surfaceSetBy: rowSurfaceSetBy } : {}),
+        // #5575 (CEO-18): the client's read floor; current_grant is the whole row, so no projection rung needs it.
+        ...(storedMinTrust(currentGrant.min_trust) ? { minTrust: storedMinTrust(currentGrant.min_trust) } : {}),
       } as CoreAuthInfo as SdkAuthInfo;
     }
 
@@ -901,25 +936,18 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
 
     if (legacyRows.length > 0) {
       // For legacy tokens, name = clientId = clientName (single identifier).
-      // #2833: debounced fire-and-forget last_used_at update — only writes
-      // once per token per 60s, and NEVER blocks or fails verification (a
-      // slow/broken UPDATE used to hang or 401 every legacy-token request).
-      // Mirrors src/mcp/http-transport.ts validateToken; the SQL-level WHERE
-      // keeps the debounce race-tolerant under concurrent requests; SKIP LOCKED
-      // keeps a row lock held elsewhere from parking a pool slot (#5730).
-      this.sql`
-        UPDATE access_tokens SET last_used_at = now()
-        WHERE id IN (SELECT id FROM access_tokens WHERE token_hash = ${tokenHash}
-          AND (last_used_at IS NULL OR last_used_at < now() - interval '60 seconds') FOR UPDATE SKIP LOCKED)
-      `.catch(() => { /* fire-and-forget */ });
+      // #2833: debounced fire-and-forget last_used_at update that never blocks
+      // or fails verification; shared with src/mcp/http-transport.ts.
+      void touchTokenLastUsed(this.sql, legacyRows[0]);
       const name = legacyRows[0].name as string;
-      // F3: one grant shape (grants/model.ts), shared with the legacy HTTP
-      // transport so the two cannot drift. Unmigrated rows read through lane
-      // F's JSONB parsers; unified rows read the columns, fail-closed on drift.
-      // Scopes: NULL (every token minted before #4043) is grandfathered full
-      // access; an array is honored as-is, including [] as deny. Takes holders
-      // null → the /mcp dispatch site defaults to the fail-closed ['world'].
-      const grant = grantFromTokenRow(legacyRows[0]);
+      // One grant shape (grants/model.ts), shared with the legacy HTTP
+      // transport so the two cannot drift. Unified rows read the columns,
+      // fail-closed on drift; a row still on the legacy shape is converted on
+      // this read (resolveTokenGrant). Scopes: NULL (every token minted before
+      // #4043) is grandfathered full access; an array is honored as-is,
+      // including [] as deny. Takes holders null → the /mcp dispatch site
+      // defaults to the fail-closed ['world'].
+      const grant = await resolveTokenGrant(this.sql, legacyRows[0]);
       return {
         token,
         clientId: name,
@@ -932,6 +960,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
         // floor, the one case that may widen unqualified reads.
         ...authSourcesFromGrant(grant),
         takesHoldersAllowList: grant.takesHolders ?? undefined,
+        ...(storedMinTrust(legacyRows[0].min_trust) ? { minTrust: storedMinTrust(legacyRows[0].min_trust) } : {}),
       } as CoreAuthInfo as SdkAuthInfo;
     }
 

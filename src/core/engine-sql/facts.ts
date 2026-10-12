@@ -14,7 +14,7 @@
  * `LegacyUnscopedRead`.
  */
 import type {
-  FactRow, FactKind, FactVisibility, FactInsertStatus,
+  FactRow, FactKind, FactVisibility, FactInsertStatus, FactAttribution,
   NewFact, FactListOpts, FactsHealth,
 } from '../engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from '../engine.ts';
@@ -22,10 +22,14 @@ import { tryParseEmbedding } from '../utils.ts';
 import { AUDIT_ROW_SOURCES } from '../facts/audit-sources.ts';
 import { resolveSupersededByRow, isInt4RowRef, supersessionChainOf, type SupersedeTarget } from '../facts/supersede-resolve.ts';
 import { escapeLikePattern } from '../cjk.ts';
+import { getFtsLanguage } from '../fts-language.ts';
 import type { SqlExecutor } from './executor.ts';
 import type { LegacyUnscopedRead } from './brands.ts';
 import { sqlFragment, trustedSql } from './fragment.ts';
 import { compileRowNormalizer } from './normalize.ts';
+import { projectionEligibleSql } from '../eligibility/sql.ts';
+import { privateProvenanceFilterFragment } from '../search/private-visibility.ts';
+import { storedTrustTier } from '../trust/tier.ts';
 
 export type EmbeddingCast = '::vector' | '::halfvec';
 
@@ -46,6 +50,15 @@ async function embeddingCast(exec: SqlExecutor, probe: ResolveEmbeddingCast | un
  * silently misses matches outside the newest-N window on high-cardinality
  * entities. Parity with the pglite engine's `_listFacts`.
  */
+/** #5575: the read-eligibility predicate for list reads that pass a policy (eligibility/sql.ts). */
+function eligibilityClause(opts: FactListOpts | undefined) {
+  return opts?.eligibility ? sqlFragment` AND ${trustedSql(projectionEligibleSql('facts', 'facts', opts.eligibility))}` : sqlFragment``;
+}
+
+function privacyClause(opts: { excludePrivate?: boolean } | undefined) {
+  return opts?.excludePrivate ? sqlFragment` AND ${trustedSql(privateProvenanceFilterFragment('facts'))}` : sqlFragment``;
+}
+
 function grepPattern(opts: FactListOpts | undefined): string | null {
   return (opts?.grep && opts.grep.trim()) ? '%' + escapeLikePattern(opts.grep.trim()) + '%' : null;
 }
@@ -91,12 +104,12 @@ export async function insertFact(
             source_id, entity_slug, fact, kind, visibility, notability, context,
             valid_from, valid_until, source, source_session, confidence,
             embedding, embedded_at, embedding_model, embedded_text_hash,
-            claim_metric, claim_value, claim_unit, claim_period
+            claim_metric, claim_value, claim_unit, claim_period, attributed_to
           ) VALUES (
             ${ctx.source_id}, ${entitySlug}, ${input.fact}, ${kind}, ${visibility}, ${notability}, ${context},
             ${validFrom}, ${validUntil}, ${input.source}, ${sourceSession}, ${confidence},
             ${embedLit === null ? null : trustedSql(vectorLiteralSql(embedLit, castSuffix))}, ${embeddedAt}, ${embedding ? input.embedding_model ?? null : null}, ${embedding && input.embedding_model ? sqlFragment`md5(${input.fact})` : null},
-            ${claimMetric}, ${claimValue}, ${claimUnit}, ${claimPeriod}
+            ${claimMetric}, ${claimValue}, ${claimUnit}, ${claimPeriod}, ${input.attributed_to ?? null}
           ) RETURNING id
         `)).rows;
         const id = Number(ins[0].id);
@@ -119,12 +132,12 @@ export async function insertFact(
           source_id, entity_slug, fact, kind, visibility, notability, context,
           valid_from, valid_until, source, source_session, confidence,
           embedding, embedded_at, embedding_model, embedded_text_hash,
-          claim_metric, claim_value, claim_unit, claim_period
+          claim_metric, claim_value, claim_unit, claim_period, attributed_to
         ) VALUES (
           ${ctx.source_id}, ${entitySlug}, ${input.fact}, ${kind}, ${visibility}, ${notability}, ${context},
           ${validFrom}, ${validUntil}, ${input.source}, ${sourceSession}, ${confidence},
           ${embedLit === null ? null : trustedSql(vectorLiteralSql(embedLit, castSuffix))}, ${embeddedAt}, ${embedding ? input.embedding_model ?? null : null}, ${embedding && input.embedding_model ? sqlFragment`md5(${input.fact})` : null},
-          ${claimMetric}, ${claimValue}, ${claimUnit}, ${claimPeriod}
+          ${claimMetric}, ${claimValue}, ${claimUnit}, ${claimPeriod}, ${input.attributed_to ?? null}
         ) RETURNING id
       `)).rows;
       return Number(ins[0].id);
@@ -236,14 +249,14 @@ export async function insertFacts(
             embedding, embedded_at, embedding_model, embedded_text_hash,
             row_num, source_markdown_slug,
             claim_metric, claim_value, claim_unit, claim_period,
-            event_type
+            event_type, attributed_to
           ) VALUES (
             ${ctx.source_id}, ${entitySlug}, ${input.fact}, ${kind}, ${visibility}, ${notability}, ${context},
             ${validFrom}, ${validUntil}, ${expiredAt}, ${input.source}, ${sourceSession}, ${confidence},
             ${embedLit === null ? null : trustedSql(vectorLiteralSql(embedLit, castSuffix))}, ${embeddedAt}, ${embedding ? input.embedding_model ?? null : null}, ${embedding && input.embedding_model ? sqlFragment`md5(${input.fact})` : null},
             ${input.row_num}, ${input.source_markdown_slug},
             ${claimMetric}, ${claimValue}, ${claimUnit}, ${claimPeriod},
-            ${eventType}
+            ${eventType}, ${input.attributed_to ?? null}
           )
           ON CONFLICT (source_id, source_markdown_slug, row_num)
           WHERE row_num IS NOT NULL
@@ -356,9 +369,9 @@ export async function listFactsByEntity(
         ${activeOnly ? sqlFragment`AND expired_at IS NULL AND (valid_until IS NULL OR valid_until > now())` : sqlFragment``}
         ${unconsolidatedOnly ? sqlFragment`AND consolidated_at IS NULL` : sqlFragment``}
         ${kinds ? sqlFragment`AND kind = ANY(${kinds}::text[])` : sqlFragment``}
-        ${visibility ? sqlFragment`AND visibility = ANY(${visibility}::text[])` : sqlFragment``}
+        ${visibility ? sqlFragment`AND visibility = ANY(${visibility}::text[])` : sqlFragment``}${privacyClause(opts)}
         ${excludeAuditRows ? sqlFragment`AND source != ALL(${AUDIT_ROW_SOURCES}::text[])` : sqlFragment``}
-        ${grepPat ? sqlFragment`AND fact ILIKE ${grepPat} ESCAPE '\\'` : sqlFragment``}
+        ${grepPat ? sqlFragment`AND fact ILIKE ${grepPat} ESCAPE '\\'` : sqlFragment``}${eligibilityClause(opts)}
       ORDER BY valid_from DESC, id DESC
       LIMIT ${limit} OFFSET ${offset}
     `)).rows;
@@ -391,14 +404,53 @@ export async function listFactsSince(
         ${activeOnly ? sqlFragment`AND expired_at IS NULL AND (valid_until IS NULL OR valid_until > now())` : sqlFragment``}
         ${unconsolidatedOnly ? sqlFragment`AND consolidated_at IS NULL` : sqlFragment``}
         ${kinds ? sqlFragment`AND kind = ANY(${kinds}::text[])` : sqlFragment``}
-        ${visibility ? sqlFragment`AND visibility = ANY(${visibility}::text[])` : sqlFragment``}
+        ${visibility ? sqlFragment`AND visibility = ANY(${visibility}::text[])` : sqlFragment``}${privacyClause(opts)}
         ${excludeAuditRows ? sqlFragment`AND source != ALL(${AUDIT_ROW_SOURCES}::text[])` : sqlFragment``}
-        ${grepPat ? sqlFragment`AND fact ILIKE ${grepPat} ESCAPE '\\'` : sqlFragment``}
+        ${grepPat ? sqlFragment`AND fact ILIKE ${grepPat} ESCAPE '\\'` : sqlFragment``}${eligibilityClause(opts)}
       ORDER BY ${eventTime ? sqlFragment`COALESCE(valid_from, created_at)` : sqlFragment`created_at`} DESC, id DESC
       LIMIT ${limit} OFFSET ${offset}
     `)).rows;
     return rows.map(rowToFact);
   }
+
+/**
+ * delta's facts arm (contributor audit wave P0): facts strictly after a
+ * `(created_at, id)` keyset, OLDEST first, so a caller that delivers a prefix
+ * can advance its keyset through exactly what it delivered. `after.id = null`
+ * means "strictly after the timestamp" (a legacy `since`). `created_at_iso`
+ * projects the column's microseconds: a keyset minted from a JS Date would
+ * re-select or skip same-millisecond rows, and the bound goes through
+ * `::text::timestamptz` so the postgres.js driver cannot truncate it to
+ * milliseconds on the way in. recall's newest-first
+ * `listFactsSince` is unchanged.
+ */
+export async function listFactsKeyset(
+  exec: LegacyUnscopedRead,
+  source_id: string,
+  after: { createdAt: string; id: number | null } | null,
+  opts?: FactListOpts,
+): Promise<FactRow[]> {
+  const limit = clampSearchLimit(opts?.limit, 50, MAX_SEARCH_LIMIT);
+  const activeOnly = opts?.activeOnly !== false;
+  const visibility = (opts?.visibility && opts.visibility.length > 0) ? opts.visibility : null;
+  const afterCondition = after === null
+    ? sqlFragment``
+    : after.id === null
+      ? sqlFragment`AND created_at > ${after.createdAt}::text::timestamptz`
+      : sqlFragment`AND (created_at > ${after.createdAt}::text::timestamptz OR (created_at = ${after.createdAt}::text::timestamptz AND id > ${after.id}))`;
+  const rows = (await exec.run<FactRowSqlShape>(sqlFragment`
+    SELECT *${opts?.fingerprint ? sqlFragment`, gbrain_fact_fingerprint(fact) AS fact_fingerprint` : sqlFragment``},
+           to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_iso
+    FROM facts
+    WHERE source_id = ${source_id}
+      ${afterCondition}
+      ${activeOnly ? sqlFragment`AND expired_at IS NULL AND (valid_until IS NULL OR valid_until > now())` : sqlFragment``}
+      ${visibility ? sqlFragment`AND visibility = ANY(${visibility}::text[])` : sqlFragment``}${privacyClause(opts)}${eligibilityClause(opts)}
+    ORDER BY created_at ASC, id ASC
+    LIMIT ${limit}
+  `)).rows;
+  return rows.map(rowToFact);
+}
 
 export async function listFactsBySession(
   exec: LegacyUnscopedRead,
@@ -421,9 +473,9 @@ export async function listFactsBySession(
         ${activeOnly ? sqlFragment`AND expired_at IS NULL AND (valid_until IS NULL OR valid_until > now())` : sqlFragment``}
         ${unconsolidatedOnly ? sqlFragment`AND consolidated_at IS NULL` : sqlFragment``}
         ${kinds ? sqlFragment`AND kind = ANY(${kinds}::text[])` : sqlFragment``}
-        ${visibility ? sqlFragment`AND visibility = ANY(${visibility}::text[])` : sqlFragment``}
+        ${visibility ? sqlFragment`AND visibility = ANY(${visibility}::text[])` : sqlFragment``}${privacyClause(opts)}
         ${excludeAuditRows ? sqlFragment`AND source != ALL(${AUDIT_ROW_SOURCES}::text[])` : sqlFragment``}
-        ${grepPat ? sqlFragment`AND fact ILIKE ${grepPat} ESCAPE '\\'` : sqlFragment``}
+        ${grepPat ? sqlFragment`AND fact ILIKE ${grepPat} ESCAPE '\\'` : sqlFragment``}${eligibilityClause(opts)}
       ORDER BY created_at DESC, id DESC
       LIMIT ${limit} OFFSET ${offset}
     `)).rows;
@@ -433,7 +485,7 @@ export async function listFactsBySession(
 export async function listSupersessions(
   exec: LegacyUnscopedRead,
     source_id: string,
-    opts?: { since?: Date; limit?: number; visibility?: ('private' | 'world')[] },
+    opts?: { since?: Date; limit?: number; visibility?: ('private' | 'world')[]; eligibility?: import('../engine.ts').FactListOpts['eligibility']; excludePrivate?: boolean },
   ): Promise<FactRow[]> {
     const limit = clampSearchLimit(opts?.limit, 50, MAX_SEARCH_LIMIT);
     const since = opts?.since ?? null;
@@ -449,7 +501,7 @@ export async function listSupersessions(
       WHERE source_id = ${source_id}
         AND superseded_by IS NOT NULL
         ${since ? sqlFragment`AND COALESCE(expired_at, valid_until) >= ${since}` : sqlFragment``}
-        ${visibility ? sqlFragment`AND visibility = ANY(${visibility}::text[])` : sqlFragment``}
+        ${visibility ? sqlFragment`AND visibility = ANY(${visibility}::text[])` : sqlFragment``}${privacyClause(opts)}${opts?.eligibility ? sqlFragment` AND ${trustedSql(projectionEligibleSql('facts', 'facts', opts.eligibility))}` : sqlFragment``}
       ORDER BY COALESCE(expired_at, valid_until) DESC, id DESC
       LIMIT ${limit}
     `)).rows;
@@ -480,11 +532,15 @@ export async function findCandidateDuplicates(
     source_id: string,
     entitySlug: string,
     factText: string,
-    opts?: { k?: number; embedding?: Float32Array; embeddingModel?: string | null },
+    opts?: { k?: number; embedding?: Float32Array; embeddingModel?: string | null; arm?: 'keyword'; attributedTo?: FactAttribution | null },
   ): Promise<FactRow[]> {
     const k = Math.min(Math.max(opts?.k ?? 5, 1), 20);
+    const speaker = opts?.attributedTo
+      ? sqlFragment`AND (attributed_to IS NULL OR attributed_to = ${opts.attributedTo})`
+      : sqlFragment``;
     // Validity-lapsed rows are not dedup candidates: a re-stated fact after
     // its valid_until lapses re-inserts fresh (WP5 read-time TTL honesty).
+    if (opts?.arm === 'keyword') return findKeywordCandidates(exec, source_id, entitySlug, factText, k, opts);
     if (opts?.embedding) {
       if (!opts.embeddingModel) return [];
       const lit = toPgVectorLiteral(opts.embedding);
@@ -498,6 +554,7 @@ export async function findCandidateDuplicates(
           AND embedding_model=${opts.embeddingModel} AND embedded_text_hash=md5(fact)
           AND vector_dims(embedding)=${opts.embedding.length}
           AND source != ALL(${AUDIT_ROW_SOURCES}::text[])
+          ${speaker}
         ORDER BY embedding <=> ${trustedSql(vectorLiteralSql(lit, '::vector'))}
         LIMIT ${k}
       `)).rows;
@@ -509,11 +566,52 @@ export async function findCandidateDuplicates(
         AND entity_slug = ${entitySlug}
         AND expired_at IS NULL
         AND (valid_until IS NULL OR valid_until > now())
+        ${speaker}
       ORDER BY created_at DESC, id DESC
       LIMIT ${k}
     `)).rows;
     return rows.map(rowToFact);
   }
+
+/**
+ * The keyword arm of fact supersession candidates (C2, `facts.candidate_fusion
+ * = interleave`): the same entity bucket and active-row filters as the cosine
+ * arm, ranked by `ts_rank_cd` against an OR of the new claim's lexemes, so a
+ * twin whose wording changed only in a number or date still ranks by its
+ * shared terms. With an embedding it keeps the cosine arm's comparability
+ * filters (same model, current text hash, same dimensions), so every row it
+ * returns can be scored by the caller's cosine decision. Per-row tsvector over
+ * one entity's facts: no index is needed at k <= 20.
+ */
+async function findKeywordCandidates(
+  exec: LegacyUnscopedRead, source_id: string, entitySlug: string, factText: string, k: number,
+  opts: { embedding?: Float32Array; embeddingModel?: string | null; attributedTo?: FactAttribution | null },
+): Promise<FactRow[]> {
+  if (opts.embedding && !opts.embeddingModel) return [];
+  const speaker = opts.attributedTo
+    ? sqlFragment`AND (f.attributed_to IS NULL OR f.attributed_to = ${opts.attributedTo})`
+    : sqlFragment``;
+  const lang = getFtsLanguage();
+  const comparable = opts.embedding
+    ? sqlFragment`AND embedding IS NOT NULL AND embedding_model=${opts.embeddingModel} AND embedded_text_hash=md5(fact)
+          AND vector_dims(embedding)=${opts.embedding.length}`
+    : sqlFragment``;
+  const rows = (await exec.run<FactRowSqlShape>(sqlFragment`
+      WITH q AS (SELECT NULLIF(replace(plainto_tsquery(${lang}::regconfig, ${factText})::text, ' & ', ' | '), '')::tsquery AS q)
+      SELECT f.* FROM facts f, q
+      WHERE f.source_id = ${source_id}
+        AND f.entity_slug = ${entitySlug}
+        AND f.expired_at IS NULL
+        AND (f.valid_until IS NULL OR f.valid_until > now())
+        AND f.source != ALL(${AUDIT_ROW_SOURCES}::text[])
+        ${comparable}
+        ${speaker}
+        AND q.q IS NOT NULL AND to_tsvector(${lang}::regconfig, f.fact) @@ q.q
+      ORDER BY ts_rank_cd(to_tsvector(${lang}::regconfig, f.fact), q.q) DESC, f.created_at DESC, f.id DESC
+      LIMIT ${k}
+    `)).rows;
+  return rows.map(rowToFact);
+}
 
 export async function consolidateFact(exec: SqlExecutor, id: number, takeId: number): Promise<void> {
     (await exec.run(sqlFragment`UPDATE facts SET consolidated_at = now(), consolidated_into = ${takeId} WHERE id = ${id}`)).rows;
@@ -561,7 +659,7 @@ export async function findTrajectory(exec: LegacyUnscopedRead, opts: import('../
       WHERE ${useArray ? sqlFragment`source_id = ANY(${sourceIds}::text[])` : sqlFragment`source_id = ${sourceId}`}
         AND entity_slug = ${opts.entitySlug}
         AND expired_at IS NULL
-        ${remoteFilter ? sqlFragment`AND visibility = 'world'` : sqlFragment``}
+        ${remoteFilter ? sqlFragment`AND visibility = 'world'` : sqlFragment``}${privacyClause(opts)}
         ${metric !== null ? sqlFragment`AND claim_metric = ${metric}` : sqlFragment``}
         ${kind === 'metric' ? sqlFragment`AND claim_metric IS NOT NULL` : sqlFragment``}
         ${kind === 'event' ? sqlFragment`AND event_type IS NOT NULL` : sqlFragment``}
@@ -633,7 +731,7 @@ export async function getFactsHealth(exec: LegacyUnscopedRead, source_id: string
  * either a string ("[0.1,...]") or already-parsed array depending on type
  * codec — we handle both.
  */
-interface FactRowSqlShape {
+export interface FactRowSqlShape {
   id: number | bigint;
   source_id: string;
   entity_slug: string | null;
@@ -657,6 +755,15 @@ interface FactRowSqlShape {
   embedded_at: Date | null;
   created_at: Date;
   fact_fingerprint?: string | null;
+  created_at_iso?: string | null;
+  attributed_to?: FactAttribution | null;
+  trust_tier?: string | null;
+  write_origin?: unknown;
+}
+
+function originRecord(value: unknown): Record<string, unknown> | null {
+  const parsed = typeof value === 'string' ? (() => { try { return JSON.parse(value) as unknown; } catch { return null; } })() : value;
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
 }
 
 /**
@@ -668,7 +775,7 @@ const normalizeFactRow = compileRowNormalizer<FactRowSqlShape>({
   consolidated_at: 'date', embedded_at: 'date', created_at: 'date',
 });
 
-function rowToFact(raw: FactRowSqlShape): FactRow {
+export function rowToFact(raw: FactRowSqlShape): FactRow {
   const row = normalizeFactRow(raw as unknown as Record<string, unknown>);
   let embedding: Float32Array | null = null;
   if (row.embedding != null) {
@@ -709,6 +816,10 @@ function rowToFact(raw: FactRowSqlShape): FactRow {
     embedded_at: row.embedded_at,
     created_at: row.created_at,
     ...(row.fact_fingerprint ? { fact_fingerprint: row.fact_fingerprint } : {}),
+    ...(row.created_at_iso ? { created_at_iso: row.created_at_iso } : {}),
+    ...(row.attributed_to ? { attributed_to: row.attributed_to } : {}),
+    ...(row.trust_tier ? { trust_tier: storedTrustTier(row.trust_tier) } : {}),
+    ...(row.write_origin !== undefined ? { write_origin: originRecord(row.write_origin) } : {}),
   };
 }
 

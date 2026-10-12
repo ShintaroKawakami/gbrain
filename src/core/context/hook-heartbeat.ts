@@ -11,13 +11,17 @@
  * allowlist is enforced by construction, not by trust. Never throws.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn } from '../spawn.ts';
 import { createHash } from 'node:crypto';
 import { accessSync, appendFileSync, chmodSync, closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import type { ToolCallRecord } from '../transcripts/claude-code-jsonl.ts';
 import { ensureGbrainHome, resolveGbrainHome } from '../gbrain-home.ts';
+import { seatReasonHint } from './seat.ts';
+
+/** #6316: the OpenClaw context engine's per-compaction checkpoint event. */
+export const OPENCLAW_COMPACT_EVENT = 'openclaw-compact';
 
 /** Heartbeat file line cap [S3#7]. */
 export const HEARTBEAT_MAX_LINES = 5000;
@@ -39,6 +43,11 @@ export interface HookHeartbeatEntry {
    * slugs/fact text [S3#7].
    */
   segment?: string;
+  /** Always-loaded core: chars and revision delivered by session-start (counts/digests only). */
+  core_chars?: number;
+  core_revision?: string;
+  /** Context-pressure notice: the fill percent when the notice fired (number only). */
+  pressure_pct?: number;
   /** Cathedral 5 — checkpoint-harvest fact counters (counts only) [S3#7].
    * The ambient-writeback lane (`event: 'writeback'`) reports the same
    * counters plus `superseded` — these are PERSISTED results from the
@@ -70,7 +79,7 @@ export interface HookHeartbeatEntry {
 export const HEARTBEAT_ALLOWED_KEYS = [
   'ts', 'event', 'outcome', 'reason', 'duration_ms', 'turns', 'bytes', 'redactions',
   'segment', 'inserted', 'duplicate', 'superseded', 'near_duplicate', 'links', 'flush',
-  'pattern', 'fingerprint', 'hint',
+  'pattern', 'fingerprint', 'hint', 'core_chars', 'core_revision', 'pressure_pct',
 ] as const;
 
 /**
@@ -165,7 +174,8 @@ export async function writeHeartbeat(
       ...(entry.flush !== undefined ? { flush: entry.flush } : {}),
       ...(entry.pattern !== undefined ? { pattern: entry.pattern } : {}),
       ...(entry.fingerprint !== undefined ? { fingerprint: entry.fingerprint } : {}),
-      ...(entry.hint !== undefined ? { hint: entry.hint } : {}),
+      // A seat reason carries its fixed recovery hint even when the writer did not attach one.
+      ...((entry.hint ?? seatReasonHint(entry.reason)) !== undefined ? { hint: entry.hint ?? seatReasonHint(entry.reason) } : {}),
     });
     appendFileSync(p, line + '\n', { mode: 0o600 });
     if (opts?.trim === false) return;

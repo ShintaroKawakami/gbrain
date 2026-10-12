@@ -236,7 +236,7 @@ Enables consistent data access across environments:
 
 ## PGLite engine note
 
-On the PGLite engine (gbrain's local-only embedded Postgres), the "DB" your db_only pages live in IS the local file gbrain uses for everything else. The `.gitignore` housekeeping still helps (keeps bulk content out of git history), but the offload-to-DB promise is technically vacuous. A once-per-process soft-warn explains when the engine is detected. To get full tiering, migrate to Postgres with `gbrain migrate --to supabase`.
+On the PGLite engine (gbrain's local-only embedded Postgres), the "DB" your db_only pages live in IS the local file gbrain uses for everything else. The `.gitignore` housekeeping still helps (keeps bulk content out of git history), but the offload-to-DB promise is technically vacuous. A once-per-process soft-warn explains when the engine is detected. To get full tiering, move the brain to Postgres with `gbrain migrate --to postgres` ([guide](guides/move-to-postgres.md)).
 
 ## Compatibility
 

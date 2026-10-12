@@ -6,49 +6,10 @@
  */
 import type { BrainEngine } from '../../../core/engine.ts';
 import type { Check } from '../../doctor.ts';
-import { loadConfig, type GBrainConfig } from '../../../core/config.ts';
 // Leaf module (no flag surface of its own) — see that file for why this
 // isn't imported from extract-conversation-facts.ts directly (#4135).
 import { ALLOWED_TYPES, conversationFactsEligibleSql, pageTypesForAllowed, isConversationFactsEligiblePage, requireParseableConversationFlag } from '../../../core/facts/conversation-types.ts';
-
-function hasNonEmptyChatFallbackChain(value: unknown): boolean {
-  if (Array.isArray(value)) {
-    return value.some((entry) => typeof entry === 'string' && entry.trim().length > 0);
-  }
-  if (typeof value !== 'string' || value.trim().length === 0) return false;
-  try {
-    const parsed: unknown = JSON.parse(value);
-    if (Array.isArray(parsed)) {
-      return parsed.some((entry) => typeof entry === 'string' && entry.trim().length > 0);
-    }
-  } catch {
-    // `config set` stores raw strings; any non-empty non-JSON value is set.
-  }
-  return true;
-}
-
-/**
- * `chat_fallback_chain` is accepted by config and reaches the gateway config,
- * but no production chat path consumes it. Keep the warning in doctor rather
- * than config loading so ordinary commands stay quiet. Returning null for an
- * empty value keeps clean doctor reports silent instead of adding an OK line.
- */
-export async function checkChatFallbackChainInert(
-  engine: BrainEngine,
-  effectiveConfig: Pick<GBrainConfig, 'chat_fallback_chain'> | null = loadConfig(),
-): Promise<Check | null> {
-  const fileOrEnvSet = hasNonEmptyChatFallbackChain(effectiveConfig?.chat_fallback_chain);
-  const dbValue = await engine.getConfig('chat_fallback_chain').catch(() => null);
-  if (!fileOrEnvSet && !hasNonEmptyChatFallbackChain(dbValue)) return null;
-  return {
-    name: 'chat_fallback_chain_inert',
-    status: 'warn',
-    message:
-      '`chat_fallback_chain` is set but currently has no effect: no production chat path consumes it. ' +
-      'If you set it expecting fallback behavior, clear it from every plane that still holds a value: ' +
-      'the DB (`gbrain config unset chat_fallback_chain`), `~/.gbrain/config.json`, and `GBRAIN_CHAT_FALLBACK_CHAIN`.',
-  };
-}
+import { checkError } from '../check-fix.ts';
 
 /**
  * v0.32.3 [CDX-20]: surface mode + per-key override drift.
@@ -392,11 +353,7 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
         : `Subagent tier resolves to default (claude-sonnet-4-6) — full tool-loop capability`,
     };
   } catch (e) {
-    return {
-      name: 'subagent_capability',
-      status: 'warn',
-      message: `Could not check subagent capability: ${e instanceof Error ? e.message : String(e)}`,
-    };
+    return checkError('subagent_capability', 'check subagent capability', e);
   }
 }
 
@@ -438,7 +395,7 @@ export function computeConversationParserProbeHealthCheck(
     return {
       name,
       status: 'ok',
-      message: 'enabled but no probe events in the last 7 days (next run by autopilot; fixtures require a source-checkout install).',
+      message: 'enabled but no probe events in the last 7 days (next run by autopilot).',
     };
   }
   const bad = events.filter(e => e.outcome !== 'pass');
@@ -459,9 +416,68 @@ export function computeConversationParserProbeHealthCheck(
   };
 }
 
+/** Panel fields of a probe audit row, read as untrusted JSON (absent on rows written before #5506). */
+interface ProbeJudgePanelFields {
+  judge_models?: unknown;
+  judge_scored_questions?: unknown;
+  distinct_judge_models?: unknown;
+  distinct_judge_providers?: unknown;
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+}
+
+function plural(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? '' : 's'}`;
+}
+
+/**
+ * The latest run's judge panel, appended to the OK and the WARN message.
+ * A slot (A, B, C in slot order) that scored no question is named; among
+ * the slots that scored, a model holding two or more gets the remedy
+ * (three different models in the slot keys), and fewer than three
+ * providers get the not-cross-modal information. Empty for an event with
+ * missing or malformed panel fields, so its message stays as before; a row
+ * without valid per-slot scored counts treats every slot as having scored.
+ */
+function judgePanelNote(event: ProbeJudgePanelFields): string {
+  const models = event.judge_models;
+  const distinctModels = event.distinct_judge_models;
+  const distinctProviders = event.distinct_judge_providers;
+  if (!Array.isArray(models) || models.length === 0) return '';
+  if (!models.every((m: unknown): m is string => typeof m === 'string')) return '';
+  if (!isCount(distinctModels) || !isCount(distinctProviders)) return '';
+  const counts = event.judge_scored_questions;
+  const scored: number[] | null =
+    Array.isArray(counts) && counts.length === models.length && counts.every(isCount) ? counts : null;
+  const judged = (i: number): boolean => scored === null || scored[i]! > 0;
+  const silent = models
+    .map((m, i) => (judged(i) ? '' : ` Slot ${String.fromCharCode(65 + i)} (${m}) scored no question, so it did not judge.`))
+    .join('');
+  const panel =
+    ` Latest judge panel (slot order): ${models.join(', ')}; ` +
+    `${plural(distinctModels, 'distinct model')} from ${plural(distinctProviders, 'provider')}.${silent}`;
+  const judgedModels = models.filter((_, i) => judged(i));
+  const shared = judgedModels.filter((m: string, i: number) => judgedModels.indexOf(m) !== i);
+  if (shared.length > 0) {
+    return (
+      panel +
+      ` ${[...new Set(shared)].join(' and ')} holds more than one slot, so its votes count more than once. ` +
+      `Next step: set models.eval.cross_modal.slot_a, slot_b and slot_c to three different models ` +
+      `(gbrain config set models.eval.cross_modal.slot_a <model>; one provider is enough, ` +
+      `for example three claude-cli models).`
+    );
+  }
+  if (distinctProviders < 3) {
+    return panel + ` Fewer than 3 providers judged, so the panel is not cross-modal (information only).`;
+  }
+  return panel;
+}
+
 export function computeNightlyQualityProbeHealthCheck(
   probeEnabled: boolean,
-  events: ReadonlyArray<{ outcome: string; ts: string; detail?: string }>,
+  events: ReadonlyArray<{ outcome: string; ts: string; detail?: string } & ProbeJudgePanelFields>,
 ): Check {
   const name = 'nightly_quality_probe_health';
   if (!probeEnabled && events.length === 0) {
@@ -486,6 +502,7 @@ export function computeNightlyQualityProbeHealthCheck(
   const bad = events.filter(e => e.outcome !== 'pass');
   const latest = events[events.length - 1]!;
   if (bad.length > 0) {
+    const skipped = events.filter(e => e.outcome === 'skipped').length;
     const counts =
       `pass=${events.filter(e => e.outcome === 'pass').length} ` +
       `fail=${events.filter(e => e.outcome === 'fail').length} ` +
@@ -493,17 +510,18 @@ export function computeNightlyQualityProbeHealthCheck(
       `inconclusive=${events.filter(e => e.outcome === 'inconclusive').length} ` +
       `budget=${events.filter(e => e.outcome === 'budget_exceeded').length} ` +
       `no_embed_key=${events.filter(e => e.outcome === 'no_embedding_key').length} ` +
-      `rate_limited=${events.filter(e => e.outcome === 'rate_limited').length}`;
+      `rate_limited=${events.filter(e => e.outcome === 'rate_limited').length}` +
+      (skipped > 0 ? ` skipped=${skipped}` : '');
     return {
       name,
       status: 'warn',
-      message: `${bad.length} non-PASS run${bad.length === 1 ? '' : 's'} in last 7d (${counts}). Latest: ${latest.outcome} at ${latest.ts}${latest.detail ? ` (${latest.detail})` : ''}.`,
+      message: `${bad.length} non-PASS run${bad.length === 1 ? '' : 's'} in last 7d (${counts}). Latest: ${latest.outcome} at ${latest.ts}${latest.detail ? ` (${latest.detail})` : ''}.${judgePanelNote(latest)}`,
     };
   }
   return {
     name,
     status: 'ok',
-    message: `${events.length} PASS run${events.length === 1 ? '' : 's'} in last 7d. Latest: ${latest.ts}.`,
+    message: `${events.length} PASS run${events.length === 1 ? '' : 's'} in last 7d. Latest: ${latest.ts}.${judgePanelNote(latest)}`,
   };
 }
 

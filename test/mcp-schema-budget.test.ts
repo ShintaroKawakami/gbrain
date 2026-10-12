@@ -5,7 +5,10 @@
  *   - the served starter list (Cat 40 configuration: `gbrain serve --surface
  *     starter`, no skill grants) at 25,000 characters or less, with
  *     `mcp.publish_skills` on (fresh-init default) and off, and its cl100k
- *     token count;
+ *     token count, both measured on what a model receives (name,
+ *     description, inputSchema: the Cat 40 harness and the Anthropic/OpenAI
+ *     tool APIs drop MCP `annotations`), plus a separate ceiling on the whole
+ *     tools/list JSON including the annotations;
  *   - the initialize instructions at their recorded size, so guidance cut
  *     from the schemas cannot move there instead;
  *   - a per-tool budget (the whole tool definition) for every starter op,
@@ -16,8 +19,25 @@
  * The longer pre-cut guidance lives in docs/mcp/TOOL_REFERENCE.md.
  *
  * Raising a number here needs a reason in the commit message and a check
- * that the served list still fits 25,000 characters. Measured on this
- * branch: 24,763 characters, 5,568 cl100k tokens (was 59,969 / 13,077).
+ * that the served list still fits 25,000 characters. Measured on the cost
+ * wave: 24,763 characters, 5,568 cl100k tokens (was 59,969 / 13,077), whole
+ * JSON. v0.60.46.0 (agent operator wave merged): 24,100 model-visible
+ * characters / 5,414 tokens; 25,735 with annotations, which the wave's
+ * contract derives for every op from its required mutating/idempotent tags.
+ * Per-tool budgets below cover the whole definition, annotations included;
+ * the rows the merge raised are the annotation bytes (+22 to +36) plus the
+ * F10 template text that brought sub-60-character descriptions up to
+ * purpose + next step + scope, and query's key-dependence sentence.
+ * Entity recall: entity +140 (referenced_by, backlink_count scope, the
+ * previews-are-not-evidence rule) and get_backlinks +250 (type, group, limit,
+ * cursor) are paid by equal budget cuts: query -150 and search -90 (shorter
+ * descriptions and parameter text; every pinned phrase kept), recall -50,
+ * remember -40, get_page -30, list_pages -30 (slack). Served starter list
+ * after: 24,324 model-visible characters, 5,471 tokens, 25,959 JSON characters.
+ * #6007 raised put_page (wait_ms param, put_pages and remote mention-link
+ * disclosure), get_write_request (poll cadence and final states),
+ * add_timeline_entry (when no call is needed) and the instructions (write
+ * guidance); the served list still fits 25,000 model-visible characters.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -30,26 +50,40 @@ import { cl100kAvailable, estimateTokens } from '../src/core/chunkers/token-esti
 
 const SERVED_STARTER_MAX_CHARS = 25_000;
 const SERVED_STARTER_MAX_TOKENS = 5_700;
-const INSTRUCTIONS_MAX_CHARS = 4_042;
+/** The whole tools/list JSON, annotations included (25,735 measured at v0.60.46.0; traverse_graph's `hops` is full-surface-only, 25,941 measured; 26,402 once mute_notice, the dismissal for the coaching notices starter sessions receive, joined starter; 26,671 with #6007's put_page wait_ms param and write guidance, which carry the put_pages hint and the receipt poll rule starter agents need; 26,679 with delta's opaque `cursor` param, paid for by trimming delta's own descriptions, model-visible 24,985; 26,692 with recall's `question` param, paid for by trimming recall's own parameter text, model-visible 24,998; 24,996 after the #6446 merge, recall's grep text trimmed again). */
+const SERVED_STARTER_MAX_JSON_CHARS = 26_700;
+/** 4,042 at the cost wave + 586 for the operator contract's error protocol, notice prefix and memory loop (F1); no schema guidance moved here. */
+const INSTRUCTIONS_MAX_CHARS = 4_975; // #6007: +240 for the issue-required write guidance (put_pages, wait_ms); Cat 40 Hard round 4: +107 for batching lists of names (entity names, keyword OR) and sending independent calls together
 const DESCRIPTION_HARD_CAP = 1_200;
 const PARAM_DESCRIPTION_HARD_CAP = 200;
 
-/** Per-tool budget: JSON.stringify of the served tool definition. */
+/**
+ * Per-tool budget: JSON.stringify of the served tool definition. get_backlinks / traverse_graph carry the temporal status + as_of params (live relationships by default).
+ * remember 1330 -> 1370: the additive `items` batch param (save up to 20 facts
+ * before compaction), measured at 1,344 after its descriptions were shortened so the
+ * served starter list stays under 25,000 next to #6007's put_page growth.
+ * search 1670 -> 1800: keyword OR across quoted names and the pointer to entity names (Cat 40 Hard
+ * round 4), paid for by trimming query, list_pages, capture, mute_notice and request_tools text.
+ * entity 470 -> 550: the additive `names` param (resolve up to 50 names in one
+ * call, Cat 40 Hard round 4), measured at 546 with the `name` example and part
+ * of the miss sentence trimmed so the served starter list stays under 25,000.
+ */
 const TOOL_BUDGETS: Record<string, number> = {
-  add_timeline_entry: 630, cancel_job: 250, cancel_write_request: 330, capture: 1250, context_pack: 760,
-  delete_skill: 810, delta: 830, edit_page: 1090, entity: 460, find_anomalies: 500, forget: 560, get_agent_job: 220,
-  get_backlinks: 350, get_ingest_log: 200, get_page: 810, get_recent_salience: 630, get_skill: 910,
-  get_skill_asset: 780, get_write_request: 300, join_brain: 560, leave_brain: 540, list_brain_skillpack: 200,
-  list_link_sources: 190, list_pages: 1090, list_skills: 640, list_write_requests: 390, put_page: 1320,
-  put_skill: 1420, query: 3220, recall: 1590, remember: 1370, request_tools: 560, resolve_slugs: 330, search: 1760,
-  submit_agent: 750, sync_brain_skills: 770, synthesize: 550, traverse_graph: 660, whoami: 190,
+  add_timeline_entry: 680, cancel_job: 270, cancel_write_request: 350, capture: 1250, context_pack: 760,
+  delete_skill: 810, delta: 830, edit_page: 1090, entity: 550, find_anomalies: 520, forget: 560, get_agent_job: 270,
+  get_backlinks: 770, get_ingest_log: 280, get_page: 930, get_recent_salience: 660, get_skill: 910,
+  get_skill_asset: 790, get_write_request: 360, join_brain: 560, leave_brain: 540, list_brain_skillpack: 230,
+  list_link_sources: 220, list_pages: 1060, list_skills: 670, list_write_requests: 450, put_page: 1460,
+  mute_notice: 460, put_skill: 1420, query: 3100, recall: 1540, remember: 1370, request_tools: 560, resolve_slugs: 410, search: 1800,
+  submit_agent: 750, sync_brain_skills: 770, synthesize: 550, traverse_graph: 810, whoami: 230,
 };
 
 /** DX-14: phrases each tool's description must keep. */
 const MINIMUM_GUIDANCE: Record<string, string[]> = {
   search: ['no LLM expansion', 'top 20', 'NOT proof of coverage', '`query`', 'list_pages', 'return_unit', 'fields: "full"'],
   query: ['expansion', 'Still top-K', 'return_unit', 'list_pages', '`search` is cheaper', 'LLM call', 'fields: "full"'],
-  put_page: ['REPLACES the whole page', 'get_page include_content:true', 'expected_revision', 'request_id', 'edit_page'],
+  // Wave 12: the request_id UUID rule is back (gbrain-evals#92: without it Opus sent a non-UUID first request_id more often).
+  put_page: ['REPLACES the whole page', 'get_page include_content:true', 'expected_revision', 'Keep a request_id UUID; retry with identical arguments', 'edit_page'],
   edit_page: ['prefer this over put_page', 'expected_revision', 'exactly once', 'all or none', 'revision_conflict'],
   get_page: ['include_content:true', 'put_page', 'edit_page'],
   list_pages: ['sort=updated_desc', 'Default 50', 'truncated', 'updated_after_slug'],
@@ -75,7 +109,10 @@ const MINIMUM_GUIDANCE: Record<string, string[]> = {
   traverse_graph: ['depth'],
 };
 
-const size = (ops: Operation[]) => JSON.stringify(buildToolDefs(ops)).length - 2 - Math.max(0, ops.length - 1);
+const json = (ops: Operation[]) => JSON.stringify(buildToolDefs(ops)).length - 2 - Math.max(0, ops.length - 1);
+/** What a model receives per tool: the harness bridges forward name, description and inputSchema only. */
+const modelVisible = (ops: Operation[]) => buildToolDefs(ops).map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
+const size = (ops: Operation[]) => JSON.stringify(modelVisible(ops)).length - 2 - Math.max(0, ops.length - 1);
 
 let engine: PGLiteEngine;
 beforeAll(async () => {
@@ -91,11 +128,12 @@ async function served(publishSkills: boolean): Promise<Operation[]> {
 }
 
 describe('served starter tool list (Cat 40 configuration)', () => {
-  test('publish_skills on (the fresh-init default): 34 tools within 25,000 characters', async () => {
+  test('publish_skills on (the fresh-init default): 35 tools within 25,000 characters', async () => {
     const ops = await served(true);
     expect(ops.map(o => o.name)).toContain('get_skill');
-    expect(ops.length).toBe(34);
+    expect(ops.length).toBe(35);
     expect(size(ops)).toBeLessThanOrEqual(SERVED_STARTER_MAX_CHARS);
+    expect(json(ops)).toBeLessThanOrEqual(SERVED_STARTER_MAX_JSON_CHARS);
   });
 
   test('publish_skills off: within 25,000 characters', async () => {
@@ -106,7 +144,7 @@ describe('served starter tool list (Cat 40 configuration)', () => {
 
   test('cl100k token ceiling', async () => {
     if (!cl100kAvailable()) return;
-    expect(estimateTokens(JSON.stringify(buildToolDefs(await served(true))))).toBeLessThanOrEqual(SERVED_STARTER_MAX_TOKENS);
+    expect(estimateTokens(JSON.stringify(modelVisible(await served(true))))).toBeLessThanOrEqual(SERVED_STARTER_MAX_TOKENS);
   });
 
   test('initialize instructions stay at or below their recorded size', () => {
@@ -121,7 +159,7 @@ describe('per-tool schema budgets', () => {
     expect(starter.map(o => o.name).sort()).toEqual(Object.keys(TOOL_BUDGETS).sort());
   });
 
-  for (const op of operations.filter(o => STARTER_OPS.has(o.name))) {
+  for (const op of filterOpsForSurface(operations, 'starter')) {
     test(`${op.name} fits its budget and the hard caps`, () => {
       const [def] = buildToolDefs([op]);
       expect(JSON.stringify(def).length).toBeLessThanOrEqual(TOOL_BUDGETS[op.name]);
@@ -143,6 +181,17 @@ describe('minimum guidance (DX-14)', () => {
       for (const phrase of phrases) expect(op.description, `${name}: ${phrase}`).toContain(phrase);
     });
   }
+
+  test('remember items description names entity and the optional item fields on starter and full (#6363)', () => {
+    for (const surface of ['starter', 'full'] as const) {
+      const op = filterOpsForSurface(operations, surface).find(o => o.name === 'remember')!;
+      const [def] = buildToolDefs([op]);
+      const items = (def.inputSchema.properties as Record<string, { description?: string }>).items;
+      for (const field of ['fact', 'entity', 'provenance', 'kind', 'ttl', 'visibility']) {
+        expect(items.description, `${surface}: ${field}`).toContain(field);
+      }
+    }
+  });
 
   test('every required input of a starter tool is declared in its schema', () => {
     for (const def of buildToolDefs(operations.filter(o => STARTER_OPS.has(o.name)))) {

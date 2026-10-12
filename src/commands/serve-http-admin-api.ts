@@ -13,6 +13,7 @@ import { rescopeClientGrant } from '../core/grants/service.ts';
 import { resolveOwnerHolder } from '../core/owner-holder.ts';
 import { sqlQueryForEngine } from '../core/sql-query.ts';
 import { VERSION } from '../version.ts';
+import { mountAdminApiKeys } from './serve-http-api-keys.ts';
 import { mountAdminClients } from './serve-http-clients.ts';
 import { mountAdminRegistration } from './serve-http-registration.ts';
 import { parseAdminGrantRequest, grantHttpStatus, GRANT_TOKEN_IMPLICATIONS, mountAdminGrantDiscovery, mountAdminGrantEdits } from './serve-http-grants.ts';
@@ -575,45 +576,7 @@ function mountAdminKeyApi(app: Express, ctx: ServeHttpContext): void {
     }
   });
 
-  // Legacy API keys (access_tokens table)
-  app.get('/admin/api/api-keys', requireAdmin, async (_req: Request, res: Response) => {
-    try {
-      const keys = await sql`
-        SELECT id, name, created_at, last_used_at,
-          CASE WHEN revoked_at IS NOT NULL THEN 'revoked' ELSE 'active' END as status
-        FROM access_tokens ORDER BY created_at DESC
-      `;
-      res.json(keys);
-    } catch (e) {
-      res.status(503).json({ error: 'service_unavailable' });
-    }
-  });
-
-  app.post('/admin/api/api-keys', requireAdmin, express.json(), async (req: Request, res: Response) => {
-    try {
-      const { name } = req.body;
-      if (!name) { res.status(400).json({ error: 'Name required' }); return; }
-      const { generateToken, hashToken } = await import('../core/utils.ts');
-      const token = generateToken('gbrain_');
-      const hash = hashToken(token);
-      const id = (await import('crypto')).randomUUID();
-      await sql`INSERT INTO access_tokens (id, name, token_hash) VALUES (${id}, ${name}, ${hash})`;
-      res.json({ name, token, id });
-    } catch (e) {
-      res.status(500).json({ error: e instanceof Error ? e.message : 'Failed to create API key' });
-    }
-  });
-
-  app.post('/admin/api/api-keys/revoke', requireAdmin, express.json(), async (req: Request, res: Response) => {
-    try {
-      const { name } = req.body;
-      if (!name) { res.status(400).json({ error: 'Name required' }); return; }
-      await sql`UPDATE access_tokens SET revoked_at = now() WHERE name = ${name} AND revoked_at IS NULL`;
-      res.json({ revoked: true });
-    } catch (e) {
-      res.status(500).json({ error: e instanceof Error ? e.message : 'Revoke failed' });
-    }
-  });
+  mountAdminApiKeys(app, requireAdmin, engine);
 }
 
 function mountAdminClientApi(app: Express, ctx: ServeHttpContext): void {

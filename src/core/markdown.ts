@@ -1,7 +1,17 @@
 import { dataFrontmatter as matter, FrontmatterLanguageError } from './data-frontmatter.ts';
-import { safeLoad as yamlSafeLoad } from 'js-yaml';
+import { load as yamlLoad } from 'js-yaml';
 import type { Page, PageType } from './types.ts';
 import { resolveSlugForPath, slugifyPath } from './sync.ts';
+import {
+  commentValueKeys, frontmatterKeyHazard, recoverFrontmatter, unclosedFenceProtectedKey, yamlLocationMessage,
+  RECOVERY_VERSION, type FrontmatterRecovery, type RecoveryKind,
+} from './frontmatter-recovery.ts';
+import { findLineOutsideFencedCode } from './fence-scan.ts';
+
+export {
+  recoverFrontmatter, RECOVERY_VERSION, PROTECTED_FRONTMATTER_KEYS, IDENTITY_FRONTMATTER_KEYS,
+  type FrontmatterRecovery, type FrontmatterRecoveryStatus, type FrontmatterRecoveryStep, type RecoveryKind,
+} from './frontmatter-recovery.ts';
 
 export type ParseValidationCode =
   | 'MISSING_OPEN'
@@ -17,6 +27,23 @@ export interface ParseValidationError {
   code: ParseValidationCode;
   message: string;
   line?: number;
+  /** YAML_PARSE only: true when ingestion reads the block anyway (quoting only). Producer checks still fail on it. */
+  recoverable?: boolean;
+  /** YAML_PARSE only: what ingestion changed to read it; content-free, so it can be recorded as provenance. */
+  recovery?: Array<{ kind: RecoveryKind; key: string; line: number; recovery_version: number }>;
+}
+
+export type ParseWarningCode = 'FRONTMATTER_RECOVERED' | 'FRONTMATTER_COMMENT_VALUE';
+
+/** Advisories that never block ingestion. Local only: `original`/`replacement` carry raw frontmatter text. */
+export interface ParseValidationWarning {
+  code: ParseWarningCode;
+  message: string;
+  key: string;
+  line: number;
+  kind?: RecoveryKind;
+  original?: string;
+  replacement?: string;
 }
 
 export interface ParseOpts {
@@ -64,6 +91,13 @@ export interface ParsedMarkdown {
   tags: string[];
   /** Present iff opts.validate. Empty array means no errors. */
   errors?: ParseValidationError[];
+  /** Present iff opts.validate. Never blocks ingestion; `errors` keeps its meaning. */
+  warnings?: ParseValidationWarning[];
+  /**
+   * Present iff opts.validate and the block needed recovery or hides an
+   * ambiguous protected or identity key. `classifyImportHold` reads it.
+   */
+  recovery?: FrontmatterRecovery;
 }
 
 /**
@@ -166,7 +200,7 @@ export function frontmatterBodyOffset(content: string): number {
  * writers (agents, scripts, humans) no longer have to remember to quote
  * colon-bearing titles themselves.
  */
-function quoteAmbiguousFrontmatterScalars(content: string): string {
+function quoteAmbiguousFrontmatterScalars(content: string, quoted?: Array<{ key: string; index: number; original: string; replacement: string }>): string {
   const fenceMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---(\r?\n|$)/);
   if (!fenceMatch) return content;
   const fenceBody = fenceMatch[1]!;
@@ -175,7 +209,7 @@ function quoteAmbiguousFrontmatterScalars(content: string): string {
 
   const fixedBody = fenceBody
     .split('\n')
-    .map(line => {
+    .map((line, index) => {
       // Top-level `key: value` only — indented lines (list items, nested
       // maps) never match this anchor, so they pass through untouched.
       const kv = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*):[ \t]+(.+)$/);
@@ -189,6 +223,7 @@ function quoteAmbiguousFrontmatterScalars(content: string): string {
       // ": " (looks like a nested mapping key) or a trailing ":".
       if (!value.includes(': ') && !value.endsWith(':')) return line;
       const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      quoted?.push({ key, index, original: line, replacement: `${key}: "${escaped}"` });
       return `${key}: "${escaped}"`;
     })
     .join('\n');
@@ -213,6 +248,23 @@ function stripLeadingBlanksBeforeFence(content: string): string {
   while (i < lines.length && lines[i].trim().length === 0) i++;
   if (i === 0 || i >= lines.length || lines[i].trim() !== '---') return content;
   return lines.slice(i).join('\n');
+}
+
+/**
+ * The YAML block of a fenced document, found as `parseDataFrontmatter` finds
+ * it; a BOM and the opening fence stay in `head`, so recovery rewrites only
+ * block lines and keeps every line ending. Null for an unclosed fence or a
+ * JSON/other language selector. `blockLine` is the block's first file line.
+ */
+function splitFrontmatterBlock(content: string): { head: string; block: string; tail: string; blockLine: number } | null {
+  const bom = content.startsWith('\uFEFF') ? '\uFEFF' : '';
+  const body = content.slice(bom.length);
+  const opening = /^---([^\r\n]*)(?:\r?\n|$)/.exec(body);
+  if (!opening || !['', 'yaml', 'yml'].includes(opening[1]!.trim().toLowerCase())) return null;
+  const rest = body.slice(opening[0].length);
+  const closing = /^---[\t ]*(?:\r?\n|$)/m.exec(rest);
+  if (!closing) return null;
+  return { head: bom + opening[0], block: rest.slice(0, closing.index), tail: rest.slice(closing.index), blockLine: 2 };
 }
 
 /**
@@ -263,26 +315,71 @@ export function parseMarkdown(
   // its broken shape.
   // #4526: lift the fence to byte 0 first (leading blank lines are legal per
   // the validators), THEN quote ambiguous scalars (whose regex anchors ^---).
-  const safeContent = quoteAmbiguousFrontmatterScalars(stripLeadingBlanksBeforeFence(content));
+  const lifted = stripLeadingBlanksBeforeFence(content);
+  const liftedLines = content.slice(0, content.length - lifted.length).split('\n').length - 1;
+  const quoted: Array<{ key: string; index: number; original: string; replacement: string }> = [];
+  const safeContent = quoteAmbiguousFrontmatterScalars(lifted, quoted);
   let parsed: ReturnType<typeof matter> | null = null;
   let yamlParseError: Error | null = null;
+  let recovery: FrontmatterRecovery | undefined;
+  let fenced: ReturnType<typeof splitFrontmatterBlock> | undefined;
   try {
     parsed = matter(safeContent);
   } catch (e) {
     if (e instanceof FrontmatterLanguageError && !opts?.validate) throw e;
     yamlParseError = e as Error;
+    // #5988: only a block the strict parse refuses is recovered, so every file
+    // that parses today keeps its values. Only quoting is applied here.
+    fenced = e instanceof FrontmatterLanguageError ? null : splitFrontmatterBlock(safeContent);
+    if (fenced) {
+      recovery = recoverFrontmatter(fenced.block, liftedLines + fenced.blockLine - 1);
+      if (recovery.status === 'recovered') {
+        try { parsed = matter(fenced.head + recovery.block + fenced.tail); } catch { recovery = { ...recovery, status: 'unrecoverable' }; }
+      }
+    }
   }
 
+  const warnings: ParseValidationWarning[] = [];
   if (opts?.validate) {
+    if (fenced === undefined) fenced = splitFrontmatterBlock(safeContent);
+    const blockOffset = fenced ? liftedLines + fenced.blockLine - 1 : 0;
+    if (parsed && fenced) {
+      const block = recovery?.status === 'recovered' ? recovery.block : fenced.block;
+      const data = parsed.data as Record<string, unknown>;
+      const hazard = frontmatterKeyHazard(block, data, new Set(quoted.map(q => q.key)), blockOffset);
+      if (hazard) recovery = { ...(recovery ?? { block, steps: [], recovery_version: RECOVERY_VERSION }), status: hazard.status, key: hazard.key, line: hazard.line };
+      for (const found of commentValueKeys(block, data, blockOffset)) {
+        warnings.push({ code: 'FRONTMATTER_COMMENT_VALUE', key: found.key, line: found.line,
+          message: `Frontmatter "${found.key}" at line ${found.line} starts with # and reads as a YAML comment, so its value is empty; quote the value to keep it.` });
+      }
+    }
+    const recovered = parsed === null ? [] : [
+      ...quoted.map(q => ({ kind: 'quote' as const, key: q.key, line: liftedLines + 2 + q.index, original: q.original, replacement: q.replacement })),
+      ...(recovery?.steps ?? []),
+    ];
     collectValidationErrors(content, errors, {
       yamlParseError,
       expectedSlug: opts.expectedSlug,
       parsedFrontmatter: parsed?.data ?? {},
+      recovered,
+      recovery,
     });
     // Language selectors do not look like the plain YAML fence expected by
     // structural validation. Keep their rejection visible to ingestion callers.
     if (yamlParseError instanceof FrontmatterLanguageError && !errors.some(error => error.code === 'YAML_PARSE')) {
-      errors.push({ code: 'YAML_PARSE', line: 1, message: `YAML parse failed: ${yamlParseError.message}` });
+      errors.push({ code: 'YAML_PARSE', line: 1, message: `YAML parse failed: ${yamlParseError.message}`, recoverable: false });
+    }
+    if (errors.some(error => error.code === 'YAML_PARSE' && error.recoverable)) {
+      for (const step of recovered) {
+        warnings.push({ code: 'FRONTMATTER_RECOVERED', key: step.key, line: step.line, kind: step.kind, original: step.original, replacement: step.replacement ?? undefined,
+          message: `Frontmatter "${step.key}" at line ${step.line} is not valid YAML; it was read by quoting its value. Quote it in the file.` });
+      }
+    }
+    if (errors.some(error => error.code === 'MISSING_CLOSE')) {
+      const lines = content.split('\n');
+      const opener = lines.findIndex(line => line.trim().length > 0);
+      const unclosed = unclosedFenceProtectedKey(lines.slice(opener + 1), opener + 1);
+      if (unclosed) recovery = { block: '', steps: [], recovery_version: RECOVERY_VERSION, status: 'ambiguous_protected_key', key: unclosed.key, line: unclosed.line };
     }
   }
 
@@ -338,7 +435,11 @@ export function parseMarkdown(
     title,
     tags,
   };
-  if (opts?.validate) result.errors = errors;
+  if (opts?.validate) {
+    result.errors = errors;
+    result.warnings = warnings;
+    if (recovery && recovery.status !== 'clean') result.recovery = recovery;
+  }
   return result;
 }
 
@@ -358,6 +459,95 @@ export function resolveParsedSubtype(
 }
 
 /**
+ * #5988 hold codes: deterministic content refusals. Ingestion holds the one
+ * file and keeps going instead of failing the whole sync. Defined once here;
+ * managed and legacy sync, import and `validate --importable` share it.
+ */
+export const HOLD_CODES = ['invalid_frontmatter', 'frontmatter_slug_conflict', 'file_too_large', 'rename_held', 'parser_regression'] as const;
+export type HoldCode = typeof HOLD_CODES[number];
+export const INVALID_FRONTMATTER_REASONS = ['yaml_parse', 'needs_interpretation', 'ambiguous_identity_key', 'ambiguous_protected_key'] as const;
+export type InvalidFrontmatterReason = typeof INVALID_FRONTMATTER_REASONS[number];
+
+export interface ContentHold {
+  code: HoldCode;
+  reason?: InvalidFrontmatterReason;
+  key?: string;
+  line?: number;
+  /** Safe to persist and show remotely: names the key, line and cause, never a frontmatter value. */
+  message: string;
+}
+
+/** Markdown over its limit refuses as `Content too large (`; a code file as `Code file too large (`. */
+export function contentSizeHold(byteLength: number, maxBytes: number, codeFile = false): ContentHold | null {
+  if (byteLength <= maxBytes) return null;
+  return { code: 'file_too_large', message: codeFile ? `Code file too large (${byteLength} bytes)`
+    : `Content too large (${byteLength} bytes, max ${maxBytes}). Split the content into smaller files or remove large embedded assets.` };
+}
+
+const HOLD_GUIDANCE: Record<InvalidFrontmatterReason, string> = {
+  yaml_parse: 'Fix that line in the file (quote a value that contains ": " or starts with a special character), then import it again.',
+  needs_interpretation: 'Reading it would mean guessing, so it was not imported. Keep one line per key with its whole value quoted on that line, then import it again.',
+  ambiguous_identity_key: 'gbrain never guesses which page a file is. Keep exactly one line for that key, then import it again.',
+  ambiguous_protected_key: 'gbrain never guesses who may read a page or where it came from. Write that key on its own line with one quoted value, then import it again.',
+};
+
+const HOLD_MESSAGE = new RegExp(`^Invalid YAML frontmatter: (?:ambiguous (?:protected|identity) key(?: "[\\w-]{1,100}")? at line \\d+`
+  + `|key(?: "[\\w-]{1,100}")? at line \\d+ (?:continues on unquoted lines|appears more than once|opens \\[ or \\{ without closing it)`
+  + `|[a-z ;,'-]{1,200}(?: at line \\d+(?:, column \\d+)?)?(?: \\(key "[\\w-]{1,100}"\\))?)\\. `
+  + `(?:${Object.values(HOLD_GUIDANCE).map(text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})$`);
+
+/** True for a frontmatter hold message exactly as `classifyImportHold` builds it: key, line and cause only, safe to show. */
+export function isFrontmatterHoldMessage(message: string | null | undefined): boolean {
+  return typeof message === 'string' && HOLD_MESSAGE.test(message);
+}
+
+/** A hold message without its key names (keys can be private): line, cause and guidance only, for receipts and remote callers. */
+export function frontmatterHoldMessageWithoutKeys(message: string): string {
+  return message.replace(/ \(key "[\w-]{1,100}"\)/, '').replace(/key "[\w-]{1,100}"/, 'key');
+}
+
+/**
+ * Map a validated parse (plus size and path context) to the one hold it
+ * earns, or null when ingestion accepts it. Recovered (quoted) YAML, comment
+ * values, a missing close, null bytes and nested quotes are not holds.
+ */
+export function classifyImportHold(parsed: ParsedMarkdown, ctx: {
+  byteLength?: number;
+  maxBytes?: number;
+  codeFile?: boolean;
+  expectedSlug?: string | null;
+  /** The sync exemption: a page keeping its recorded origin keeps its declared slug. */
+  slugExempt?: (declared: string) => boolean;
+  slugConflictMessage?: (found: string, expected: string) => string;
+} = {}): ContentHold | null {
+  const size = ctx.byteLength !== undefined && ctx.maxBytes !== undefined ? contentSizeHold(ctx.byteLength, ctx.maxBytes, ctx.codeFile) : null;
+  if (size) return size;
+  const recovery = parsed.recovery;
+  const yaml = parsed.errors?.find(error => error.code === 'YAML_PARSE' && !error.recoverable);
+  let reason: InvalidFrontmatterReason | null = null;
+  if (recovery?.status === 'ambiguous_protected_key' || recovery?.status === 'ambiguous_identity_key') reason = recovery.status;
+  else if (yaml) reason = recovery?.status === 'needs_interpretation' ? 'needs_interpretation' : 'yaml_parse';
+  if (reason) {
+    const step = reason === 'needs_interpretation' ? recovery!.steps.find(s => s.kind !== 'quote') : undefined;
+    const key = step?.key ?? recovery?.key;
+    const line = step?.line ?? recovery?.line ?? yaml?.line;
+    const where = `${line !== undefined ? ` at line ${line}` : ''}`;
+    const detail = reason === 'ambiguous_protected_key' ? `ambiguous protected key "${key}"${where}`
+      : reason === 'ambiguous_identity_key' ? `ambiguous identity key "${key}"${where}`
+      : reason === 'needs_interpretation' ? `key "${key}"${where} ${step!.kind === 'dup' ? 'appears more than once' : step!.kind === 'fold' ? 'continues on unquoted lines' : 'opens [ or { without closing it'}`
+      : `${(yaml?.message ?? '').replace(/^YAML parse failed:\s*/, '') || 'malformed YAML'}${key ? ` (key "${key}")` : ''}`;
+    return { code: 'invalid_frontmatter', reason, ...(key ? { key } : {}), ...(line !== undefined ? { line } : {}),
+      message: `Invalid YAML frontmatter: ${detail}. ${HOLD_GUIDANCE[reason]}` };
+  }
+  const expected = ctx.expectedSlug;
+  if (expected && parsed.slug !== expected && slugifyPath(parsed.slug) !== expected && !ctx.slugExempt?.(parsed.slug)) {
+    return { code: 'frontmatter_slug_conflict', key: 'slug',
+      message: ctx.slugConflictMessage?.(parsed.slug, expected) ?? `Frontmatter slug "${parsed.slug}" does not match path-derived slug "${expected}".` };
+  }
+  return null;
+}
+
+/**
  * Inspect raw content for the 7 frontmatter validation classes that gray-matter
  * silently accepts. Mutates `errors` in place. The order of checks is
  * deliberate: cheap byte-level checks first, then structural checks, then
@@ -370,6 +560,9 @@ function collectValidationErrors(
     yamlParseError: Error | null;
     expectedSlug?: string;
     parsedFrontmatter: Record<string, unknown>;
+    /** What ingestion changed to read the block; empty when it could not be read. */
+    recovered: ReadonlyArray<{ kind: RecoveryKind; key: string; line: number }>;
+    recovery?: FrontmatterRecovery;
   },
 ): void {
   // 1. NULL_BYTES — binary corruption indicator.
@@ -456,6 +649,13 @@ function collectValidationErrors(
     });
   }
 
+  // #6157: parse the whole block once. The per-line NESTED_QUOTES heuristic
+  // below only runs when the block fails to parse; a block-scalar
+  // continuation line that looks like `Key: "a", "b"` is valid YAML. A block
+  // over the alias limit counts as not parsing (the heuristics apply).
+  const blockParseError = yamlBlockError(fmBody);
+  const blockParses = blockParseError === null && yamlAliasesWithinLimit(fmBody);
+
   // 5. NESTED_QUOTES — common breakage pattern: `title: "Name "Nick" Last"`.
   //    The heuristic: a frontmatter `key: value` line with 3+ unescaped
   //    double-quote characters is suspicious. But raw quote-counting is
@@ -465,7 +665,7 @@ function collectValidationErrors(
   //    Disambiguate by running js-yaml on just the value; only flag
   //    lines that genuinely fail to parse. The full-frontmatter YAML
   //    parse error is caught separately by check 6 (YAML_PARSE) below.
-  for (let i = firstNonEmpty + 1; i < closeLine; i++) {
+  for (let i = firstNonEmpty + 1; !blockParses && i < closeLine; i++) {
     const line = lines[i];
     const m = line.match(/^\s*[A-Za-z_][\w-]*\s*:\s*(.*)$/);
     if (!m) continue;
@@ -481,7 +681,7 @@ function collectValidationErrors(
     // genuinely broken. Parse the value to disambiguate.
     let isValidYaml = false;
     try {
-      yamlSafeLoad(value);
+      yamlLoad(value);
       isValidYaml = true;
     } catch {
       // YAML parse failed — line is genuinely broken
@@ -503,19 +703,20 @@ function collectValidationErrors(
   // body with empty data, so the validation surface must not depend only on
   // gray-matter's parse path. Gate this on frontmatter-shaped fields so a
   // leading Markdown thematic break / epigraph is preserved as body content.
-  let detectedYamlParseError = looksLikeFrontmatter ? ctx.yamlParseError : null;
-  if (!detectedYamlParseError && looksLikeFrontmatter) {
-    try {
-      yamlSafeLoad(fmBody);
-    } catch (e) {
-      detectedYamlParseError = e as Error;
-    }
-  }
+  const detectedYamlParseError = looksLikeFrontmatter ? (ctx.yamlParseError ?? blockParseError) : null;
   if (detectedYamlParseError) {
+    // #5988: location only. js-yaml's own message quotes the document, and
+    // this text reaches receipts, sync results and remote callers.
+    const located = yamlFailureLocation(lines.slice(firstNonEmpty + 1, closeLine).join('\n'), firstNonEmpty + 1);
+    const recoverable = ctx.recovered.length > 0;
+    const reason = detectedYamlParseError.name === 'FrontmatterLanguageError' ? detectedYamlParseError.message
+      : yamlLocationMessage(located?.reason ?? 'malformed YAML', located?.line ?? ctx.recovery?.line, located?.column);
     errors.push({
       code: 'YAML_PARSE',
-      message: `YAML parse failed: ${detectedYamlParseError.message}`,
-      line: firstNonEmpty + 1,
+      message: `YAML parse failed: ${reason}`,
+      line: ctx.recovery?.line ?? (recoverable ? ctx.recovered[0]!.line : located?.line) ?? firstNonEmpty + 1,
+      recoverable,
+      ...(recoverable ? { recovery: ctx.recovered.map(step => ({ kind: step.kind, key: step.key, line: step.line, recovery_version: RECOVERY_VERSION })) } : {}),
     });
   }
 
@@ -546,6 +747,45 @@ function collectValidationErrors(
         message: `Frontmatter "${field}" should be a string but is ${typeof v} (${JSON.stringify(v)}); quote the value (e.g. ${field}: "${String(v)}").`,
       });
     }
+  }
+}
+
+/**
+ * Most YAML aliases (`*name`) a frontmatter block may hold before the #6157
+ * whole-block checks treat it as not parsing. Frontmatter is untrusted: a few
+ * hundred bytes of nested `&a [*b, *b]` anchors expand exponentially once the
+ * parsed value is walked (compared, stringified). Real frontmatter rarely
+ * uses aliases at all.
+ */
+export const MAX_FRONTMATTER_YAML_ALIASES = 16;
+
+/** False when the text holds more than MAX_FRONTMATTER_YAML_ALIASES aliases outside quoted strings. */
+export function yamlAliasesWithinLimit(text: string): boolean {
+  const unquoted = text.replace(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\n]|'')*'/g, '');
+  let count = 0;
+  for (const _ of unquoted.matchAll(/(?:^|[\s,[{])\*[^\s,[\]{}]/g)) if (++count > MAX_FRONTMATTER_YAML_ALIASES) return false;
+  return true;
+}
+
+/** The js-yaml error for a frontmatter block, or null when the whole block parses. */
+export function yamlBlockError(block: string): Error | null {
+  try {
+    yamlLoad(block);
+    return null;
+  } catch (e) {
+    return e as Error;
+  }
+}
+
+/** Where js-yaml refuses a raw block: its reason phrase and the file line and column. */
+function yamlFailureLocation(block: string, lineOffset: number): { reason: string; line: number; column: number } | null {
+  try {
+    yamlLoad(block);
+    return null;
+  } catch (e) {
+    const err = e as { reason?: string; mark?: { line?: number; column?: number } };
+    if (typeof err.mark?.line !== 'number') return null;
+    return { reason: err.reason ?? 'malformed YAML', line: lineOffset + err.mark.line + 1, column: (err.mark.column ?? 0) + 1 };
   }
 }
 
@@ -614,30 +854,34 @@ export function splitBody(body: string): { compiled_truth: string; timeline: str
  * shape) so the frontmatter's `---` delimiters can't false-positive rule 3.
  */
 export function findTimelineSplitIndex(lines: string[]): number {
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
+  // A sentinel quoted inside a fenced code block (a markdown example) is not
+  // a separator. Mispaired fences (see MarkdownCodeMap) leave every candidate
+  // live, as before.
+  return findLineOutsideFencedCode(lines, (i) => isTimelineSentinelLine(lines, i));
+}
 
-    if (trimmed === '<!-- timeline -->' || trimmed === '<!--timeline-->') {
-      return i;
-    }
+function isTimelineSentinelLine(lines: string[], i: number): boolean {
+  const trimmed = lines[i].trim();
 
-    if (trimmed === '--- timeline ---' || /^---\s+timeline\s+---$/i.test(trimmed)) {
-      return i;
-    }
+  if (trimmed === '<!-- timeline -->' || trimmed === '<!--timeline-->') {
+    return true;
+  }
 
-    if (trimmed === '---') {
-      const beforeContent = lines.slice(0, i).join('\n').trim();
-      if (beforeContent.length === 0) continue;
+  if (trimmed === '--- timeline ---' || /^---\s+timeline\s+---$/i.test(trimmed)) {
+    return true;
+  }
 
-      for (let j = i + 1; j < lines.length; j++) {
-        const next = lines[j].trim();
-        if (next.length === 0) continue;
-        if (/^##\s+(timeline|history)\s*$/i.test(next)) return i;
-        break;
-      }
+  if (trimmed === '---') {
+    const beforeContent = lines.slice(0, i).join('\n').trim();
+    if (beforeContent.length === 0) return false;
+
+    for (let j = i + 1; j < lines.length; j++) {
+      const next = lines[j].trim();
+      if (next.length === 0) continue;
+      return /^##\s+(timeline|history)\s*$/i.test(next);
     }
   }
-  return -1;
+  return false;
 }
 
 /** A timeline entry line: a bullet whose text starts with a 4-digit year
@@ -949,7 +1193,8 @@ function inferSlug(filePath?: string): string {
 function extractTags(frontmatter: Record<string, unknown>): string[] {
   const tags = frontmatter.tags;
   if (!tags) return [];
-  if (Array.isArray(tags)) return tags.map(String);
+  // Only scalar items are tags: stringifying a nested array would expand a YAML alias bomb.
+  if (Array.isArray(tags)) return tags.filter(t => t instanceof Date || (t !== null && typeof t !== 'object')).map(String);
   if (typeof tags === 'string') return tags.split(',').map(t => t.trim()).filter(Boolean);
   return [];
 }
@@ -996,7 +1241,7 @@ export function serializePageToMarkdown(
   opts: SerializePageOpts = {},
 ): string {
   const frontmatter: Record<string, unknown> = {
-    ...((page.frontmatter ?? {}) as Record<string, unknown>),
+    ...slugStampedFrontmatter(page.slug, (page.frontmatter ?? {}) as Record<string, unknown>),
     ...(opts.frontmatterOverrides ?? {}),
   };
   return serializeMarkdown(
@@ -1009,6 +1254,22 @@ export function serializePageToMarkdown(
       tags,
     },
   );
+}
+
+/**
+ * #5966 (W14 P1.7): the one slug rule every render follows. A slug the file
+ * path cannot derive (a doubled hyphen, which `slugifyPath` collapses to one) is
+ * stamped as `slug:` so every path-derived reader (sync, reconcile, repair)
+ * finds the page again; a `frontmatter.slug` naming another identity is
+ * replaced by the page slug (the export rule, #3772). The stamp is
+ * digest-neutral: `parseMarkdown` drops `frontmatter.slug`, so canonical
+ * fields compare equal with or without it.
+ */
+export function slugStampedFrontmatter(slug: string | undefined, frontmatter: Record<string, unknown>): Record<string, unknown> {
+  if (typeof slug !== 'string' || slug === '') return frontmatter;
+  const declared = frontmatter.slug;
+  if (slugifyPath(slug + '.md') !== slug || (declared !== undefined && declared !== slug)) return { ...frontmatter, slug };
+  return frontmatter;
 }
 
 /**
@@ -1074,11 +1335,26 @@ function safeSlugDirSegments(rawSlug: string | null | undefined): string[] | nul
   return segments.slice(0, -1);
 }
 
+/**
+ * The segments of `localPath` below its nearest ancestor holding `.git` (`[]`
+ * when `localPath` is that Git root), or null when no ancestor holds one. A
+ * caller resolving many pages of one source computes it once and passes it to
+ * `resolveSourceLocalFilePath` as `gitScope`.
+ */
+export function sourceGitScope(localPath: string): string[] | null {
+  const absoluteLocalPath = resolve(localPath);
+  for (let cursor = absoluteLocalPath; ; cursor = dirname(cursor)) {
+    if (existsSync(join(cursor, '.git'))) return splitLocalPathSegments(relative(cursor, absoluteLocalPath));
+    if (dirname(cursor) === cursor) return null;
+  }
+}
+
 export function resolveSourceLocalFilePath(
   localPath: string,
   rawSourcePath: string | null | undefined,
   pageSlug?: string | null,
   slugRootMode?: 'git-root' | 'source-root',
+  gitScope?: string[] | null,
 ): string | null {
   if (!rawSourcePath) return null;
   const value = rawSourcePath.trim();
@@ -1090,21 +1366,14 @@ export function resolveSourceLocalFilePath(
   const absoluteLocalPath = resolve(localPath);
   let sourceScopeSegments: string[] = [];
   let resolvedSegments = sourceSegments;
-  let cursor = absoluteLocalPath;
-  while (true) {
-    if (existsSync(join(cursor, '.git'))) {
-      const scope = splitLocalPathSegments(relative(cursor, absoluteLocalPath));
-      sourceScopeSegments = scope;
-      const scoped = scope.length > 0 && scope.every((segment, index) => segment === sourceSegments[index]);
-      if (scoped && (slugRootMode !== 'source-root'
-        || !!pageSlug && resolveSlugForPath(sourceSegments.slice(scope.length).join('/')) === pageSlug)) {
-        resolvedSegments = sourceSegments.slice(scope.length);
-      }
-      break;
+  const scope = gitScope === undefined ? sourceGitScope(localPath) : gitScope;
+  if (scope) {
+    sourceScopeSegments = scope;
+    const scoped = scope.length > 0 && scope.every((segment, index) => segment === sourceSegments[index]);
+    if (scoped && (slugRootMode !== 'source-root'
+      || !!pageSlug && resolveSlugForPath(sourceSegments.slice(scope.length).join('/')) === pageSlug)) {
+      resolvedSegments = sourceSegments.slice(scope.length);
     }
-    const parent = dirname(cursor);
-    if (parent === cursor) break;
-    cursor = parent;
   }
   const directPath = join(absoluteLocalPath, ...resolvedSegments);
   if (existsSync(directPath)) return directPath;

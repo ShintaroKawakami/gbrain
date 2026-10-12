@@ -22,6 +22,7 @@ import { OperationTimeoutError, withTimeout } from '../timeout.ts';
 import type { BrainEngine, SynthesisEvidenceInput } from '../engine.ts';
 import type { SearchResult } from '../types.ts';
 import { runGather, renderPagesBlock, pagesBlockExcerptLen, takesHitToTakeForPrompt, selectRelevantExcerpt } from './gather.ts';
+import { stampPageTrust, stampRowTrust } from '../eligibility/stamp.ts';
 import { renderTakesBlock } from './sanitize.ts';
 import { buildThinkSystemPrompt, buildThinkUserMessage } from './prompt.ts';
 import { resolveCitations, type ParsedCitation } from './cite-render.ts';
@@ -31,11 +32,13 @@ import { chat as gatewayChat, probeChatModel, isThinkingModel, type ChatResult }
 import { AIConfigError } from '../ai/errors.ts';
 import { normalizeModelId } from '../model-id.ts';
 import { hasAnthropicKey } from '../ai/anthropic-key.ts';
-import { parseTemporalWindow } from './temporal-window.ts';
+import { resolveThinkWindow } from './temporal-window.ts';
+import { resolveThinkTemporalContext } from './temporal-context.ts';
 import { resolveExcludePrivatePages } from '../search/private-visibility.ts';
 import { deliverEvidence, effectivePlan, resolveEvidencePlan, EVIDENCE_BLOCK_CHAR_CAP, THINK_RETURN_UNIT_CONFIG_KEY, type DeliveryMeta } from '../search/evidence-delivery.ts';
 import { startThinkDecide, thinkAbstainResult, type ThinkAbstention } from './decide.ts';
 import { classifyIntent } from './intent.ts';
+import { deriveTrust, derivedMaintenanceTransaction, type TaintRef } from '../trust/taint.ts';
 
 /** Anthropic Messages client interface — same shape used by subagent.ts so test stubs can be shared. */
 export interface ThinkLLMClient {
@@ -79,6 +82,8 @@ export interface RunThinkOpts {
    * default model path keeps its graceful-degrade behavior.
    */
   modelExplicit?: boolean;
+  /** `false` keeps the gateway client on `model` (no `chat_fallback_chain` hop); an explicit model always does. */
+  allowFallback?: boolean;
   /** Optional time window for temporal questions. */
   since?: string;
   until?: string;
@@ -140,7 +145,14 @@ export interface RunThinkOpts {
    * to world-only rows.
    */
   remote?: boolean;
+  /**
+   * Reference date (YYYY-MM-DD) the question's relative time words resolve
+   * against; default today in `brain.timezone`. Evals pass the dataset's
+   * question date. Invalid or future values throw ReferenceDateError.
+   */
+  referenceDate?: string;
 }
+
 
 /** Structured response from the LLM (matches the schema declared in prompt.ts). */
 export interface ThinkResponse {
@@ -206,8 +218,23 @@ export interface ThinkResult {
   usage?: { input_tokens: number; output_tokens: number } | null;
   /** Evidence delivery meta, present only when think.return_unit is not chunk. */
   evidence_delivery?: import('../search/evidence-delivery.ts').DeliveryMeta;
+  /** Gathered pages with the revision retrieved, for retrieval-feedback recording; the op layer strips it. */
+  feedback_evidence?: Array<{ source_id: string; slug: string; content_hash: string | null }>;
+  /** #5575 I2: every page, take and trajectory fact placed in the synthesis prompt; `persistSynthesis` taints from them. The op layer strips it. */
+  taint_refs?: TaintRef[];
   /** Only set when --save was true and the caller persisted a synthesis page. */
   savedSlug?: string;
+  /**
+   * Quote grounding (think.quote_verify, default on): `answer` is the safe
+   * version (near-match quotes repaired to the evidence's words, quotes found
+   * in no evidence unquoted and marked [unverified]); `answer_raw` is what the
+   * model wrote. Present only when the answer contained quotes.
+   */
+  answer_raw?: string;
+  quote_check?: { grounded: number; repaired: number; unverified: number };
+  unverified_quotes?: Array<{ text: string; reason: string }>;
+  /** What `persistSynthesis` saves: the raw answer with every claim unit carrying an unverified quote removed, and those units. */
+  persist?: { answer: string; unverified_claims: Array<{ text: string; reason: string; detail: string }> };
   /** Diagnostics for `--explain` callers (CLI surface for v0.29). */
   diagnostics: {
     pagesFromHybrid: number;
@@ -219,6 +246,10 @@ export interface ThinkResult {
   cost_usd?: number;
   /** System One S4 (on): the brain holds no evidence; synthesis was skipped (think/decide.ts). */
   abstained?: ThinkAbstention;
+  /** The date frame the synthesis read in (reference date + brain timezone). */
+  temporal?: { reference_date: string; time_zone: string };
+  /** PR #5086: who bounded the evidence, when a window applied: the caller's `since`/`until`, or the one explicit date the question named (`WINDOW_FROM_QUESTION` warning). */
+  window_source?: 'caller' | 'question';
 }
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 4000;
@@ -497,13 +528,13 @@ async function persistCitations(
  * the renderer passes through whole instead of cutting its own excerpts;
  * auto's unchanged chunks keep the usual excerpts.
  */
-async function renderThinkPages(engine: BrainEngine, opts: RunThinkOpts, pages: SearchResult[]): Promise<{ pagesBlock: string; evidenceDelivery?: DeliveryMeta }> {
+async function renderThinkPages(engine: BrainEngine, opts: RunThinkOpts, pages: SearchResult[], timeZone: string): Promise<{ pagesBlock: string; evidenceDelivery?: DeliveryMeta }> {
   const plan = await resolveEvidencePlan(engine, {
     remote: opts.remote, returnUnit: undefined, returnWindow: undefined, budget: undefined,
     snippetChars: undefined, snippetCap: 0, configKey: THINK_RETURN_UNIT_CONFIG_KEY, op: 'think',
   });
   const applied = effectivePlan(plan, pages);
-  if (!applied) return { pagesBlock: renderPagesBlock(pages, pagesBlockExcerptLen(pages.length), opts.question) };
+  if (!applied) return { pagesBlock: renderPagesBlock(pages, pagesBlockExcerptLen(pages.length), opts.question, { timeZone }) };
   const delivered = await deliverEvidence(engine, pages, applied, {
     ...(opts.allowedSources !== undefined && opts.allowedSources.length > 0 ? { sourceIds: opts.allowedSources } : opts.sourceId !== undefined ? { sourceId: opts.sourceId } : {}),
     excludePrivate: opts.excludePrivate ?? await resolveExcludePrivatePages(engine, opts.remote),
@@ -511,11 +542,32 @@ async function renderThinkPages(engine: BrainEngine, opts: RunThinkOpts, pages: 
   });
   const pagesBlock = applied.unit === 'auto'
     ? renderPagesBlock(delivered.results, pagesBlockExcerptLen(pages.length), opts.question,
-      { verbatim: r => r.delivered?.reason !== 'not_conversation' && r.delivered?.reason !== 'conversation_over_budget', verbatimLen: EVIDENCE_BLOCK_CHAR_CAP })
-    : renderPagesBlock(delivered.results, EVIDENCE_BLOCK_CHAR_CAP, opts.question, { verbatim: true });
+      { verbatim: r => r.delivered?.reason !== 'not_conversation' && r.delivered?.reason !== 'conversation_over_budget', verbatimLen: EVIDENCE_BLOCK_CHAR_CAP, timeZone })
+    : renderPagesBlock(delivered.results, EVIDENCE_BLOCK_CHAR_CAP, opts.question, { verbatim: true, timeZone });
   return { pagesBlock, evidenceDelivery: delivered.delivery };
 }
 
+/**
+ * The question embedding gather may use, or undefined. A brain that opted out
+ * of embedding never sends the question to a provider (warning
+ * QUESTION_EMBED_SKIPPED_EMBEDDING_DISABLED); a failing embedder degrades to
+ * QUESTION_EMBED_FAILED with the raw error on stderr only (D6).
+ */
+async function embedThinkQuestion(engine: BrainEngine, opts: RunThinkOpts, warnings: string[]): Promise<Float32Array | undefined> {
+  if (!opts.embedQuestion) return undefined;
+  const { factEmbeddingDisabled } = await import('../embedding-disabled.ts');
+  if (await factEmbeddingDisabled(engine)) {
+    warnings.push((await import('../interop-notices.ts')).QUESTION_EMBED_OPTED_OUT);
+    return undefined;
+  }
+  try {
+    return (await opts.embedQuestion(opts.question)) ?? undefined;
+  } catch (e) {
+    warnings.push('QUESTION_EMBED_FAILED');
+    process.stderr.write(`[think] question embed failed: ${e instanceof Error ? e.message : String(e)}\n`);
+    return undefined;
+  }
+}
 /**
  * Run the think pipeline. Returns a ThinkResult — caller decides whether
  * to print, persist as synthesis page, or surface as MCP response.
@@ -526,7 +578,12 @@ export async function runThink(
 ): Promise<ThinkResult> {
   const rounds = Math.max(1, opts.rounds ?? 1);
   const warnings: string[] = [];
-  const window = parseTemporalWindow(opts.since, opts.until);
+  // PR #5086: caller bounds are authoritative; with none, the one explicit date the question names bounds the synthesis.
+  const resolvedWindow = resolveThinkWindow(opts.question, opts.since, opts.until);
+  const window = resolvedWindow?.window ?? null;
+  if (resolvedWindow?.source === 'question') warnings.push('WINDOW_FROM_QUESTION');
+  const windowMeta = resolvedWindow ? { window_source: resolvedWindow.source } : {};
+  const temporal = await resolveThinkTemporalContext(engine, { referenceDate: opts.referenceDate });
 
   // Resolve the model through the 6-tier chain.
   const modelUsed = await resolveModel(engine, {
@@ -551,18 +608,8 @@ export async function runThink(
     }
   }
 
-  // Optional question embedding — caller decides whether to pay the embedder.
-  let questionEmbedding: Float32Array | undefined;
-  if (opts.embedQuestion) {
-    try {
-      const e = await opts.embedQuestion(opts.question);
-      if (e) questionEmbedding = e;
-    } catch (e) {
-      // D6: code-only on the wire; raw exception text goes to server logs.
-      warnings.push('QUESTION_EMBED_FAILED');
-      process.stderr.write(`[think] question embed failed: ${e instanceof Error ? e.message : String(e)}\n`);
-    }
-  }
+  // Optional question embedding — caller decides whether to pay the embedder; an opted-out brain never does.
+  const questionEmbedding = await embedThinkQuestion(engine, opts, warnings);
 
   const thinkDecide = await startThinkDecide(engine, opts, classifyIntent(opts.question)).catch(() => undefined); // System One S2/S4; undefined when both are off
   // GATHER
@@ -583,12 +630,15 @@ export async function runThink(
   // legitimately-empty one for MCP/remote callers.
   for (const w of gather.warnings) warnings.push(w);
   if (gather.diagnostics.window?.dropped) warnings.push(`WINDOW_EXCLUDED_${gather.diagnostics.window.dropped}_PAGES`);
+  // #5575 A6: every page and take reaches the prompt with its trust tier.
+  await stampPageTrust(engine, gather.pages);
+  gather.takes = await stampRowTrust(engine, 'takes', gather.takes, t => ('take_id' in t ? t.take_id : (t as { id: number }).id));
 
   // Render evidence blocks for the prompt. #4510: the per-page excerpt is
   // budget-aware — 600 chars is the FLOOR (a big gather never collapses each
   // page below it) and a small gather spreads the block budget into much
   // larger, often complete, per-page windows.
-  const { pagesBlock, evidenceDelivery } = await renderThinkPages(engine, opts, gather.pages);
+  const { pagesBlock, evidenceDelivery } = await renderThinkPages(engine, opts, gather.pages, temporal.timeZone);
   const takesForPrompt = gather.takes.map(takesHitToTakeForPrompt);
   const { rendered: takesBlock, sanitizedCount } = renderTakesBlock(takesForPrompt);
   if (sanitizedCount > 0) {
@@ -635,6 +685,7 @@ export async function runThink(
   // is the kill switch. `withTrajectory: false` caller opt also bypasses.
   // `other` intent short-circuits before any SQL fires.
   let trajectoryBlock = '';
+  const trajectoryFactIds: number[] = [];
   let trajectoryPointsCount = 0;
   let trajectoryExcludedCount = 0;
   const trajectoryEnabledConfig = await readThinkTrajectoryEnabled(engine);
@@ -649,6 +700,7 @@ export async function runThink(
           const { resolveEntitySlugWithSource } = await import('../entities/resolve.ts');
           const { formatTrajectoryBlock } = await import('../trajectory-format.ts');
           const sourceIdScalar = opts.sourceId ?? 'default';
+          const excludePrivate = opts.excludePrivate ?? await resolveExcludePrivatePages(engine, opts.remote);
           // Per-candidate trajectory fetch. Concurrency cap = 3; each call
           // has its own 5s timeout via Promise.race. allSettled prevents
           // one error from killing the others (Codex Problem 13: timeout
@@ -674,6 +726,7 @@ export async function runThink(
                     ...(opts.sourceId !== undefined ? { sourceId: opts.sourceId } : {}),
                     ...(opts.allowedSources !== undefined ? { sourceIds: opts.allowedSources } : {}),
                     ...(opts.remote !== undefined ? { remote: opts.remote } : {}),
+                    excludePrivate,
                     kind: 'all',
                     limit: 100,
                   }),
@@ -691,6 +744,7 @@ export async function runThink(
                   return !outside;
                 }) : points;
                 if (boundedPoints.length === 0) return null;
+                trajectoryFactIds.push(...boundedPoints.map(point => point.fact_id));
                 const fmt = formatTrajectoryBlock(boundedPoints, resolved.slug, {
                   intent: trajIntent,
                 });
@@ -728,17 +782,13 @@ export async function runThink(
   // SYNTHESIZE
   const intent = inferIntent(opts.question, opts.anchor);
   const systemPrompt = buildThinkSystemPrompt({
-    intent,
+    currentDate: true, intent, willSave: opts.save, withCalibration: !!calibrationBlockOpts,
     ...(opts.anchor !== undefined ? { anchor: opts.anchor } : {}),
-    ...(opts.since !== undefined ? { since: opts.since } : {}),
-    ...(opts.until !== undefined ? { until: opts.until } : {}),
-    willSave: opts.save,
-    withCalibration: !!calibrationBlockOpts,
+    ...(resolvedWindow?.since !== undefined ? { since: resolvedWindow.since } : {}),
+    ...(resolvedWindow?.until !== undefined ? { until: resolvedWindow.until } : {}),
   });
   const userMessage = buildThinkUserMessage({
-    question: opts.question,
-    pagesBlock,
-    takesBlock,
+    question: opts.question, pagesBlock, takesBlock, currentDate: `${temporal.referenceDate} (${temporal.timeZone})`,
     ...(graphBlock !== undefined ? { graphBlock } : {}),
     ...(calibrationBlockOpts !== undefined ? { calibration: calibrationBlockOpts } : {}),
     ...(trajectoryBlock.length > 0 ? { trajectoryBlock } : {}),
@@ -773,7 +823,7 @@ export async function runThink(
     // That bypassed gateway config (gbrain config set anthropic_api_key)
     // because the Anthropic SDK only reads process.env.ANTHROPIC_API_KEY.
     // Closes #952 (think over MCP returns "no LLM available").
-    const client = opts.client ?? await tryBuildGatewayClient(modelUsed, { explicitModel: opts.modelExplicit });
+    const client = opts.client ?? await tryBuildGatewayClient(modelUsed, { explicitModel: opts.modelExplicit, allowFallback: opts.allowFallback });
     if (!client) {
       // Label the failure honestly: a missing key and an unusable model id are
       // different incidents with different fixes. Pre-fix EVERY null client was
@@ -814,6 +864,7 @@ export async function runThink(
         synthesis_status: modelProblem ? 'model_unusable' : 'no_llm',
         ...(stubExtractive ? { extractive: stubExtractive } : {}),
         usage: null,         // [E2] no LLM ran — no accounting
+        ...windowMeta,
         diagnostics: {
           pagesFromHybrid: gather.diagnostics.pagesFromHybrid,
           takesFromKeyword: gather.diagnostics.takesFromKeyword,
@@ -897,12 +948,7 @@ export async function runThink(
           response = { answer: text, citations: [], gaps: [] };
         }
       } else {
-        const r = parsed as Partial<ThinkResponse>;
-        response = {
-          answer: typeof r.answer === 'string' ? r.answer : '',
-          citations: Array.isArray(r.citations) ? (r.citations as ThinkResponse['citations']) : [],
-          gaps: Array.isArray(r.gaps) ? (r.gaps as string[]).filter(g => typeof g === 'string') : [],
-        };
+        response = toThinkResponse(parsed as Partial<ThinkResponse>);
       }
     }
   }
@@ -946,7 +992,7 @@ export async function runThink(
 
   return {
     question: opts.question,
-    answer: response.answer,
+    answer: response.answer, ...(synthesisStatus === 'ok' ? await groundThinkAnswer(engine, response.answer, [opts.question, pagesBlock, takesBlock, graphBlock ?? '', trajectoryBlock], warnings) : {}),
     citations: resolved.citations,
     gaps: response.gaps,
     pagesGathered: gather.pages.length,
@@ -959,6 +1005,9 @@ export async function runThink(
     // ANDs the not-JSON/sentinel flag with a content check (catches valid-but-empty JSON).
     synthesisOk: synthesisOk && response.answer.trim().length > 0,
     synthesis_status: synthesisStatus,
+    feedback_evidence: gather.pages.map(pg => ({ source_id: pg.source_id ?? 'default', slug: pg.slug, content_hash: pg.content_hash ?? null })),
+    taint_refs: [...gather.pages.map(pg => ({ table: 'pages' as const, sourceId: pg.source_id ?? 'default', slug: pg.slug })),
+      ...gather.takes.map(t => ({ table: 'takes' as const, id: t.take_id })), ...trajectoryFactIds.map(id => ({ table: 'facts' as const, id }))],
     ...(extractive ? { extractive } : {}),
     usage, ...(evidenceDelivery ? { evidence_delivery: evidenceDelivery } : {}),
     diagnostics: {
@@ -967,6 +1016,17 @@ export async function runThink(
       takesFromVector: gather.diagnostics.takesFromVector,
       graphHits: gather.diagnostics.graphHits,
     },
+    temporal: { reference_date: temporal.referenceDate, time_zone: temporal.timeZone },
+    ...windowMeta,
+  };
+}
+
+/** Normalizes the model's parsed JSON envelope. */
+function toThinkResponse(r: Partial<ThinkResponse>): ThinkResponse {
+  return {
+    answer: typeof r.answer === 'string' ? r.answer : '',
+    citations: Array.isArray(r.citations) ? (r.citations as ThinkResponse['citations']) : [],
+    gaps: Array.isArray(r.gaps) ? (r.gaps as string[]).filter(g => typeof g === 'string') : [],
   };
 }
 
@@ -1030,16 +1090,19 @@ export async function persistSynthesis(
     .slice(0, 60) || 'untitled';
   const slug = `synthesis/${slugSafe}-${today}`;
 
-  // Build the markdown body
+  // Build the markdown body. A claim whose quote is not in the evidence is not saved as prose;
+  // it goes to frontmatter unverified_claims (reviewable with get_page, out of search and recall).
   const body = [
     `# ${result.question}`,
     '',
-    stripGapsSection(result.answer),
+    stripGapsSection(result.persist?.answer ?? result.answer),
     '',
     result.gaps.length > 0 ? '## Gaps\n\n' + result.gaps.map(g => `- ${g}`).join('\n') : '',
   ].filter(Boolean).join('\n');
 
-  const page = await engine.putPage(slug, {
+  const derivation = await deriveTrust(engine, result.taint_refs ?? [], { channel: 'derive:think' });
+  const page = await derivedMaintenanceTransaction(engine, derivation, async tx => {
+    const written = await tx.putPage(slug, {
     title: result.question.slice(0, 200),
     type: 'synthesis',
     compiled_truth: body,
@@ -1050,8 +1113,11 @@ export async function persistSynthesis(
       date: today,
       pages_gathered: result.pagesGathered,
       takes_gathered: result.takesGathered,
+      ...(result.persist?.unverified_claims.length ? { unverified_claims: result.persist.unverified_claims.map(c => ({ ...c, sources: ['think evidence'], detected_at: today })) } : {}),
     },
   }, scope.sourceId ? { sourceId: scope.sourceId } : undefined);
+    return { result: written, rows: [{ table: 'pages' as const, id: written.id, sourceId: scope.sourceId ?? 'default' }] };
+  });
 
   const persisted = await persistCitations(engine, page.id, result.citations, scope);
   return { slug, evidenceInserted: persisted.inserted, warnings: persisted.warnings };
@@ -1104,6 +1170,37 @@ async function readThinkTrajectoryEnabled(engine: BrainEngine): Promise<boolean>
 }
 
 /**
+ * Ground every quoted span of a synthesized answer against the evidence blocks
+ * the prompt carried, the user's question included (quoting the question back
+ * is supported). Empty when think.quote_verify is off or the answer has no
+ * quotes; otherwise the safe answer, what the model wrote, the counts, and the
+ * body persistSynthesis saves (failing claim units removed).
+ */
+async function groundThinkAnswer(engine: BrainEngine, answer: string, blocks: string[], warnings: string[]):
+  Promise<Partial<Pick<ThinkResult, 'answer' | 'answer_raw' | 'quote_check' | 'unverified_quotes' | 'persist'>>> {
+  if (answer.trim().length === 0 || !await readThinkQuoteVerify(engine)) return {};
+  const { groundSource, groundAnswerQuotes, verifyBody } = await import('../cycle/synthesize-verify.ts');
+  const sources = blocks.map((block, i) => ({ block, i })).filter(b => b.block.trim().length > 0)
+    .map(b => groundSource(`think-evidence-${b.i}`, b.block, { tolerant: true }));
+  const check = groundAnswerQuotes(answer, sources);
+  if (check.quote_check.grounded + check.quote_check.repaired + check.quote_check.unverified === 0) return {};
+  if (check.quote_check.unverified > 0) warnings.push('QUOTE_NOT_IN_EVIDENCE');
+  const persisted = verifyBody(answer, sources, { checks: 'quotes' });
+  return { answer: check.answer, answer_raw: answer, quote_check: check.quote_check, unverified_quotes: check.unverified_quotes,
+    persist: { answer: persisted.body, unverified_claims: persisted.quarantined } };
+}
+
+/** `think.quote_verify` (on unless set false): ground quoted spans in think answers against the prompt's evidence. */
+async function readThinkQuoteVerify(engine: BrainEngine): Promise<boolean> {
+  try {
+    const v = await engine.getConfig('think.quote_verify');
+    return !v || !['false', '0', 'no', 'off'].includes(v.trim().toLowerCase());
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Try to build a gateway-backed ThinkLLMClient for the given model.
  * Returns null when the gateway cannot resolve a usable chat provider for
  * this model (missing API key for the resolved provider, unknown provider,
@@ -1112,7 +1209,7 @@ async function readThinkTrajectoryEnabled(engine: BrainEngine): Promise<boolean>
  */
 async function tryBuildGatewayClient(
   modelUsed: string,
-  opts: { explicitModel?: boolean } = {},
+  opts: { explicitModel?: boolean; allowFallback?: boolean } = {},
 ): Promise<ThinkLLMClient | null> {
   // Normalize: ensure provider:model shape (and slash→colon — #1698). resolveModel
   // returns bare anthropic ids (`claude-opus-4-7`); gateway.chat needs `anthropic:...`.
@@ -1158,6 +1255,8 @@ async function tryBuildGatewayClient(
           system,
           messages,
           maxTokens: params.max_tokens,
+          // An explicit --model is a hard requirement (#1698), never a hop.
+          ...(opts.explicitModel || opts.allowFallback === false ? { allowFallback: false } : {}),
         });
       } catch (e) {
         // AIConfigError at chat time = e.g. key revoked mid-run. For an EXPLICIT

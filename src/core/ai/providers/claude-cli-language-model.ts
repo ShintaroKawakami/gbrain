@@ -278,7 +278,8 @@ function renderPrompt(prompt: LanguageModelV2Prompt): { systemText: string; user
           if (p.type === 'text') return p.text;
           if (p.type === 'reasoning') return ''; // dropped on replay
           if (p.type === 'tool-call') {
-            return `[tool_use ${p.toolName}(${p.input})]`;
+            // #6236: the V2 prompt's input is an object; a template literal rendered it as [object Object].
+            return `[tool_use ${p.toolName}(${typeof p.input === 'string' ? p.input : JSON.stringify(p.input)})]`;
           }
           if (p.type === 'tool-result') {
             const out = typeof p.output === 'string' ? p.output : JSON.stringify(p.output);
@@ -336,8 +337,17 @@ function runClaude(
   userPrompt: string,
   model: string,
   signal?: AbortSignal,
+  maxOutputTokens?: number,
 ): Promise<ClaudeJsonResult> {
   return new Promise((resolve, reject) => {
+    // #6424: forward the call's output cap. The inline --settings env sits
+    // above the user's settings.json env block, so both carry it.
+    const outputCap = typeof maxOutputTokens === 'number' && Number.isInteger(maxOutputTokens) && maxOutputTokens > 0
+      ? String(maxOutputTokens)
+      : undefined;
+    const settings = outputCap
+      ? JSON.stringify({ disableAllHooks: true, env: { CLAUDE_CODE_MAX_OUTPUT_TOKENS: outputCap } })
+      : '{"disableAllHooks":true}';
     const args = [
       '--print',
       '--output-format', 'json',
@@ -356,7 +366,7 @@ function runClaude(
       // extracting it spawns another call. Unlike --bare this keeps the
       // subscription login (credentials are not settings). Accepted by every
       // CLI that accepts the flags above.
-      '--settings', '{"disableAllHooks":true}',
+      '--settings', settings,
     ];
     if (systemPrompt) {
       args.push('--system-prompt', systemPrompt);
@@ -389,6 +399,7 @@ function runClaude(
     // see resolveHermeticConfigDir for the auth caveat that makes it opt-in.
     const hermeticConfigDir = resolveHermeticConfigDir();
     if (hermeticConfigDir) env.CLAUDE_CONFIG_DIR = hermeticConfigDir;
+    if (outputCap) env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = outputCap;
     const child = spawn(claudeBin(), args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: ensureCleanCwd(),
@@ -622,6 +633,19 @@ function normalizeModel(model: string): string {
   return idx >= 0 ? model.slice(idx + 1) : model;
 }
 
+/**
+ * #6260: the CLI's own `stop_reason` decides the finish reason, so a response
+ * cut off at the output cap reads as `length` and a refusal as
+ * `content-filter`; callers that refuse to commit a clipped answer can only
+ * see it this way. Tool calls parsed from the text finish as `tool-calls`
+ * unless the answer was cut off. A missing or unknown reason stays `stop`.
+ */
+export function claudeCliFinishReason(stopReason: string | null | undefined, hasToolCalls: boolean): 'stop' | 'length' | 'content-filter' | 'tool-calls' {
+  if (stopReason === 'max_tokens') return 'length';
+  if (stopReason === 'refusal') return 'content-filter';
+  return hasToolCalls ? 'tool-calls' : 'stop';
+}
+
 export class ClaudeCliLanguageModel implements LanguageModelV2 {
   readonly specificationVersion = 'v2' as const;
   readonly provider = 'claude-cli';
@@ -647,7 +671,7 @@ export class ClaudeCliLanguageModel implements LanguageModelV2 {
     const toolInstructions = buildToolUseInstructions(options.tools);
     const systemPrompt = [systemText, toolInstructions].filter(s => s.length > 0).join('\n');
 
-    const result = await runClaude(systemPrompt, userPrompt, this.modelId, options.abortSignal);
+    const result = await runClaude(systemPrompt, userPrompt, this.modelId, options.abortSignal, options.maxOutputTokens);
     const { toolCalls, beforeText, afterText } = extractToolCalls(result.result);
 
     const content: LanguageModelV2Content[] = [];
@@ -666,18 +690,19 @@ export class ClaudeCliLanguageModel implements LanguageModelV2 {
       content.push({ type: 'text', text: result.result ?? '' });
     }
 
-    const finishReason = toolCalls.length > 0 ? 'tool-calls' as const : 'stop' as const;
-    const inputTokens = result.usage?.input_tokens;
-    const outputTokens = result.usage?.output_tokens;
-    const totalTokens = (inputTokens ?? 0) + (outputTokens ?? 0);
-    // `cache_creation_input_tokens` is deliberately NOT surfaced here — the AI
-    // SDK's LanguageModelV2Usage has no corresponding field, and folding it in
-    // would need a claude-cli-specific branch in the gateway's usage assembly
-    // (src/core/ai/gateway.ts). Out of scope for this fix.
+    const finishReason = claudeCliFinishReason(result.stop_reason, toolCalls.length > 0);
+    // The CLI reports Anthropic's separate buckets; LanguageModelV2Usage wants
+    // the TOTAL input with the cache read as a subset (what every SDK provider
+    // reports), so the gateway prices cache tokens once. Cache creation has no
+    // V2 field: it stays inside the total at the input rate.
     const cachedInputTokens =
       result.usage?.cache_read_input_tokens !== undefined
         ? Number(result.usage.cache_read_input_tokens)
         : undefined;
+    const inputTokens = result.usage?.input_tokens === undefined ? undefined
+      : result.usage.input_tokens + (cachedInputTokens ?? 0) + Number(result.usage.cache_creation_input_tokens ?? 0);
+    const outputTokens = result.usage?.output_tokens;
+    const totalTokens = (inputTokens ?? 0) + (outputTokens ?? 0);
 
     return {
       content,

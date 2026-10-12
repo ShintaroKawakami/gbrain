@@ -38,7 +38,7 @@ Managed Markdown sync runs on the registered filesystem owner with
 commit, source incarnation, owner epoch, topology generation and page
 identities/revisions. Attached repositories import committed Git content;
 `--working-tree` opts into uncommitted files and detached repositories include
-them automatically. Source-relative exclusions retain their existing meaning.
+them automatically. Source-relative exclusions apply as they do in classic sync.
 Each file's bytes and fingerprint are frozen before its journal request is
 admitted. Import leaves the original bytes intact unless canonical sanitization
 or retained tags require an explicit recoverable file publication.

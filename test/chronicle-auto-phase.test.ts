@@ -337,8 +337,10 @@ describe('ledger and discovery (E1/E6/D12)', () => {
     await runPhaseChronicle(engine, { judge });
     expect(judge.calls).toBe(0);
     await Bun.sleep(1700);
-    await runPhaseChronicle(engine, { judge });
-    expect(judge.calls).toBe(1);
+    const r = await runPhaseChronicle(engine, { judge });
+    // An ended invite projects without a chat call (invite-projection.ts).
+    expect(judge.calls).toBe(0);
+    expect(r.details).toMatchObject({ extracted: 1, events_written: 1 });
   }), 120_000);
 
   test('a managed page written without a decision is left to backfill (no_write_decision)', () => brain(async ({ engine }) => {

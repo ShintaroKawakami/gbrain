@@ -246,6 +246,8 @@ test('managed writeSingleFact supersedes a near-duplicate of the same kind like 
   await managed(async ({ engine, put }) => {
     await engine.setConfig('embedding_model', 'openai:text-embedding-3-large');
     await engine.setConfig('embedding_dimensions', '1536');
+    // Calibrate the test embedder: an uncalibrated model never supersedes by cosine (supersession-threshold.ts).
+    await engine.setConfig('facts.supersession_thresholds', JSON.stringify({ 'openai:text-embedding-3-large@1536': 0.95 }));
     await put('people/alice-example', PERSON('Alice Example'));
   }, async ({ engine, sourceId, root }) => {
     const remember = (fact: string) => writeSingleFact(engine, sourceId, { fact, provenance: 'fixture', entity: 'people/alice-example', visibility: 'world' });
@@ -295,6 +297,29 @@ test('managed bulk conversation extraction writes its facts and terminal audit r
     const replay = await runExtractConversationFactsCore(engine, { sourceId, overrideDisabled: true, extractor, types: ['conversation'], force: true });
     expect(replay.orphan_facts_cleaned).toBe(2);
     expect(await facts(engine, sourceId, 'conversations/synthetic-chat')).toHaveLength(2);
+  });
+}, 120_000);
+
+test('managed conversation extraction honors facts.default_visibility=world on extracted rows; both audit rows stay private', async () => {
+  const single = `---\ntitle: Single message\ntype: conversation\n---\n**Alice Example** (2024-03-15 9:00 AM): Only one message here.\n`;
+  await managed(async ({ put }) => {
+    await put('conversations/synthetic-chat', CONVERSATION);
+    await put('conversations/single-message', single);
+  }, async ({ engine, sourceId }) => {
+    await engine.setConfig('facts.default_visibility', 'world');
+    try {
+      const result = await runExtractConversationFactsCore(engine, { sourceId, overrideDisabled: true, extractor, types: ['conversation'] });
+      expect(result).toMatchObject({ facts_inserted: 1, pages_marked_non_extractable: 1, pages_failed: 0 });
+      const rows = await engine.executeRaw<{ slug: string; source: string; visibility: string }>(
+        'SELECT source_markdown_slug AS slug, source, visibility FROM facts WHERE source_id=$1 ORDER BY source_markdown_slug, row_num', [sourceId]);
+      expect(rows).toEqual([
+        { slug: 'conversations/single-message', source: 'cli:extract-conversation-facts:non-extractable:v2', visibility: 'private' },
+        { slug: 'conversations/synthetic-chat', source: 'cli:extract-conversation-facts', visibility: 'world' },
+        { slug: 'conversations/synthetic-chat', source: 'cli:extract-conversation-facts:terminal:v2', visibility: 'private' },
+      ]);
+    } finally {
+      await engine.unsetConfig('facts.default_visibility');
+    }
   });
 }, 120_000);
 

@@ -219,6 +219,19 @@ export interface ContextPackRequest {
    * OpenClaw assemble poll.
    */
   manifestOnly?: boolean;
+  /**
+   * Always-loaded core (additive, read-only): return only the core block for
+   * the session source — no assembly, no cursor advance, no banking. Used by
+   * the OpenClaw assemble lane. An older serve ignores it and assembles.
+   */
+  coreOnly?: boolean;
+  /**
+   * #5575 ENG-11 (additive, coreOnly companion): the trust cache identity of
+   * the client's memoized core block. When the serve's current identity
+   * matches, it answers `coreTrust.unchanged` without assembling. An older
+   * serve ignores it and returns the full block without an identity.
+   */
+  coreIdentity?: string;
 }
 
 export type IpcRequest =
