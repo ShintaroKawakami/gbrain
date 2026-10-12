@@ -99,6 +99,30 @@ Repeat `gbrain google connect --account work@yourco.com` per account; each
 account becomes its own source (`gbrain sources add gmail-work --kind google
 --account work@yourco.com`) with independent sync cursors and locks.
 
+## Contacts next to your own person pages
+
+A Google source renders each contact as a near-empty person page under
+`people/<slug>` by default, the same directory a brain repo uses for its own
+hand-written profiles. On a multi-source brain that collision has two
+costs: mentions in the Gmail source bind to the contact stub instead of the
+real profile, and `gbrain doctor` lists the stubs under `junk_entity_hubs`.
+Two remedies, independent of each other:
+
+- **Keep contacts out of `people/`.** Add the source with
+  `--contacts-dir contacts` (stored as the source's `g_contacts_dir`; any
+  relative directory of lower-case segments). Contact pages are found by
+  their `google_contact_id`, not by directory, so a source whose directory
+  changes moves every contact on its next sweep: the new page lands first,
+  then the page under the old directory is retired. The default stays
+  `people` for every existing source.
+- **Let the stub yield.** With `gbrain config set link_resolution.cross_source
+  true`, a mention in the Gmail source of a name that has a real page in
+  another source binds to that page instead of the connector's stub (one
+  canonical page, or the one sharing the stub's slug; a tie keeps the stub).
+  The next mention pass (`gbrain extract --stale`, or autopilot) re-binds
+  pages it reaches; `gbrain doctor --only junk_entity_hubs` names the
+  canonical twin of each stub and the next step.
+
 ## Secondary calendars
 
 The calendar sweep reads ONE calendar per source (so each keeps its own
@@ -126,6 +150,34 @@ for. Re-pointing an existing source at a different calendar (its
 re-lists the new calendar from a fresh window instead of replaying the old
 calendar's delta. Pages already imported from the previous calendar stay in
 the brain until you remove them — they are not reconciled automatically.
+
+## Calendar window
+
+Calendar pages cover events from `--history-days` ago up to 60 days from
+now (`gbrain sources add … --future-days <n>`, stored as the source's
+`g_future_days`, 1..3650, moves that horizon per source), and each sweep
+applies that range on its own. That matters for
+incremental syncs: after any edit to a recurring series, Google sends back
+the series' instances for years before and after, and only those inside the
+range are kept. Because the 60-day edge moves forward daily, the sweep also
+lists the days it has newly reached, so future instances of a series nobody
+touched still appear. If a meeting moves beyond 60 days out, its page goes
+away until the meeting is back within range. Meetings that have aged out of
+the range keep their pages.
+
+`gbrain sync --source <id> --full` re-lists the whole window and removes the
+pages of events that start inside it but are no longer listed (cancelled or
+deleted since), and the pages this source wrote for events that start at or
+past the horizon (instances a series edit imported years ahead before the
+window existed, or under a wider `g_future_days`). It never removes a page
+whose event starts before the window, so shrinking `--history-days` keeps
+your history, and it never touches a calendar page you wrote by hand. More
+than 200 removals in one run are refused, nothing is removed, and the run is
+reported partial; if that many are genuinely gone, run it once with
+`GBRAIN_ALLOW_MASS_RECONCILE=1`.
+
+**Say to your agent:** *"re-sync my calendar from scratch"* (your agent runs
+`gbrain sync --source <id> --full`).
 
 ## Continuous sync
 
@@ -178,7 +230,11 @@ calendar pages."*
   On a managed brain the first sweep also runs a one-time catch-up over email
   threads whose newest message is from the last 30 days, so threads synced
   before extraction was queued are analyzed once; it finishes over later
-  sweeps when the enqueue ceiling binds.
+  sweeps when the enqueue ceiling binds. Threads under a label you listed in
+  `g_loops_exclude_labels` (or the brain-wide `loops.extraction_exclude_labels`)
+  are never queued and open no deterministic loop; an unknown label name
+  fails closed with `excluded_label_unresolved` until you fix it. See
+  [open loops](open-loops.md#which-threads-reach-the-extractor).
 - **Quiet threads.** A thread still inside its waiting window (24 h for
   inbound, 72 h for your own question) is re-checked when the window ends,
   even if no new mail arrives, and opens its loop then. See
@@ -204,8 +260,8 @@ patiently — 6 attempts by default, exponential backoff with jitter capped at
 60s, honoring `Retry-After` when Google sends one — before finally giving up
 and reporting `rate_limited`. That budget is deliberately much larger than
 the 2-attempt budget used for other retryable failures (like a 401 needing a
-token refresh): giving up too early used to mean a thread that would have
-succeeded a few seconds later was instead skipped for the rest of the sync.
+token refresh), so a thread that would succeed a few seconds later is not
+skipped for the rest of the sync.
 
 Even when a thread's retry budget IS exhausted, a rate-limit failure is never
 counted toward a hold — unlike a genuine per-thread
@@ -345,7 +401,9 @@ upstream failures rather than triggering a full re-list.
   bundle (a loud per-credential warning when a Testing-mode consent screen
   would travel with it — those tokens die within 7 days on the target).
 - LLM spend: commitment extraction sends recent email text (last 30 days,
-  capped per sweep) to your configured chat provider. Kill switch:
+  capped per sweep) to your configured chat provider, under a daily cap of
+  $2.00 (`loops.extraction_max_usd_per_day`; see
+  [open loops](open-loops.md#which-threads-reach-the-extractor)). Kill switch:
   `gbrain config set loops.extraction_enabled false`. The deterministic
   unanswered-thread detector is free and always on.
 - Atom extraction from email and calendar pages is on by default: page text
@@ -380,13 +438,13 @@ This is deliberate: the pages are your private mail, calendar and contacts,
 and a page that quietly stays group-readable after a sync is the failure
 this rule prevents. There is no per-source setting for a looser mode yet.
 
-### Files written before v0.60.31.0
+### Files readable by other local users
 
-Older releases wrote these files with your umask, typically 0644 (readable by
-every local user), and an upgrade does not rewrite them. In the default
-directory that is harmless, because gbrain keeps `~/.gbrain` at 0700. In a
-custom `--dir` outside `~/.gbrain`, older pages stay readable by other local
-users until they are rewritten.
+gbrain releases before v0.60.31.0 wrote these files with your umask, typically
+0644 (readable by every local user), and an upgrade does not rewrite them. In
+the default directory that is harmless, because gbrain keeps `~/.gbrain` at
+0700. In a custom `--dir` outside `~/.gbrain`, those pages stay readable by
+other local users until they are rewritten.
 
 The upgrade prints a one-time notice for each Google source outside
 `~/.gbrain`, naming the directory, how many readable entries it found and
@@ -459,6 +517,14 @@ The whole setup is exactly two user interactions: (1) the GCP checklist +
 client JSON hand-back, (2) one consent click. Never pass secrets via argv —
 use `--client-json <path>`, stdin, or env.
 
+**Exit codes (contract v1 legacy).** `gbrain google` exits 0 when done, 1 when
+it failed, and 2 both for usage errors and when it is waiting on the user (for
+example `status: "awaiting_consent"` after printing the consent URL, or
+`status: "no_brain"`). Other gbrain commands use exit 3 for "the user must agree
+first"; `google` keeps 2 under contract v1 and moves to 3 in a future contract
+version. Branch on the JSON `status`, not on exit 2 alone. `next_action` is the
+legacy name for `fix` ([legacy advice names](../protocol/AGENT_OPERATOR_v1.md#legacy-advice-names)).
+
 ## Attachment receipts and historical repair
 
 Gmail attachment receipts record filenames, MIME types, byte sizes when supplied,
@@ -490,10 +556,11 @@ explicit MIME metadata fields; `body.data`, raw messages and snippets are never
 selected. The selection includes child-identity sentinels beyond depth 32 so a
 deeper MIME tree remains incomplete rather than appearing empty. Decoded metadata
 responses are capped at 2 MiB before JSON parsing; oversized responses fail without
-advancing repair. Ordinary sync's message-body requests are unchanged.
+advancing repair. Ordinary sync fetches message bodies; only historical repair
+uses this metadata-only request.
 
-Upgrading changes future ingestion, **not** every historical page. Ordinary
-incremental sync only revisits changed threads and its success does not establish
+Sync records receipts for threads it ingests; it does **not** revisit every
+historical page. Ordinary incremental sync only revisits changed threads and its success does not establish
 historical inspection. To repair already-imported pages without replaying bodies:
 
 ```sh

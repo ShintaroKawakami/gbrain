@@ -10,7 +10,8 @@ import {
   AUTO_CHRONICLE_KEEP_ARGV, AUTO_CHRONICLE_OPT_OUT_ARGV, autoChronicleNeedsAcknowledgement, autoChronicleSetting, chronicleSettings,
 } from '../chronicle/config.ts';
 import { describeChronicleActivity, readChronicleLedgerStats } from '../chronicle/ledger-stats.ts';
-import { CHRONICLE_REASONS, chronicleBackfillArgv, type ChronicleAction } from '../chronicle/reasons.ts';
+import { CHRONICLE_REASONS, chronicleBackfillArgv } from '../chronicle/reasons.ts';
+import type { Action } from '../agent-output.ts';
 
 const daysAgo = (now: Date, days: number) => new Date(now.getTime() - days * 86_400_000).toISOString().slice(0, 10);
 
@@ -73,7 +74,7 @@ async function collectAutoChronicle(ctx: AdvisorContext): Promise<AdvisorFinding
   if (stats.last7d.failed > 0 && failed) {
     const reasonCtx = { since: daysAgo(ctx.now ?? new Date(), 7), dailyLimit: settings.dailyLimit, recentDays: settings.recentDays };
     const entry = CHRONICLE_REASONS[failed[0] as keyof typeof CHRONICLE_REASONS];
-    const fix: ChronicleAction | undefined = 'fix' in entry ? entry.fix(reasonCtx) : undefined;
+    const fix: Action | undefined = 'fix' in entry ? entry.fix(reasonCtx) : undefined;
     findings.push({
       id: 'chronicle_extraction_failing',
       severity: 'warn',

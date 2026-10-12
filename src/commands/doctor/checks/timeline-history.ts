@@ -43,6 +43,8 @@ async function loadState(engine: BrainEngine, key: string): Promise<ScanState | 
 }
 
 async function saveState(engine: BrainEngine, key: string, state: ScanState): Promise<void> {
+  // Engine graduation runs doctor as a read-only gate (source at plan/run start, target under the fence): no scan-state write.
+  if (process.env.GBRAIN_GRADUATION_RUN) return;
   try { await engine.setConfig(key, JSON.stringify(state)); } catch { /* best effort: the next run rescans from the start */ }
 }
 

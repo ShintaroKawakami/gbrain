@@ -10,6 +10,7 @@ import { resolveExtractAtomsCostGate } from '../cycle/extract-atoms-cost-gate.ts
 import { maintenancePreflight } from '../persistence/prepared-maintenance.ts';
 import { chronicleSettings, chronicleTz } from './config.ts';
 import { claimChronicleRow, executeChronicleRow } from './execute.ts';
+import { rowMaxAttempts } from './campaign.ts';
 import { defaultJudge, type ChronicleJudge } from './extract-events.ts';
 import { readChronicleRow, upsertChronicleRow } from './ledger.ts';
 import { noPricingMessage } from '../budget/no-pricing.ts';
@@ -47,7 +48,10 @@ export async function runChronicleJob(engine: BrainEngine, opts: {
   if (gate.refusal) return { slug, status: 'failed', reason: `no_pricing: ${noPricingMessage(gate.refusal, { capUsd: settings.jobBudgetUsd })}` };
   const trigger = opts.trigger === 'auto' ? 'auto' : 'backfill';
   // A write decision or backfill already queued this content: the cycle phase owns it.
-  if (existing?.state === 'pending') return { slug, status: 'skipped', reason: 'queued_for_cycle' };
+  // A capped backfill row with attempts left stays under its campaign's stamped bound (#6199).
+  if (existing?.state === 'pending' || (existing?.campaign_id && existing.state === 'failed' && existing.attempts < rowMaxAttempts(existing))) {
+    return { slug, status: 'skipped', reason: 'queued_for_cycle' };
+  }
   await upsertChronicleRow(engine, { ...key, slug, state: 'pending', reason: null, trigger, nextAttemptAt: null });
   const row = await readChronicleRow(engine, key);
   const claimed = row && await claimChronicleRow(engine, row);
@@ -60,7 +64,7 @@ export async function runChronicleJob(engine: BrainEngine, opts: {
   if (outcome.kind !== 'done') return { slug, status: 'skipped', reason: outcome.reason };
   if (outcome.state === 'failed') return { slug, status: 'failed', reason: outcome.reason ?? 'failed', retry: RETRYABLE.has(outcome.reason ?? '') };
   if (outcome.state === 'extracted') {
-    return { slug, status: outcome.reason === 'no_events' ? 'no_events' : 'extracted', events_written: outcome.written, events_retired: outcome.retired };
+    return { slug, status: outcome.reason ? 'no_events' : 'extracted', events_written: outcome.written, events_retired: outcome.retired };
   }
   return { slug, status: 'skipped', reason: outcome.reason ?? undefined };
 }

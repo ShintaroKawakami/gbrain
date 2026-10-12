@@ -542,6 +542,7 @@ async function runJudgeChunk(
     // (judge truncation at default 36-96 idea batches).
     maxTokens: computeJudgeMaxTokens(ideas.length, options.modelOverride),
     abortSignal: options.abortSignal,
+    allowFallback: false,
   });
 
   const parsed = parseJudgeJSON(result.text);

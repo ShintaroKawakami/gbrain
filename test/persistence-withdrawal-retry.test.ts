@@ -59,7 +59,7 @@ for (const boundary of ['admission-counter', 'completed-withdrawal'] as const) {
             if (key === 'transaction') return (fn: (tx: BrainEngine) => Promise<any>) => nested.transaction(child => fn(wrap(child)));
             if (key === 'executeRaw') return async (sql: string, args?: unknown[]) => {
               if (sql === 'SELECT incarnation,archived FROM sources WHERE id=$1 FOR UPDATE') { withdrawal = true; sourceTransactions++; }
-              if (!injected && boundary === 'admission-counter' && sql === 'SELECT * FROM persistence_counters WHERE key=$1 FOR UPDATE') {
+              if (!injected && boundary === 'admission-counter' && sql.startsWith('SELECT * FROM persistence_counters WHERE key')) {
                 injected = true;
                 throw Object.assign(new Error('confirmed counter statement abort'), { code: '55P03' });
               }

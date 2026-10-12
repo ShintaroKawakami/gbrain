@@ -37,6 +37,43 @@ must settle or retire the connection before another query can own it. This
 is necessary for worker admission, query timeout and lease-release safety.
 See issues #5466 and #5560 and `test/e2e/persistence-chaos.test.ts`.
 
+A statement that fails to build is answered in its place in the pipeline
+(#6383; the approach of upstream PR porsager/postgres#1236, which fixes
+porsager/postgres#1082, so this hunk drops when that merges). A statement joins
+a connection's queue before it is built, so when `build` throws
+(`UNDEFINED_VALUE`, `MAX_PARAMETERS_EXCEEDED`) behind an in-flight statement,
+stock postgres.js rejects that head statement with its error, leaves the
+culprit queued with nothing on the wire, and delivers every later reply on the
+socket one statement late until the process restarts. With the patch a query
+the server is certain to refuse goes out in the culprit's place: only the
+culprit rejects, with its own error, a transaction it was part of is aborted
+rather than committed without it, and the pool reports the failure through
+`onbuilderror(code, statement)` (template text with `$n` placeholders, no
+values). The same patch adds the in-flight watchdog: `inflight_timeout`
+(seconds) bounds how long a head statement may wait with nothing coming back;
+past it the statement and its queued followers reject with `CONNECTION_STUCK`,
+the pool parks the connection out of rotation, reports `onstuck({ age_ms,
+queued, statement })` and reconnects. `sql.pool` is a live property getter
+(stock `Object.assign` froze the #6317 numbers at construction) and carries
+`inflight_oldest_ms` and `completed`. Tests:
+`test/e2e/postgres-pipelined-build-failure-postgres.test.ts`,
+`test/e2e/postgres-stuck-connection-postgres.test.ts`.
+
+The patch also lets a pool share the parameter types of a described statement
+across its connections (`shared_types`, on by default; GBrain turns it off with
+`GBRAIN_PG_TYPE_CACHE=0`). Stock postgres.js describes every parameterized
+statement once per connection, and with `prepare: false` (transaction-mode
+poolers) on every run, before it can execute it; that describe costs a round
+trip and stops pipelining behind it. With the types known, the statement is
+parsed, described and executed in one message group. Only built-in types (oid
+below 16384) are shared, since a database's own types (pgvector) can be
+recreated under a new oid; a statement that fails forgets its shared types, and
+`PostgresEngine.initSchema` clears them after applying migrations (#5984,
+`test/e2e/postgres-shared-types.test.ts`). `shared_types` also accepts the Map
+to share types in: GBrain passes one per database target, so every pool in a
+process that reaches one database shares it, and `src/core/pg-type-cache.ts`
+saves it for the next process.
+
 ## Reproduce and update
 
 Run `bash vendor/update-postgres.sh --check` to download the pinned upstream

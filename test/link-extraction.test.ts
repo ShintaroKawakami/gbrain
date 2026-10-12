@@ -294,7 +294,10 @@ describe('extractPageLinks', () => {
     expect(candidates.length).toBeGreaterThan(0);
     const aliceLink = candidates.find(c => c.targetSlug === 'people/alice');
     expect(aliceLink).toBeDefined();
-    expect(aliceLink!.linkType).toBe('works_at');
+    // #6191: a person is not an employer, so the role phrase no longer types this edge works_at.
+    expect(aliceLink!.linkType).toBe('mentions');
+    const { candidates: employer } = await extractPageLinks('docs/x', 'Alice is the CEO of [Acme](companies/acme).', {}, 'concept', allowAllResolver);
+    expect(employer.find(c => c.targetSlug === 'companies/acme')!.linkType).toBe('works_at');
   });
 
   test('#2011: excerpt window slicing a non-BMP char yields well-formed context', async () => {
@@ -955,6 +958,15 @@ describe('parseTimelineEntries', () => {
     const entries = parseTimelineEntries('- **2026-01-15** | Met with Alice');
     expect(entries.length).toBe(1);
     expect(entries[0]).toEqual({ date: '2026-01-15', summary: 'Met with Alice', detail: '', source: 'markdown' });
+  });
+
+  test('parses dates in years 0001-0099', () => {
+    expect(parseTimelineEntries('- **0099-01-01** | Event')).toEqual([{
+      date: '0099-01-01',
+      summary: 'Event',
+      detail: '',
+      source: 'markdown',
+    }]);
   });
 
   test('parses dash variant: - **YYYY-MM-DD** -- summary', () => {

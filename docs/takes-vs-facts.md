@@ -127,5 +127,5 @@ Known limitation: the owner can also
 appear under `brain` (a take the owner asserts, via `propose_takes`) and
 `people/<owner>` (extraction that names the owner). The resolver selects the
 *default* canonical owner string for reads; it does not merge those other
-strings. Per-take attribution for other people (e.g. `people/george`) is
+strings. Per-take attribution for other people (e.g. `people/bob-example`) is
 unaffected and correct.

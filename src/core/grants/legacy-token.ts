@@ -18,14 +18,15 @@
  * `source_id`, `federated_read`, `allowed_operations`, `takes_holders`), bumps
  * `grant_revision`, and rewrites `permissions` as a mirror with every other key
  * preserved, so older binaries enforce the same grant. Rows still on the
- * JSONB-only shape migrate lazily on their first write, or in bulk with
- * `--migrate-legacy`. A drifted row (JSONB edited by an older binary) refuses
- * grant edits until `--adopt-permissions` or `--adopt-columns` resolves it.
+ * JSONB-only shape convert in bulk (migration v202, `--migrate-legacy`), on
+ * their first HTTP read (`resolveTokenGrant`) or on their first write. A
+ * drifted row (JSONB edited by an older binary) refuses grant edits until
+ * `--adopt-permissions` or `--adopt-columns` resolves it.
  */
 import type { BrainEngine } from '../engine.ts';
 import { assertAllowedScopes, operationScopesAllowed } from '../scope.ts';
 import { isValidSourceId } from '../source-id.ts';
-import { executeRawJsonb } from '../sql-query.ts';
+import { executeRawJsonb, type SqlQuery } from '../sql-query.ts';
 import { TOKEN_ID_RE } from '../token-mint.ts';
 import { isUndefinedColumnError } from '../utils.ts';
 import {
@@ -109,7 +110,10 @@ export function parseRescopeTokenArgs(args: string[]): RescopeTokenArgs {
         break;
       case '--sources': out.sources = csvOrNone(value); break;
       case '--takes-holders': out.takesHolders = csvOrNone(value); break;
-      case '--operations': out.operations = csvOrNone(value); break;
+      case '--operations':
+        if (value === 'all') throw new GrantError('invalid_grant', '--operations all applies to OAuth clients; to give a token every operation again, use --reset-default operations');
+        out.operations = csvOrNone(value);
+        break;
       case '--add': out.add = csvOrNone(value); break;
       case '--scopes':
         out.scopes = csvOrNone(value.replaceAll(' ', ','));
@@ -322,6 +326,58 @@ export async function migrateLegacyTokens(engine: BrainEngine, opts: { dryRun: b
   } catch (error) {
     throw schemaError(error);
   }
+}
+
+/**
+ * The authorization read of an active token row on the HTTP auth paths. A
+ * unified row is read from its columns. A row still on the legacy shape
+ * (created by an older binary after the bulk migration, or on a brain whose
+ * migration has not run) is converted on this read: one guarded UPDATE writes
+ * the columns `migrateLegacyTokens` would write and leaves `permissions` as
+ * the mirror it already is. The guard (`source_grant IS NULL`) makes
+ * concurrent first reads a no-op for the loser, SKIP LOCKED keeps a row lock
+ * held elsewhere from parking the request (#5730), and a skipped or failed
+ * write (a locked row, a read-only role, a schema without the columns) falls
+ * back to the same grant computed in memory. A malformed row is never converted; it
+ * stays deny-all.
+ */
+export async function resolveTokenGrant(sql: SqlQuery, row: Record<string, unknown>): Promise<PrincipalGrant> {
+  const grant = grantFromTokenRow(row);
+  if (grant.shape !== 'legacy_permissions' || grant.permissionsMalformed || !('source_grant' in row)) return grant;
+  const [kind, write, reads, ops, holders] = tokenGrantColumnValues(grant);
+  try {
+    const [converted] = await sql`
+      UPDATE access_tokens SET source_grant = ${kind}, source_id = ${write}, federated_read = ${reads}::text[],
+        allowed_operations = ${ops}::text[], takes_holders = ${holders}::text[], grant_revision = grant_revision + 1,
+        last_used_at = now()
+      WHERE id IN (SELECT id FROM access_tokens WHERE id = ${String(row.id)}::uuid AND source_grant IS NULL FOR UPDATE SKIP LOCKED)
+      RETURNING *
+    `;
+    if (converted) return grantFromTokenRow(converted);
+  } catch {
+    // Read-only role or transient failure: authorize with the identical in-memory conversion.
+  }
+  return grant;
+}
+
+/**
+ * Debounced, fire-and-forget `last_used_at` write for a token row the auth
+ * paths just read (once per token per 60 s; SKIP LOCKED so a lock held
+ * elsewhere never parks a pool slot, #5730). A row still on the legacy shape
+ * is left to `resolveTokenGrant`, whose conversion records first use itself:
+ * a touch holding that row's lock made every concurrent conversion skip it
+ * (SKIP LOCKED), so a burst of first reads could leave it unconverted (#6230).
+ */
+export function touchTokenLastUsed(sql: SqlQuery, row: Record<string, unknown>): Promise<unknown> {
+  const id = String(row.id);
+  const touch = 'source_grant' in row
+    ? sql`UPDATE access_tokens SET last_used_at = now()
+        WHERE id IN (SELECT id FROM access_tokens WHERE id = ${id}::uuid AND source_grant IS NOT NULL
+          AND (last_used_at IS NULL OR last_used_at < now() - interval '60 seconds') FOR UPDATE SKIP LOCKED)`
+    : sql`UPDATE access_tokens SET last_used_at = now()
+        WHERE id IN (SELECT id FROM access_tokens WHERE id = ${id}::uuid
+          AND (last_used_at IS NULL OR last_used_at < now() - interval '60 seconds') FOR UPDATE SKIP LOCKED)`;
+  return Promise.resolve(touch).catch(() => { /* fire-and-forget */ });
 }
 
 /** A bare `auth rescope <name>`: a token name, an OAuth client id, or a client name. Both kinds matching refuses. */

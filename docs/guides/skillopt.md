@@ -496,8 +496,8 @@ purpose:** the config dir also holds the CLI's session credentials, so the
 empty-dir form logs the child out wherever the CLI reads its session from the
 config dir — macOS included (observed with Claude Code 2.1.x). If rollouts
 start failing auth (`Not logged in · Please run /login`) after flipping this
-on, that is why: the run now ends `errored` with that message as the failure
-detail instead of finishing as a `no_improvement` with a 0.000 score. For a
+on, that is why: the run ends `errored` with that message as the failure
+detail, not as a `no_improvement` with a 0.000 score. For a
 hermetic run that stays authenticated, use the explicit-path form and
 pre-seed that directory with a logged-in config.
 

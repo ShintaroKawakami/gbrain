@@ -9,6 +9,7 @@
 
 import type { Operation, OperationContext } from './contract.ts';
 import { readPolicyOpts, sourceScopeOpts } from './context.ts';
+import { invalidParam } from './op-fix.ts';
 
 // ── Remote diary redaction (fail-closed) ─────────────────────────────────
 // The exact mechanism the ontology siblings use (`ctx.remote !== false` →
@@ -33,6 +34,8 @@ function redactDiaryTimeline<
 // All route through sourceScopeOpts(ctx) so reads honor source isolation.
 const chronicle_day: Operation = {
   name: 'chronicle_day',
+  mutating: false,
+  idempotent: true,
   outputRedaction: 'retrieval',
   description:
     'Life Chronicle: events + timeline entries on a given day (or its ISO week when week=true), ' +
@@ -62,6 +65,8 @@ const chronicle_day: Operation = {
 
 const chronicle_on_this_day: Operation = {
   name: 'chronicle_on_this_day',
+  mutating: false,
+  idempotent: true,
   outputRedaction: 'retrieval',
   description:
     'Life Chronicle: events from the same calendar day in PRIOR years ("on this day"). ' +
@@ -81,6 +86,8 @@ const chronicle_on_this_day: Operation = {
 
 const chronicle_since: Operation = {
   name: 'chronicle_since',
+  mutating: false,
+  idempotent: true,
   outputRedaction: 'retrieval',
   description:
     'Life Chronicle: events + timeline entries on or after a date, optionally filtered by event kind. ' +
@@ -103,6 +110,8 @@ const chronicle_since: Operation = {
 
 const chronicle_last_seen: Operation = {
   name: 'chronicle_last_seen',
+  mutating: false,
+  idempotent: true,
   outputRedaction: 'retrieval',
   description:
     "Life Chronicle: when an entity was last seen — its own timeline rows OR an event's `who`. " +
@@ -131,6 +140,8 @@ const chronicle_last_seen: Operation = {
 
 const ontology_get: Operation = {
   name: 'ontology_get',
+  mutating: false,
+  idempotent: true,
   outputRedaction: 'retrieval',
   description:
     "Life Chronicle: the current resolved per-entity ontology (dimension → value) at `asof` " +
@@ -159,6 +170,7 @@ const ontology_get: Operation = {
 
 const ontology_propose: Operation = {
   name: 'ontology_propose',
+  idempotent: false,
   outputRedaction: 'retrieval',
   description:
     'Life Chronicle: record one ontology observation (entity has dimension=value), sourced + ' +
@@ -196,14 +208,24 @@ const ontology_propose: Operation = {
     });
     // A managed brain commits the observation as a coordinated database-only
     // write serialized on the entity's page key; unmanaged brains write directly.
-    const managed = await coordinatedDatabaseWrite(ctx, 'ontology_propose', entitySlug, [entitySlug], merge);
-    return managed ? managed.value : merge(ctx.engine, ctx.sourceId);
+    // #5575: an agent observation never closes a more trusted stint; it is stored contested for the owner (A5).
+    const { ontologyWriteTrust, contestOntologySupersession } = await import('../trust/supersede-handlers.ts');
+    const { maintenanceTransaction } = await import('../persistence/attribution.ts');
+    const trust = ontologyWriteTrust(ctx);
+    const guarded = async (engine: typeof ctx.engine, sourceId: string | undefined) => {
+      const result = await merge(engine, sourceId);
+      return { ...result, ...await contestOntologySupersession(engine, sourceId ?? 'default', entitySlug, String(p.dimension), result) };
+    };
+    const managed = await coordinatedDatabaseWrite(ctx, 'ontology_propose', entitySlug, [entitySlug], guarded, trust);
+    return managed ? managed.value : maintenanceTransaction(ctx.engine, tx => guarded(tx, ctx.sourceId), trust);
   },
   cliHints: { name: 'ontology-add', positional: ['entity', 'dimension', 'value'] },
 };
 
 const ontology_dimensions: Operation = {
   name: 'ontology_dimensions',
+  mutating: false,
+  idempotent: true,
   outputRedaction: 'no_stored_text',
   description:
     'Life Chronicle meta-ontology: which dimensions the brain tracks across entities, with ' +
@@ -216,6 +238,8 @@ const ontology_dimensions: Operation = {
 
 const ontology_conflicts: Operation = {
   name: 'ontology_conflicts',
+  mutating: false,
+  idempotent: true,
   outputRedaction: 'retrieval',
   description:
     'Life Chronicle: dimensions with ≥2 distinct current values from ≥2 provenances (genuine ' +
@@ -242,6 +266,8 @@ const ontology_conflicts: Operation = {
 
 const volunteer_chronicle: Operation = {
   name: 'volunteer_chronicle',
+  mutating: false,
+  idempotent: true,
   outputRedaction: 'retrieval',
   description:
     'Life Chronicle agent-orientation: the recent timeline (last N days) + the current ' +
@@ -275,14 +301,16 @@ const volunteer_chronicle: Operation = {
 
 const chronicle_backfill: Operation = {
   name: 'chronicle_backfill',
+  idempotent: false,
   outputRedaction: 'no_stored_text',
   description:
     'Life Chronicle: queue existing meeting/conversation/calendar pages (by type or under meetings/, conversations/, ' +
     'cal/, calendar/) for timeline-event extraction. One paid chat call per page, so it needs --yes; --dry-run ' +
     'reports the candidates, an estimated cost and skip reasons. The chronicle_page_state ledger skips content ' +
     'already extracted or queued, so repeats never pay twice. Queued pages run in the `chronicle` cycle phase ' +
-    '(`gbrain dream --phase chronicle`), exempt from the daily limit. Local-only bulk op. ' +
-    'CLI: `gbrain chronicle-backfill [--since YYYY-MM-DD] [--dated-since YYYY-MM-DD] [--recent] [--limit N] [--dry-run | --yes]`.',
+    '(`gbrain dream --phase chronicle`), exempt from the daily limit. --max-usd is a hard bound counting retries: ' +
+    'pages queue only while their worst case fits, and an unpriced chat model then refuses with no_pricing. Local-only bulk op. ' +
+    'CLI: `gbrain chronicle-backfill [--since YYYY-MM-DD] [--dated-since YYYY-MM-DD] [--recent] [--limit N] [--max-usd USD] [--dry-run | --yes]`.',
   scope: 'admin',
   mutating: true,
   localOnly: true,
@@ -293,6 +321,7 @@ const chronicle_backfill: Operation = {
     limit: { type: 'number', description: 'Max pages queued in this run, across all types and sources (default 1000).' },
     dry_run: { type: 'boolean', description: 'Count candidates, estimate cost and report skip reasons without queuing.' },
     yes: { type: 'boolean', description: 'Consent to queue paid extraction (one chat call per page). Ask the user first.' },
+    max_usd: { type: 'number', description: 'Hard spend bound in USD for everything this run queues, retries included; pages beyond it are not queued (cap_reached).' },
   },
   handler: async (ctx, p) => {
     const { runChronicleBackfill } = await import('../chronicle/backfill.ts');
@@ -300,6 +329,9 @@ const chronicle_backfill: Operation = {
     let model: string | undefined;
     try { model = getChatModel(); } catch { model = undefined; }
     const scope = sourceScopeOpts(ctx);
+    if (p.max_usd !== undefined && !(typeof p.max_usd === 'number' && Number.isFinite(p.max_usd) && p.max_usd > 0)) {
+      throw invalidParam(ctx, 'chronicle_backfill', 'max_usd', 'chronicle_backfill: max_usd must be a positive number of US dollars.', { example: 5 });
+    }
     return runChronicleBackfill(ctx.engine, {
       since: typeof p.since === 'string' ? p.since : undefined,
       datedSince: typeof p.dated_since === 'string' ? p.dated_since : undefined,
@@ -310,6 +342,7 @@ const chronicle_backfill: Operation = {
       sourceId: scope.sourceId,
       sourceIds: scope.sourceIds,
       model,
+      maxUsd: typeof p.max_usd === 'number' ? p.max_usd : undefined,
     });
   },
   cliHints: { name: 'chronicle-backfill' },

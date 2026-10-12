@@ -35,6 +35,10 @@ test('a 40-page enforced PGLite run passes every enforced gate and writes a head
     expect(Object.keys(report.planner.hot_table_rows).sort()).toEqual(Object.keys(report.planner.hot_table_stat_rows).sort());
     expect(report.planner.hot_table_rows.pages).toBeGreaterThan(0);
     expect(report.policy.planner_health).toBe('enforced');
+    // F4d operational ceilings run through the real CLI at every tier; the 20k-file add only from 20k pages.
+    expect(report.data.map((d: { check: string }) => d.check)).toEqual(expect.arrayContaining(['f4d_sync_deadline', 'f4d_embed_budget_stop', 'f4d_serve_boot']));
+    expect(report.f4d.embed_budget_stop.exit_code).toBe(11);
+    expect(report.f4d.sources_add_20k).toEqual({ skipped: 'runs at 20000 pages and up' });
     expect(report.ops.map((o: { op: string }) => o.op)).toEqual(expect.arrayContaining([
       'query (hybrid, injected vector)', 'search (MCP path, source-scoped grant)', 'cold-process first query (MCP path)', 'concurrent put_page x2 (receipts)']));
   } finally {

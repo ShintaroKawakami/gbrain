@@ -13,6 +13,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { CHRONICLE_REASONS, chronicleBackstopReceipt, renderChronicleReasonTable } from '../src/core/chronicle/reasons.ts';
+import { CODES } from '../src/core/error-registry.ts';
 
 const GUIDE = join(import.meta.dir, '..', 'docs', 'guides', 'life-chronicle.md');
 const ctx = { sourceId: 'work', since: '2026-10-04', dailyLimit: 200, recentDays: 30, model: 'openai:gpt-new' };
@@ -87,5 +88,11 @@ describe('docs/guides/life-chronicle.md reason table', () => {
       return;
     }
     expect(block).toBe(expected);
+  });
+});
+
+describe('agent-operator registry', () => {
+  test('chronicle_skipped lists exactly the CHRONICLE_REASONS codes as its reasons', () => {
+    expect([...CODES.chronicle_skipped.reasons].sort() as string[]).toEqual(Object.keys(CHRONICLE_REASONS).sort());
   });
 });

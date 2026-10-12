@@ -5,7 +5,7 @@ import { join } from 'path';
 import { surfaceFileSource } from './helpers/source-surface.ts';
 
 // test-reads-source-ok[structural]: two kept pins need the dispatcher's text: the handleCliOnly case-label census (switch labels cannot be enumerated at runtime) and the local-op normalize call site (bigints only reach it from Postgres, never PGLite).
-const cliSource = surfaceFileSource('cli', 'src/cli.ts');
+const cliSource = surfaceFileSource('cli', 'src/cli/main.ts');
 const repoRoot = new URL('..', import.meta.url).pathname;
 
 function isolatedEnv(home: string): Record<string, string> {
@@ -55,7 +55,7 @@ describe('CLI structure', () => {
   // Structural, self-updating: a new handler module without a CLI_ONLY entry
   // fails here at PR time.
   test('every handleCliOnly top-level case label is reachable via CLI_ONLY', async () => {
-    const { CLI_ONLY } = await import('../src/cli.ts');
+    const { CLI_ONLY } = await import('../src/cli/main.ts');
     const members = new Set<string>(CLI_ONLY);
 
     const caseLabels = readdirSync(join(repoRoot, 'src', 'cli', 'commands'))
@@ -94,7 +94,7 @@ describe('BigInt-safe output normalization (#2450)', () => {
   });
 
   test('normalizeLocalResult serializes bigint → string without throwing', async () => {
-    const { normalizeLocalResult } = await import('../src/cli.ts');
+    const { normalizeLocalResult } = await import('../src/cli/main.ts');
     const out = normalizeLocalResult({
       id: 42n,
       nested: { count: 7n },
@@ -110,14 +110,14 @@ describe('BigInt-safe output normalization (#2450)', () => {
   });
 
   test('bigint past Number.MAX_SAFE_INTEGER keeps full precision as a string', async () => {
-    const { normalizeLocalResult } = await import('../src/cli.ts');
+    const { normalizeLocalResult } = await import('../src/cli/main.ts');
     const big = 9007199254740993n; // MAX_SAFE_INTEGER + 2
     const out = normalizeLocalResult({ id: big }) as Record<string, unknown>;
     expect(out.id).toBe('9007199254740993');
   });
 
   test("formatResult's default renderer is bigint-safe", async () => {
-    const { formatResult } = await import('../src/cli.ts');
+    const { formatResult } = await import('../src/cli/main.ts');
     expect(() => formatResult('__no_such_op__', { id: 5n })).not.toThrow();
     expect(formatResult('__no_such_op__', { id: 5n })).toContain('"5"');
   });
@@ -137,7 +137,7 @@ describe('BigInt-safe output normalization (#2450)', () => {
 // untouched (the JSON path carries the raw characters).
 describe("list_pages TSV escaping (#5433)", () => {
   async function render(pages: unknown[]): Promise<string> {
-    const { formatResult } = await import('../src/cli.ts');
+    const { formatResult } = await import('../src/cli/main.ts');
     return formatResult('list_pages', pages, {});
   }
 
@@ -239,7 +239,7 @@ describe('CLI dispatch integration', () => {
     expect(stdout.trim()).toMatch(/^gbrain \d+\.\d+\.\d+/);
   });
 
-  test('unknown command prints error and exits 1', async () => {
+  test('unknown command prints error and exits 2 (usage)', async () => {
     const proc = Bun.spawn(['bun', 'run', 'src/cli.ts', 'notacommand'], {
       cwd: new URL('..', import.meta.url).pathname,
       stdout: 'pipe',
@@ -248,7 +248,7 @@ describe('CLI dispatch integration', () => {
     const stderr = await new Response(proc.stderr).text();
     const exitCode = await proc.exited;
     expect(stderr).toContain('Unknown command: notacommand');
-    expect(exitCode).toBe(1);
+    expect(exitCode).toBe(2);
   });
 
   test('per-command --help prints usage without DB connection', async () => {
@@ -383,5 +383,40 @@ describe('CLI dispatch integration', () => {
     expect(tools[0]).toHaveProperty('name');
     expect(tools[0]).toHaveProperty('description');
     expect(tools[0]).toHaveProperty('parameters');
+  });
+
+  test("--tools-json carries each op's access contract after the legacy keys (#5953)", async () => {
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-tools-json-'));
+    try {
+      const proc = Bun.spawn(['bun', 'run', 'src/cli.ts', '--tools-json'], {
+        cwd: repoRoot,
+        stdout: 'pipe',
+        stderr: 'pipe',
+        env: isolatedEnv(home),
+      });
+      const stdout = await new Response(proc.stdout).text();
+      expect(await proc.exited).toBe(0);
+      const tools = JSON.parse(stdout) as Array<Record<string, unknown>>;
+      const byName = new Map(tools.map(t => [t.name as string, t]));
+
+      expect(Object.keys(byName.get('get_page')!)).toEqual([
+        'name', 'description', 'parameters', 'schema', 'scope', 'required_scopes', 'mutating', 'idempotent', 'local_only',
+      ]);
+      expect(byName.get('get_page')).toMatchObject({ scope: 'read', required_scopes: [], mutating: false, idempotent: true, local_only: false });
+      expect(byName.get('put_page')).toMatchObject({ scope: 'write', mutating: true, local_only: false });
+      expect(byName.get('think')).toMatchObject({ scope: 'read', mutating: true });
+      expect(byName.get('join_brain')).toMatchObject({ scope: 'read', required_scopes: ['skills_member_self'] });
+      expect(byName.get('sync_brain')).toMatchObject({ scope: 'admin', local_only: true });
+
+      const { operations } = await import('../src/core/operations.ts');
+      for (const op of operations) {
+        const t = byName.get(op.name)!;
+        expect([t.scope, t.required_scopes, t.mutating, t.idempotent, t.local_only], op.name).toEqual([
+          op.scope ?? 'read', op.requiredScopes ?? [], op.mutating === true, op.idempotent === true, op.localOnly === true,
+        ]);
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

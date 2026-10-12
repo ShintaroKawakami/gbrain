@@ -9,7 +9,7 @@
  * config row `page_state.revision_backfill`, so an interrupted pass resumes and
  * never reassigns a revision it already gave. A batch that fails is retried row
  * by row; a row that still fails (for example a torn TOAST value) is isolated,
- * reported and retried on at most MAX_ATTEMPTS later passes, never forever;
+ * reported and retried on at most REVISION_BACKFILL_MAX_ATTEMPTS later passes, never forever;
  * once its attempts are spent, later passes stay quiet.
  * When no NULL row remains the column becomes NOT NULL through a CHECK added
  * NOT VALID, validated without blocking writes, then SET NOT NULL and dropped,
@@ -18,11 +18,13 @@
 import type { BrainEngine } from '../engine.ts';
 
 export const REVISION_BACKFILL_STATE_KEY = 'page_state.revision_backfill';
-export const REVISION_BACKFILL_RESUME_COMMAND = 'gbrain apply-migrations --yes';
-const MAX_ATTEMPTS = 3;
+/** Re-runs the schema migration pass, which resumes this backfill even when no migration is pending. */
+export const REVISION_BACKFILL_RESUME_COMMAND = 'gbrain apply-migrations --force-schema';
+/** Passes a failing row is retried on before later passes stop retrying it. */
+export const REVISION_BACKFILL_MAX_ATTEMPTS = 3;
 const CHECK_NAME = 'pages_knowledge_revision_backfilled';
 
-interface FailedRow { id: number; attempts: number; error: string }
+export interface FailedRow { id: number; attempts: number; error: string }
 interface BackfillState { cursor: number; backfilled: number; failed: FailedRow[] }
 
 export interface RevisionBackfillResult {
@@ -39,8 +41,45 @@ async function readState(engine: BrainEngine): Promise<BackfillState> {
   return { cursor: 0, backfilled: 0, failed: [] };
 }
 
-async function assignRow(engine: BrainEngine, id: number): Promise<void> {
-  await engine.executeRaw('UPDATE pages SET knowledge_revision = gen_random_uuid() WHERE id = $1 AND knowledge_revision IS NULL', [id]);
+export interface RevisionBackfillStatus {
+  /** `absent`: pre-v150 schema; `not_null`: the backfill finished; `nullable`: it has not. */
+  column: 'absent' | 'not_null' | 'nullable';
+  /** Live and deleted page rows that still have no revision. */
+  pending: number;
+  /** Rows the backfill reported failing that still have no revision, with their page. */
+  failed: Array<FailedRow & { source_id: string; slug: string }>;
+}
+
+/** Read-only: where the backfill stands, for `gbrain doctor`. */
+export async function readRevisionBackfillStatus(engine: BrainEngine): Promise<RevisionBackfillStatus> {
+  const column = await engine.executeRaw<{ notnull: boolean }>(
+    `SELECT attnotnull AS notnull FROM pg_attribute
+      WHERE attrelid = to_regclass('pages') AND attname = 'knowledge_revision' AND NOT attisdropped`);
+  if (column.length === 0) return { column: 'absent', pending: 0, failed: [] };
+  if (column[0]!.notnull) return { column: 'not_null', pending: 0, failed: [] };
+  const [{ n }] = await engine.executeRaw<{ n: number }>('SELECT count(*)::int AS n FROM pages WHERE knowledge_revision IS NULL');
+  const state = await readState(engine);
+  const pages = state.failed.length === 0 ? [] : await engine.executeRaw<{ id: number; source_id: string; slug: string }>(
+    'SELECT id, source_id, slug FROM pages WHERE id = ANY($1::bigint[]) AND knowledge_revision IS NULL', [state.failed.map(f => f.id)]);
+  const byId = new Map(pages.map(p => [Number(p.id), p]));
+  const failed = state.failed.filter(f => byId.has(f.id)).map(f => ({ ...f, source_id: byId.get(f.id)!.source_id, slug: byId.get(f.id)!.slug }));
+  return { column: 'nullable', pending: Number(n), failed };
+}
+
+/**
+ * Assign revisions to the given rows in one statement. A managed brain's
+ * writer guard refuses a revision change outside a source capability, so the
+ * statement grants exactly the rows' sources (`gbrain.write_sources`,
+ * transaction-local, as schema migration v191 does) before any row updates;
+ * no content column changes.
+ */
+async function assignRows(engine: BrainEngine, ids: number[]): Promise<void> {
+  await engine.executeRaw(
+    `UPDATE pages SET knowledge_revision = gen_random_uuid()
+      WHERE id = ANY($1::bigint[]) AND knowledge_revision IS NULL
+        AND set_config('gbrain.write_sources',
+          (SELECT COALESCE(jsonb_agg(DISTINCT p.source_id), '[]'::jsonb)::text FROM pages p WHERE p.id = ANY($1::bigint[])), true) IS NOT NULL`,
+    [ids]);
 }
 
 export async function resumePageRevisionBackfill(
@@ -66,11 +105,11 @@ export async function resumePageRevisionBackfill(
       announced = true;
     }
     try {
-      await engine.executeRaw('UPDATE pages SET knowledge_revision = gen_random_uuid() WHERE id = ANY($1::bigint[]) AND knowledge_revision IS NULL', [ids]);
+      await assignRows(engine, ids);
       state.backfilled += ids.length;
     } catch {
       for (const id of ids) {
-        try { await assignRow(engine, id); state.backfilled++; }
+        try { await assignRows(engine, [id]); state.backfilled++; }
         catch (error) {
           state.failed.push({ id, attempts: 1, error: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
         }
@@ -86,9 +125,9 @@ export async function resumePageRevisionBackfill(
   for (const row of state.failed) {
     const [still] = await engine.executeRaw<{ id: number }>('SELECT id FROM pages WHERE id = $1 AND knowledge_revision IS NULL', [row.id]);
     if (!still) continue;
-    if (row.attempts >= MAX_ATTEMPTS) { failed.push(row); continue; }
+    if (row.attempts >= REVISION_BACKFILL_MAX_ATTEMPTS) { failed.push(row); continue; }
     retried = true;
-    try { await assignRow(engine, row.id); state.backfilled++; }
+    try { await assignRows(engine, [row.id]); state.backfilled++; }
     catch (error) { failed.push({ id: row.id, attempts: row.attempts + 1, error: (error instanceof Error ? error.message : String(error)).slice(0, 200) }); }
   }
   state.failed = failed;

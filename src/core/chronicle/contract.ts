@@ -19,10 +19,17 @@
  *      trigger='backfill' (exempt from the daily limit and recency rule);
  *      the same phase executes them.
  */
-import { CHRONICLE_RUN_NOW_ARGV, type ChronicleAction, type ChronicleReasonCode } from './reasons.ts';
+import { CHRONICLE_RUN_NOW_ARGV, type ChronicleReasonCode } from './reasons.ts';
+import type { Action } from '../agent-output.ts';
+import type { ChronicleDropCounts } from './extract-events.ts';
 
-/** Bump to re-extract every page once (the ledger key includes it). */
-export const CHRONICLE_EXTRACTOR_VERSION = 1;
+/**
+ * The ledger key includes it, so a bump makes already-extracted content new again: the phase's
+ * discovery re-decides pages changed since activation (unmanaged brains judge the recent ones under
+ * the daily limit; managed brains record `no_write_decision`) and backfill re-queues the rest on request.
+ * 2: same-day event slug disambiguation (event-identity.ts) and ended-invite projection (invite-projection.ts).
+ */
+export const CHRONICLE_EXTRACTOR_VERSION = 2;
 
 /** Ledger table and its columns (migration `chronicle_page_state`). */
 export const CHRONICLE_LEDGER_TABLE = 'chronicle_page_state';
@@ -39,7 +46,9 @@ export interface ChronicleLedgerRow {
   extractor_version: number;
   slug: string;
   state: ChronicleLedgerState;
-  /** A `ChronicleReasonCode` from reasons.ts (or `no_events` on an extracted row); null on pending/extracted-with-events. */
+  /** A `ChronicleReasonCode` from reasons.ts. An extracted row carries one only when it published no events:
+   *  `no_events`, or `future_dated` / `date_imprecise` when every proposed event was dropped. Null on pending
+   *  and on extracted-with-events. */
   reason: string | null;
   trigger: ChronicleTrigger;
   /** Writer of the decided revision (`persistence_requests.principal_*`); null on unmanaged scans and backfill. */
@@ -51,8 +60,21 @@ export interface ChronicleLedgerRow {
   attempts: number;
   /** Earliest next judge attempt for a failed row with backoff; null = not scheduled. */
   next_attempt_at: Date | string | null;
-  /** Recorded spend of the last attempt in USD (null when unpriced or not run). */
+  /** Recorded spend in USD, summed across attempts (null when unpriced or not run). */
   cost_usd: number | null;
+  /** #6199: attempts whose spend cost_usd already includes (a replayed completion adds nothing). */
+  cost_attempts?: number[];
+  /** #6199: the `chronicle-backfill --max-usd` campaign that queued this row; null outside a capped backfill.
+   *  Executors run a stamped row under its stamped cap, attempts and pricing policy, never current settings. */
+  campaign_id?: string | null;
+  /** Per-attempt spend cap stamped at queue time (NUMERIC; a string on Postgres). */
+  attempt_cap_usd?: number | string | null;
+  /** Maximum judge attempts stamped at queue time; null = CHRONICLE_DEFAULTS.maxAttempts. */
+  max_attempts?: number | null;
+  /** 'enforced' = the stamped cap applies even if the model loses its price or settings change. */
+  pricing_policy?: string | null;
+  /** The campaign's --max-usd. */
+  campaign_max_usd?: number | string | null;
   /** The judge model had no price, so cost_usd is unknown. */
   unpriced: boolean;
   /** Event page slugs this content produced (the generation reconciliation reads). */
@@ -87,12 +109,15 @@ export interface ChronicleRunDetails {
   candidates: number;
   judged: number;
   extracted: number;
+  /** Judged rows that published no events (the judge found none, or every proposal was dropped). */
   no_events: number;
   failed: number;
-  /** Count per reason of rows skipped or failed in this run. */
+  /** Count per reason of rows skipped, failed or extracted without events in this run. */
   reasons: Partial<Record<ChronicleReasonCode, number>>;
   events_written: number;
   events_retired: number;
+  /** Proposed events refused before publication, by reason (`future_dated`, `date_imprecise`, `over_cap`); never written. */
+  events_dropped: ChronicleDropCounts;
   /** Pending automatic rows left for the next run because the daily limit is used up. */
   deferred_daily_limit: number;
   daily_limit: number;
@@ -103,5 +128,5 @@ export interface ChronicleRunDetails {
   per_source: Record<string, { candidates: number; judged: number }>;
   next_command?: string;
   /** The reason table's fix when the phase could not run (no chat provider). */
-  fix?: ChronicleAction;
+  fix?: Action;
 }

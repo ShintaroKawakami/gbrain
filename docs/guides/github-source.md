@@ -156,12 +156,12 @@ pull requests, issue comments, PR reviews, PR review comments, labels,
 milestones, assignees, check runs, check suites, workflow runs. Each event
 submits a targeted `sync` job that refreshes exactly the item that changed
 (check events resolve the linked PR from the payload; events without an
-item reference are acknowledged and skipped). Push events keep their
-existing git-source behavior.
+item reference are acknowledged and skipped). Push events follow the
+git-source behavior.
 
 Without a public URL, use a tunnel (Tailscale Funnel, ngrok, or any HTTPS
 host). The webhook is HMAC-signed per source with the same
-`X-Hub-Signature-256` verification as the existing push webhook. Out-of-scope
+`X-Hub-Signature-256` verification as the push webhook. Out-of-scope
 repos are acknowledged but never materialized.
 
 ## Pages
@@ -187,14 +187,11 @@ comments, reviews and checks). Two behaviors worth knowing:
   stay recallable by those facets. Without a body, the chunk would hold
   only the title, and compound titles tokenize poorly.
 - **Near-identical pages** (the same PR merged across several mirrored
-  repos) are de-duplicated at search time by upstream gbrain (Jaccard
-  similarity, `src/core/search/dedup.ts`). Content recall is unaffected:
+  repos) are de-duplicated at search time (Jaccard similarity,
+  `src/core/search/dedup.ts`). Content recall is unaffected:
   the surviving copy carries the same text, and the hidden copy is still
   reachable via a repo-scoped query or direct slug lookup. If you need
   the per-repo copy to win, include the repo name in the query.
-
-A feature-scoped retrieval bench (brain-bench style, hit@K against a live
-mirror) ships with the QA notes; see `QA-REPORT.md` for the summary.
 
 ## Rate limits
 

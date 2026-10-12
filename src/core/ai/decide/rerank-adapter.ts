@@ -61,7 +61,7 @@ export async function rerankViaDecide(input: RerankInput, deps: RerankViaDecideD
   if (bodies.some((body) => Buffer.byteLength(body, 'utf8') > deps.maxPayloadBytes)) {
     throw new RerankError('TypeSafe rerank: request exceeds payload byte cap', 'payload_too_large');
   }
-  deps.tracker?.reserve({
+  const reservation = deps.tracker?.reserve({
     modelId: deps.model, estimatedInputTokens: plan.reduce((n, b) => n + b.estimatedInputTokens, 0),
     maxOutputTokens: 0, kind: 'rerank', label: 'gateway.rerank',
   });
@@ -120,11 +120,11 @@ export async function rerankViaDecide(input: RerankInput, deps: RerankViaDecideD
     if (isAIInvocationPolicyError(error) || error instanceof RerankError) throw error;
     if (error instanceof DecideError) throw new RerankError(`TypeSafe rerank: ${error.message}`, error.reason === 'rate_limited' ? 'rate_limit' : 'unknown', error.status);
     if (ctrl.signal.aborted) throw new RerankError('TypeSafe rerank: request aborted', input.signal?.aborted ? 'unknown' : 'timeout');
-    throw new RerankError('TypeSafe rerank: transport failed', 'network');
+    throw new RerankError('TypeSafe rerank: transport failed', 'unreachable');
   } finally {
     clearTimeout(timer);
     input.signal?.removeEventListener('abort', callerAbort);
-    recordOnTracker(deps.tracker, { modelId: deps.model, inputTokens, outputTokens: 0, kind: 'rerank', label: 'gateway.rerank', failed });
+    recordOnTracker(deps.tracker, { modelId: deps.model, reservation, inputTokens, outputTokens: 0, kind: 'rerank', label: 'gateway.rerank', failed });
   }
   // Equal scores keep the incoming fused rank. No threshold drops evidence.
   results.sort((a, b) => b.relevanceScore - a.relevanceScore || a.index - b.index);

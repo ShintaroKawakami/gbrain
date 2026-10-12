@@ -27,6 +27,7 @@ writes_to:
   - people/
   - concepts/
   - sources/
+when_to_use: "Use when the user asks: \"shares a link or URL\", \"read this\", \"save this\", \"think about this\", \"put this in brain\"."
 ---
 
 # Idea Ingest Skill
@@ -119,6 +120,14 @@ Format: `- **YYYY-MM-DD** | Referenced in [page title](path) — brief context`
 - **Tweet thread vs single tweet:** Fetch the entire thread. Treat the thread as one unit.
 - **Video/podcast link:** Note that only metadata can be ingested unless a transcript is available. Ask the user for a transcript.
 - **Raw upload:** Use the `file_upload` tool (not CLI `gbrain files upload-raw`) when operating as an agent.
+
+## When it fails
+
+Follow the [agent operator protocol](../conventions/agent-operator-protocol.md) for any gbrain error `code`, exit code, `[AGENT]` block or notice block. Specific to this skill:
+
+- The fetch fails (paywall, 404, timeout): save a stub with URL, metadata and the failure reason (`status: fetch_failed`) and ask the user to paste the content.
+- `gbrain files upload-raw` / `file_upload` is refused (path outside the allowed root, payload too large): tell the user the limit and offer a link or an excerpt instead.
+- `write_pending` (exit 10) on the page write: poll `gbrain write-request <request_id>` before reporting `ingested`.
 
 ## Anti-Patterns
 

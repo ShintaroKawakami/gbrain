@@ -18,7 +18,8 @@
 
 import type { BrainEngine } from './engine.ts';
 import { ALLOWED_SCOPES_LIST, assertAllowedScopes } from './scope.ts';
-import { executeRawJsonb, type SqlQuery } from './sql-query.ts';
+import type { SqlQuery } from './sql-query.ts';
+import { opError } from './ops/contract.ts';
 import { generateToken, hashToken, isUndefinedColumnError } from './utils.ts';
 import { permissionsMirror, tokenGrantColumnValues, tokenGrantFromPermissions, TOKEN_GRANT_COLUMNS, type GrantSources, type PrincipalGrant } from './grants/model.ts';
 
@@ -88,49 +89,37 @@ export async function mintLegacyToken(
 }
 
 /**
- * F3: insert a token born on the unified grant shape: the grant columns at
- * revision 1 plus the `permissions` JSONB mirror older binaries read. On a
- * brain whose schema predates the columns the same grant is written as the
- * JSONB-only legacy shape (read identically, migrated on its next write), so
- * minting never depends on migration order. Scopes bind as a Postgres array
- * literal through a TEXT param + ::text[] (values are allowlisted); omitted
- * scopes stay NULL (grandfathered full access). JSONB goes through
- * executeRawJsonb per the repo invariant. Not for use inside a transaction:
- * the fallback retries after a failed statement.
+ * Insert a token born on the unified grant shape: the grant columns at
+ * revision 1 plus the `permissions` JSONB mirror older binaries read
+ * (`GRANT_MIRROR_WINDOW_ENDS`). A brain whose schema predates the columns
+ * refuses with `migrations_pending` instead of writing a JSONB-only grant.
+ * Scopes bind as a Postgres array literal through a TEXT param + ::text[]
+ * (values are allowlisted); omitted scopes stay NULL (grandfathered full
+ * access). The JSONB object binds as a raw object, exactly as executeRawJsonb
+ * binds it (no double-encode).
  */
 export async function insertUnifiedToken(engine: BrainEngine, opts: {
   name: string; tokenHash: string; scopes?: string[];
   grant: Pick<PrincipalGrant, 'sources' | 'allowedOperations' | 'takesHolders'>;
 }): Promise<Array<{ id: string }>> {
   const scopes = opts.scopes === undefined ? null : `{${opts.scopes.join(',')}}`;
-  const permissions = permissionsMirror(opts.grant, {});
   try {
-    try {
-      // The JSONB object binds at $4 as a raw object, exactly as executeRawJsonb
-      // binds it (no double-encode); the scalar grant columns follow it.
-      return await engine.executeRaw<{ id: string }>(
-        `INSERT INTO access_tokens (name, token_hash, scopes, permissions, ${TOKEN_GRANT_COLUMNS.join(', ')}, grant_revision)
-         VALUES ($1, $2, $3::text[], $4::jsonb, $5, $6, $7::text[], $8::text[], $9::text[], 1)
-         RETURNING id`,
-        [opts.name, opts.tokenHash, scopes, permissions, ...tokenGrantColumnValues(opts.grant)],
-      );
-    } catch (e) {
-      if (!['source_grant', 'grant_revision', ...TOKEN_GRANT_COLUMNS].some(column => isUndefinedColumnError(e, column))) throw e;
-      return await executeRawJsonb<{ id: string }>(
-        engine,
-        'INSERT INTO access_tokens (name, token_hash, scopes, permissions) VALUES ($1, $2, $3::text[], $4::jsonb) RETURNING id',
-        [opts.name, opts.tokenHash, scopes],
-        [permissions],
-      );
-    }
+    return await engine.executeRaw<{ id: string }>(
+      `INSERT INTO access_tokens (name, token_hash, scopes, permissions, ${TOKEN_GRANT_COLUMNS.join(', ')}, grant_revision)
+       VALUES ($1, $2, $3::text[], $4::jsonb, $5, $6, $7::text[], $8::text[], $9::text[], 1)
+       RETURNING id`,
+      [opts.name, opts.tokenHash, scopes, permissionsMirror(opts.grant, {}), ...tokenGrantColumnValues(opts.grant)],
+    );
   } catch (e) {
-    // isUndefinedColumnError also matches message-shaped variants — some
+    // isUndefinedColumnError also matches message-shaped variants: some
     // driver-wrapped errors drop the SQLSTATE code.
-    if (isUndefinedColumnError(e, 'scopes') || isUndefinedColumnError(e, 'permissions')) {
-      throw new Error(
-        'this brain is missing token columns (undefined column on access_tokens) — ' +
-          'run `gbrain apply-migrations` and retry.',
-      );
+    if (['scopes', 'permissions', 'grant_revision', ...TOKEN_GRANT_COLUMNS].some(column => isUndefinedColumnError(e, column))) {
+      throw opError('migrations_pending',
+        'This brain is missing the access-token grant columns, so it cannot mint a token.',
+        'Apply the pending schema migrations on the brain host, then mint the token again.',
+        { why: 'Tokens are born on the unified grant columns; a brain whose schema predates them has not run its migrations.',
+          fix: { argv: ['gbrain', 'apply-migrations', '--yes'], consent: [], actor: 'agent', requires_exclusive: true,
+            why: 'Applies the pending schema migrations, including the token grant columns; no user decision needed.', verify: { argv: ['gbrain', 'doctor', '--json'] } } });
     }
     throw e;
   }

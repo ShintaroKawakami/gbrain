@@ -6,6 +6,7 @@
 import { execFileSync } from 'child_process';
 import { parseDurationSeconds } from './sync-concurrency.ts';
 import { resolveStallAbortSecondsFromEnv } from './stall-env.ts';
+import { gitChildEnv } from './git-env.ts';
 
 /**
  * #2828 full-sync reconcile safety-valve thresholds. A reconcile that would
@@ -88,7 +89,7 @@ export function listEverCommittedPaths(repoPath: string): Set<string> | null {
       'git',
       ['-C', repoPath, '-c', 'core.quotepath=off', 'log', '--all', '--no-renames',
         '--diff-filter=A', '--format=', '--name-only'],
-      { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] },
+      { env: gitChildEnv(), encoding: 'utf8', maxBuffer: 512 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] },
     );
   } catch {
     return null;
@@ -227,6 +228,29 @@ export function syncWatchdogPlan(args: string[], res: HardDeadlineResolution): {
 }
 
 /**
+ * #6278: the `gbrain sync` arguments (after `sync`) that resume a managed cursor
+ * with its stored processing and cursor options, so a follow-up printed by a
+ * hold, `sources retry-held` or doctor keeps `--no-embed` and friends instead
+ * of starting a second cursor. `syncResumeCommand` quotes them.
+ */
+export function managedSyncResumeArgs(input: { sourceId: string; processingOptions?: { noEmbed?: boolean; noExtract?: boolean; noSchemaPack?: boolean } | null;
+  syncOptions?: { full?: boolean; workingTree?: boolean; srcSubpath?: string | null; exclude?: string[]; includeHidden?: string[]; strategy?: string | null } | null;
+  repoPath?: string | null }): string[] {
+  const p = input.processingOptions ?? {}, c = input.syncOptions ?? {};
+  return ['--source', input.sourceId, '--no-pull', ...(input.repoPath ? ['--repo', input.repoPath] : []), ...(p.noEmbed ? ['--no-embed'] : []), ...(p.noExtract ? ['--no-extract'] : []),
+    ...(p.noSchemaPack ? ['--no-schema-pack'] : []), ...(c.full ? ['--full'] : []), ...(c.workingTree ? ['--working-tree'] : []), ...(c.srcSubpath ? ['--src-subpath', c.srcSubpath] : []),
+    ...(c.exclude ?? []).flatMap(pattern => ['--exclude', pattern]), ...(c.includeHidden ?? []).flatMap(pattern => ['--include-hidden', pattern]), ...(c.strategy ? ['--strategy', c.strategy] : [])];
+}
+
+/**
+ * #5984: the shell-quoted `gbrain sync` command that resumes this run with the
+ * same brain, source and cursor-defining options (`args` are the sync argv).
+ */
+export function syncResumeCommand(args: string[], brain: string | null = null): string {
+  return ['gbrain', ...(brain ? ['--brain', brain] : []), 'sync', ...args].map(a => /^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`).join(' ');
+}
+
+/**
  * The stdout notice the sync watchdog prints when it stops a run, so the agent
  * sees why the sync ended and the exact command that resumes it (a SIGTERMed
  * process prints no summary of its own). One JSON object under `--json`.
@@ -234,7 +258,7 @@ export function syncWatchdogPlan(args: string[], res: HardDeadlineResolution): {
 export function syncDeadlineStopNotice(args: string[], res: HardDeadlineResolution): string {
   const deadlineSec = Math.round(res.deadlineMs / 1000);
   const windowSec = res.progressWindowMs ? Math.round(res.progressWindowMs / 1000) : null;
-  const resume = ['gbrain', 'sync', ...args].map(a => /^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`).join(' ');
+  const resume = syncResumeCommand(args);
   const cause = windowSec
     ? `the ${deadlineSec}s sync deadline (${res.reason}) passed and the run made no progress for ${windowSec}s`
     : `the ${deadlineSec}s sync deadline (${res.reason}) passed`;

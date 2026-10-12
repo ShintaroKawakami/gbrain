@@ -113,16 +113,21 @@ type CallOpts = { remote?: boolean; transport?: 'stdio' | 'http' };
 // Trust-pin tests pass 'http' / undefined explicitly.
 /** Remote callers get lean rows (C1): the fixture row minus its page_id diagnostic. */
 function leanResults(): unknown[] {
-  return nextResults.map(r => { const { page_id: _p, ...lean } = r as Record<string, unknown>; return lean; });
+  // The search op labels every hit with its trust tier and origin (#5575 A6); the stub rows carry neither, so unknown/unrecorded.
+  return nextResults.map(r => { const { page_id: _p, ...lean } = r as Record<string, unknown>; return { ...lean, trust_tier: 'unknown', origin: 'unrecorded' }; });
 }
 
-function callSearch(opts: CallOpts = {}) {
-  return dispatchToolCall(engineStub, 'search', { query: 'anything at all' }, {
+async function callSearch(opts: CallOpts = {}) {
+  const out = await dispatchToolCall(engineStub, 'search', { query: 'anything at all' }, {
     remote: true,
     transport: 'stdio',
     sourceId: 'default',
     ...opts,
   });
+  // F3's degraded_recall notice (this keyless stub searches keyword-only) is
+  // orthogonal to the backup block under test; it is pinned in
+  // test/mcp-notice-channels.test.ts. So is F2's keyword count line (test/search-keyword-paging.test.ts).
+  return { ...out, content: out.content.filter(c => !c.text.startsWith('[gbrain notice degraded_recall ') && !c.text.startsWith('[gbrain search] ')) };
 }
 
 async function waitFor(pred: () => boolean, ms = 2000): Promise<boolean> {
@@ -247,7 +252,7 @@ describe('maybeAttachBackupNotice (stdio aggregate block)', () => {
     saveBackupStatus(warnStatus());
     const out = await callSearch({ remote: false, transport: 'stdio' });
     expect(out.content.length).toBe(1);
-    expect(JSON.parse(out.content[0].text)).toEqual(nextResults);
+    expect(JSON.parse(out.content[0].text)).toEqual(nextResults.map(r => ({ ...(r as Record<string, unknown>), trust_tier: 'unknown', origin: 'unrecorded' })));
   });
 
   test('hourly latch: an ok-cache consult blinds a warn cache written moments later, until reset', async () => {

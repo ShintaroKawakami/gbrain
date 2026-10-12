@@ -257,6 +257,13 @@ export interface ParsedTranscript {
    * span. Kept alongside rather than on ToolCallRecord, which deliberately
    * carries no transcript-internal positions. */
   toolCallTurnIndexes: number[];
+  /**
+   * Set by a lane that can prove the read held only records it recognizes and
+   * no conversation: the Codex lane sets it when every non-blank line parsed
+   * and was a session header (a session opened and closed with no prompt).
+   * Session-end reads it as an empty session instead of parser drift.
+   */
+  recognizedOnly?: boolean;
 }
 
 /**
@@ -612,6 +619,12 @@ export interface ParsedClaudeSession {
    * the real drift signal: turn records exist but no longer yield text.
    */
   turnShapedLines: number;
+  /**
+   * User records deliberately excluded (root isMeta/isSidechain/isCompactSummary
+   * or a non-human origin): a session with these and no user turn was started
+   * by automation, not a parser that lost the human side.
+   */
+  excludedUserLines: number;
 }
 
 /**
@@ -635,6 +648,7 @@ export function parseClaudeSessionFile(
   let cwd: string | undefined;
   let skippedLines = 0;
   let turnShapedLines = 0;
+  let excludedUserLines = 0;
   for (const line of raw.split('\n')) {
     const t = line.trim();
     if (!t) continue;
@@ -655,6 +669,7 @@ export function parseClaudeSessionFile(
     ) {
       turnShapedLines++;
     }
+    if (e.type === 'user' && (isSkippedTurnEntry(e) || hasNonHumanOrigin(e))) excludedUserLines++;
     if (!turn) continue;
     const timestamp = typeof e.timestamp === 'string' ? e.timestamp : '';
     turns.push({ role: turn.turn.role, text: turn.turn.text, timestamp });
@@ -667,6 +682,7 @@ export function parseClaudeSessionFile(
     bytesRead: size,
     skippedLines,
     turnShapedLines,
+    excludedUserLines,
   };
 }
 

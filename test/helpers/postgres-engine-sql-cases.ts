@@ -52,6 +52,7 @@ export const DOMAIN_OF: Record<string, string> = {
   'engineSqlOn': OOS.helper,
   'rlsScopeBindingEnabled': OOS.helper,
   'withScopedReadTransaction': OOS.helper,
+  'jitOffRead': OOS.helper,
   'connect': OOS.lifecycle,
   'disconnect': OOS.lifecycle,
   'disconnectInternal': OOS.helper,
@@ -79,7 +80,7 @@ export const DOMAIN_OF: Record<string, string> = {
   'vectorIterativeScanSupported': OOS.helper,
 
   // pages
-  'getPage': 'pages', 'readPageSnapshot': 'pages', 'lockPageKeys': 'pages', 'findDuplicatePage': 'pages',
+  'getPage': 'pages', 'readPageSnapshot': 'pages', 'readPageSnapshotsBatch': 'pages', 'lockPageKeys': 'pages', 'findDuplicatePage': 'pages', 'findDuplicatePages': 'pages',
   'putPage': 'pages', 'deletePage': 'pages', 'deletePages': 'pages', 'resolveSlugsByPaths': 'pages',
   'softDeletePage': 'pages', 'softDeletePages': 'pages', 'restorePage': 'pages', 'purgeDeletedPages': 'pages',
   'refreshPageBody': 'pages', 'updatePageContextualRetrievalState': 'pages', 'listPages': 'pages',
@@ -90,7 +91,7 @@ export const DOMAIN_OF: Record<string, string> = {
   'countStalePagesForExtraction': 'pages', 'listStalePagesForExtraction': 'pages', 'markPagesExtractedBatch': 'pages',
   'markPagesAttendanceBlocked': 'pages',
   // links
-  'addLink': 'links', 'addLinksBatch': 'links', 'replaceDerivedLinks': 'links', 'removeLinksByPagesAndSource': 'links',
+  'addLink': 'links', 'addLinksBatch': 'links', 'replaceDerivedLinks': 'links', 'replaceDerivedLinksBatch': 'links', 'removeLinksByPagesAndSource': 'links',
   'removeLink': 'links', 'getLinks': 'links', 'getBacklinks': 'links', 'listLinkSources': 'links',
   'traverseGraph': 'links', 'traversePaths': 'links', 'traversePathsDetailed': 'links', 'findOrphanPages': 'links',
   'rewriteLinks': OOS.stub,
@@ -112,7 +113,7 @@ export const DOMAIN_OF: Record<string, string> = {
   'getEmbeddingsByChunkIds': 'chunks', 'getChunksWithEmbeddings': 'chunks',
   // facts (incl. the ontology rows of the facts table)
   'insertFact': 'facts', 'expireFact': 'facts', 'insertFacts': 'facts', 'deleteFactsForPage': 'facts',
-  'listFactsByEntity': 'facts', 'listFactsSince': 'facts', 'listFactsBySession': 'facts', 'listSupersessions': 'facts',
+  'listFactsByEntity': 'facts', 'listFactsSince': 'facts', 'listFactsKeyset': 'facts', 'listFactsBySession': 'facts', 'listSupersessions': 'facts',
   'countUnconsolidatedFacts': 'facts', 'findCandidateDuplicates': 'facts', 'consolidateFact': 'facts',
   'findTrajectory': 'facts', 'getFactsHealth': 'facts', 'migrateFactsToCanonical': 'facts',
   'mergeOntologyFact': 'facts', 'getOntology': 'facts', 'discoverOntologyDimensions': 'facts', 'findOntologyConflicts': 'facts',
@@ -133,8 +134,8 @@ export const DOMAIN_OF: Record<string, string> = {
   'searchKeyword': 'cjk-search', 'searchKeywordChunks': 'cjk-search',
 
   // out of scope
-  'searchTitles': OOS.search, 'searchVector': OOS.search, 'explainVectorSearch': OOS.search,
-  'relationalFanout': OOS.enrichment, 'getBacklinkCounts': OOS.enrichment, 'getAdjacencyBoosts': OOS.enrichment,
+  'searchTitles': OOS.search, 'countKeywordPages': OOS.search, 'searchKeywordPages': OOS.search, 'searchVector': OOS.search, 'explainVectorSearch': OOS.search,
+  'relationalFanout': OOS.enrichment, 'relationalChainHop': OOS.enrichment, 'getBacklinkCounts': OOS.enrichment, 'getAdjacencyBoosts': OOS.enrichment,
   'getContentFlagsByPageIds': OOS.enrichment, 'getUnverifiedExtractionPageIds': OOS.enrichment,
   'getEffectiveDates': OOS.enrichment, 'getSalienceScores': OOS.enrichment, 'resolveAliases': OOS.enrichment,
   'getStats': OOS.stats, 'getHealth': OOS.stats,
@@ -275,11 +276,17 @@ export const SQL_CASES: SqlCase[] = [
     ['default', (e) => e.readPageSnapshot(SLUG)],
     ['sourceId', (e) => e.readPageSnapshot(SLUG, { sourceId: SRC })],
   ]),
+  ...variants('readPageSnapshotsBatch', [
+    ['default', (e) => e.readPageSnapshotsBatch([{ slug: SLUG, sourceId: SRC }, { slug: SLUG2, sourceId: SRC }])],
+  ]),
   ...variants('lockPageKeys', [
     ['default', (e) => e.transaction((tx: any) => tx.lockPageKeys([{ sourceId: SRC, slug: SLUG }]))],
   ]),
   ...variants('findDuplicatePage', [
     ['default', (e) => e.findDuplicatePage(SRC, { hash: 'hash-1' }), [[/FROM pages/, [{ id: 1, slug: SLUG }]]]],
+  ]),
+  ...variants('findDuplicatePages', [
+    ['default', (e) => e.findDuplicatePages(SRC, [{ hash: 'hash-1' }, { hash: 'hash-2', frontmatterId: 'fm-1', excludeSlug: SLUG }])],
   ]),
   ...variants('putPage', [
     ['default', (e) => e.putPage(SLUG, page), [pageRet]],
@@ -353,6 +360,8 @@ export const SQL_CASES: SqlCase[] = [
     ['sourceId', (e) => e.getVersions(SLUG, { sourceId: SRC })],
     ['sourceIds', (e) => e.getVersions(SLUG, { sourceIds: SRCS })],
     ['excludePrivate', (e) => e.getVersions(SLUG, { excludePrivate: true })],
+    ['limit', (e) => e.getVersions(SLUG, { sourceId: SRC, limit: 3 })],
+    ['metadataOnly', (e) => e.getVersions(SLUG, { sourceIds: SRCS, includeBody: false })],
   ]),
   ...variants('revertToVersion', [
     ['default', (e) => e.revertToVersion(SLUG, 3)],
@@ -391,6 +400,11 @@ export const SQL_CASES: SqlCase[] = [
   ...variants('addLinksBatch', [['default', (e) => e.addLinksBatch([{ from_slug: SLUG, to_slug: SLUG2, link_type: 'works_at' }])]]),
   ...variants('replaceDerivedLinks', [
     ['default', (e) => e.replaceDerivedLinks({ slug: SLUG, sourceId: SRC, expectedRevision: REVISION, sourceIncarnation: INCARNATION }, [{ from_slug: SLUG, to_slug: SLUG2, link_type: 'works_at' }]), [[/INSERT INTO links \(from_page_id, to_page_id, link_type, context, link_source, link_kind/, [{ one: 1 }]]]],
+  ]),
+  ...variants('replaceDerivedLinksBatch', [
+    ['default', (e) => e.replaceDerivedLinksBatch([{ origin: { slug: SLUG, sourceId: SRC, expectedRevision: REVISION, sourceIncarnation: INCARNATION }, links: [{ from_slug: SLUG, to_slug: SLUG2, link_type: 'works_at' }] }]), [
+      [/AS batch_prior_bytes/, [{ ...PAGE_ROW, batch_n: 1, batch_slug: SLUG, batch_source_id: SRC, source_incarnation: INCARNATION, snapshot_tags: [], snapshot_withdrawals: [], fingerprint_body: null, fingerprint_timeline: null }]],
+      [/INSERT INTO links \(from_page_id, to_page_id, link_type, context, link_source, link_kind/, [{ one: 1 }]]]],
   ]),
   ...variants('removeLinksByPagesAndSource', [
     ['default', (e) => e.removeLinksByPagesAndSource([{ slug: SLUG, source_id: SRC }], { linkSource: 'markdown' })],
@@ -581,6 +595,11 @@ export const SQL_CASES: SqlCase[] = [
   ...variants('listFactsByEntity', [
     ['default', (e) => e.listFactsByEntity(SRC, SLUG)],
     ['allFilters', (e) => e.listFactsByEntity(SRC, SLUG, { activeOnly: false, unconsolidatedOnly: true, kinds: ['fact'], visibility: ['world'], excludeAuditRows: true, grep: 'acme' })],
+  ]),
+  ...variants('listFactsKeyset', [
+    ['default', (e) => e.listFactsKeyset(SRC, null)],
+    ['strictTime', (e) => e.listFactsKeyset(SRC, { createdAt: '2026-08-10T12:00:00.000100Z', id: null }, { visibility: ['world'] })],
+    ['keyset', (e) => e.listFactsKeyset(SRC, { createdAt: '2026-08-10T12:00:00.000100Z', id: 7 }, { activeOnly: false, fingerprint: true, limit: 51 })],
   ]),
   ...variants('listFactsSince', [
     ['default', (e) => e.listFactsSince(SRC, EPOCH)],
