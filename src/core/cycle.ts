@@ -583,6 +583,11 @@ export interface CycleOpts {
   /** #6803: a connector source's cycle (no sync phase) works on its pages changed after this (null: all); see cycle/source-window.ts. */
   sourceChangedSince?: string | null;
   /**
+   * Explicit local-review target for the consolidate phase. The CLI accepts
+   * this only with an explicit source and an isolated consolidate run.
+   */
+  entitylessProposalTargetSlug?: string;
+  /**
    * #4700 — bare `gbrain dream` may opt the brain's default-like source
    * (sources.default / sole-non-default routing) into the full implicit
    * phase set instead of the freshness-only source cycle. Never set by the
@@ -2670,6 +2675,7 @@ async function runCycleUnscoped(
           dryRun, once: opts.onceForPhase === 'consolidate',
           remote: opts.remote,
           sourceId: cycleSourceId,
+          entitylessProposalTargetSlug: opts.entitylessProposalTargetSlug,
           // W0 (Tier-1 #1): wrap the caller hook so this phase ALSO refreshes
           // the cycle lock (pre-fix these sites passed the raw — in production
           // always-undefined — hook, so long phases never refreshed).
