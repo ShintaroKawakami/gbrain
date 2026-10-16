@@ -298,24 +298,6 @@ export async function resolveEntitySlugWithSource(
 }
 
 /**
- * Write-path linker: map a bare entity slug (e.g. `mattermost`) onto an
- * existing page in the same source via `resolveSlugs`. Never creates pages.
- * Returns the page slug only when that lookup has exactly one candidate;
- * otherwise null so the caller leaves the original value unchanged.
- */
-export async function uniqueExistingPageSlug(
-  engine: BrainEngine,
-  source_id: string,
-  raw: string,
-): Promise<string | null> {
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-  if (typeof engine.resolveSlugs !== 'function') return null;
-  const hits = await engine.resolveSlugs(trimmed, { sourceId: source_id });
-  return hits.length === 1 ? hits[0] : null;
-}
-
-/**
  * How a strict reference resolution found its page. `basename` is the
  * unique-slug-basename arm and `same_name` the trigram arm restricted to
  * pages carrying the same name tokens (both are `fuzzy_match` in
