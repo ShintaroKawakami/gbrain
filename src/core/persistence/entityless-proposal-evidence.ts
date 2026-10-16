@@ -79,20 +79,20 @@ export async function assertEntitylessProposalCurrent(
 ): Promise<EntitylessProposalEvidenceV1> {
   const evidence = parseEntitylessProposalEvidence(proposal.evidence);
   if (evidence.visibility !== 'world') {
-    throw new OperationError('permission_denied', 'Private entityless fact proposals are local-only and cannot be published.');
+    throw new OperationError('permission_denied', 'Private entityless fact proposals are local-only and cannot be published.', 'Run this from the local gbrain CLI on the brain host.');
   }
   if (proposal.source_id !== evidence.source_id || proposal.page_slug !== evidence.target.slug
     || proposal.claim_text !== evidence.candidate.claim_text || proposal.kind !== 'fact' || proposal.holder !== 'self'
     || Math.fround(Number(proposal.weight)) !== Math.fround(evidence.candidate.weight)) throw invalidEvidence();
   if (!evidence.target.revision || !evidence.target.page_id) {
-    throw new OperationError('page_not_found', 'target_not_ready: create the explicit target page, then run a fresh review proposal.');
+    throw new OperationError('page_not_found', 'target_not_ready: create the explicit target page, then run a fresh review proposal.', 'Create or restore the target page (gbrain put), then re-run gbrain dream --phase consolidate for the source.');
   }
 
   const lock = options.lock === true;
   const [source] = await engine.executeRaw<{ incarnation: string; archived: boolean }>(
     `SELECT incarnation,archived FROM sources WHERE id=$1${lock ? ' FOR SHARE' : ''}`, [evidence.source_id]);
   if (!source || source.archived || source.incarnation !== evidence.source_incarnation) {
-    throw new OperationError('source_changed', 'The proposal source incarnation changed; create a fresh review proposal.');
+    throw new OperationError('source_changed', 'The proposal source incarnation changed; create a fresh review proposal.', 'Re-run gbrain dream --phase consolidate for the source to create a fresh review proposal.');
   }
 
   const target = await engine.readPageSnapshot(evidence.target.slug, {
@@ -100,23 +100,23 @@ export async function assertEntitylessProposalCurrent(
     excludePrivate: true,
     requireLiveSource: true,
   });
-  if (!target) throw new OperationError('page_not_found', 'target_not_ready: the explicit target is missing, deleted or private.');
+  if (!target) throw new OperationError('page_not_found', 'target_not_ready: the explicit target is missing, deleted or private.', 'Create or restore the target page (gbrain put), then re-run gbrain dream --phase consolidate for the source.');
   if (Number(target.page.id) !== evidence.target.page_id || target.revision !== evidence.target.revision
     || target.sourceIncarnation !== evidence.source_incarnation) {
-    throw new OperationError('revision_conflict', 'The explicit target page changed after review; create a fresh proposal.');
+    throw new OperationError('revision_conflict', 'The explicit target page changed after review; create a fresh proposal.', 'Re-run gbrain dream --phase consolidate for this source to regenerate the review proposal, then review it again.');
   }
 
   const current = await readEvidenceFacts(engine, evidence.source_id, evidence.facts.map(fact => fact.id), lock);
   const expected = [...evidence.facts].sort((a, b) => a.id - b.id);
   if (current.length !== expected.length || stableJson(current) !== stableJson(expected)) {
-    throw new OperationError('revision_conflict', 'The source facts changed after review; the proposal remains available for review.');
+    throw new OperationError('revision_conflict', 'The source facts changed after review; the proposal remains available for review.', 'Re-run gbrain dream --phase consolidate for this source to regenerate the review proposal, then review it again.');
   }
   const nowRows = await engine.executeRaw<{ now: Date | string }>('SELECT now() AS now');
   const now = new Date(nowRows[0]!.now).getTime();
   if (current.some(fact => fact.visibility !== 'world' || fact.entity_slug !== null || fact.expired_at !== null
     || fact.consolidated_at !== null || fact.consolidated_into !== null || fact.withdrawn
     || fact.superseded_by !== null || Date.parse(fact.valid_from) > now || fact.valid_until !== null)) {
-    throw new OperationError('revision_conflict', 'The source facts are inactive, withdrawn or have a finite validity end.');
+    throw new OperationError('revision_conflict', 'The source facts are inactive, withdrawn or have a finite validity end.', 'Re-run gbrain dream --phase consolidate for this source to regenerate the review proposal, then review it again.');
   }
   return evidence;
 }
@@ -128,7 +128,7 @@ export async function prepareEntitylessProposalAccept(
   config: GBrainConfig,
 ): Promise<PreparedMutation> {
   if (row.authority.remote !== false) {
-    throw new OperationError('permission_denied', 'Entityless proposal publication is local-CLI-only.');
+    throw new OperationError('permission_denied', 'Entityless proposal publication is local-CLI-only.', 'Run this from the local gbrain CLI on the brain host.');
   }
   const proposalId = Number(row.intent?.proposal_id);
   if (!Number.isSafeInteger(proposalId) || proposalId < 1 || typeof row.intent?.evidence_hash !== 'string') {
@@ -137,7 +137,7 @@ export async function prepareEntitylessProposalAccept(
   const [stored] = await engine.executeRaw<EntitylessProposalRecord>(`SELECT id,source_id,page_slug,claim_text,kind,holder,weight,status,evidence
     FROM take_proposals WHERE id=$1 AND source_id=$2`, [proposalId, row.source_id]);
   if (!stored || stored.status !== 'evidence_accepting') {
-    throw new OperationError('revision_conflict', 'The entityless proposal is no longer in its guarded acceptance state.');
+    throw new OperationError('revision_conflict', 'The entityless proposal is no longer in its guarded acceptance state.', 'Re-run gbrain dream --phase consolidate for this source to regenerate the review proposal, then review it again.');
   }
   const evidence = parseEntitylessProposalEvidence(stored.evidence);
   if (digest(evidence) !== row.intent.evidence_hash || evidence.source_id !== row.source_id
@@ -165,7 +165,7 @@ export async function prepareEntitylessProposalAccept(
         FROM take_proposals WHERE id=$1 AND source_id=$2 FOR UPDATE`, [proposalId, row.source_id]);
       if (!currentProposal || currentProposal.status !== 'evidence_accepting'
         || digest(parseEntitylessProposalEvidence(currentProposal.evidence)) !== row.intent!.evidence_hash) {
-        throw new OperationError('revision_conflict', 'The review proposal changed before publication.');
+        throw new OperationError('revision_conflict', 'The review proposal changed before publication.', 'Re-run gbrain dream --phase consolidate for this source to regenerate the review proposal, then review it again.');
       }
       await assertEntitylessProposalCurrent(tx, currentProposal, { lock: true });
     },
@@ -176,13 +176,13 @@ export async function prepareEntitylessProposalAccept(
       // provenance, so any such change aborts the whole publication.
       const after = await readEvidenceFacts(tx, evidence.source_id, evidence.facts.map(fact => fact.id), true);
       if (stableJson(after) !== stableJson([...evidence.facts].sort((a, b) => a.id - b.id))) {
-        throw new OperationError('revision_conflict', 'Source facts changed during publication; the take was not committed.');
+        throw new OperationError('revision_conflict', 'Source facts changed during publication; the take was not committed.', 'Re-run gbrain dream --phase consolidate for this source to regenerate the review proposal, then review it again.');
       }
       const rowNum = Number(outcome.row_num);
-      if (!Number.isSafeInteger(rowNum) || rowNum < 1) throw new OperationError('storage_error', 'The accepted take row was not recorded.');
+      if (!Number.isSafeInteger(rowNum) || rowNum < 1) throw new OperationError('storage_error', 'The accepted take row was not recorded.', 'Check gbrain doctor, then retry the acceptance.');
       const updated = await tx.executeRaw(`UPDATE take_proposals SET status='evidence_accepted',promoted_row_num=$2
         WHERE id=$1 AND source_id=$3 AND status='evidence_accepting' RETURNING id`, [proposalId, rowNum, row.source_id]);
-      if (updated.length !== 1) throw new OperationError('revision_conflict', 'The review proposal acceptance state changed during publication.');
+      if (updated.length !== 1) throw new OperationError('revision_conflict', 'The review proposal acceptance state changed during publication.', 'Re-run gbrain dream --phase consolidate for this source to regenerate the review proposal, then review it again.');
       return { ...outcome, proposal_id: proposalId, row_num: rowNum, evidence_accepted: true };
     },
   };
@@ -238,5 +238,5 @@ function iso(value: Date | string | null): string | null {
 }
 
 function invalidEvidence(): OperationError {
-  return new OperationError('invalid_params', 'The entityless review evidence is malformed; it cannot be published.');
+  return new OperationError('invalid_params', 'The entityless review evidence is malformed; it cannot be published.', 'Reject this proposal and re-run gbrain dream --phase consolidate to regenerate it.');
 }

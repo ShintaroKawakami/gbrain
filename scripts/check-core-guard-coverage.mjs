@@ -30,6 +30,7 @@ const EXEMPT = {
   'src/core/persistence/import-prepare.ts': 'owner-run local import (gbrain import); doctor reports any overage',
   'src/core/persistence/sync-image.ts': 'owner git edits (managed sync image branch, prepared through importImageFile as import-prepare.ts is); doctor core_memory reports any overage',
   'src/core/persistence/connector-sync.ts': 'connector-owned pages; core marking is owner-written frontmatter the connector never sets',
+  'src/core/persistence/entityless-proposal-evidence.ts': 'JTT entityless review: publishes an accepted take row from reviewed fact evidence; no page text is written',
   'src/core/persistence/connector-google-receipts.ts': 'connector receipt rows, not page text',
   'src/core/persistence/projection-reindex.ts': 'rebuilds derived projections; page text is unchanged',
   'src/core/persistence/noop-kernel.ts': 'decides that nothing would change; publishes nothing',

@@ -277,7 +277,7 @@ async function acceptEntitylessProposal(target: ProposalActionTarget, proposal: 
     if (proposal.status === 'evidence_pending') await assertEntitylessProposalCurrent(engine, asEntitylessRecord(proposal));
     authority = await maintenancePreflight(engine, proposal.source_id, target.localDir ?? target.brainDir,
       { allowUnmanagedDatabaseOnly: true });
-    if (!authority) throw new OperationError('owner_unavailable', 'The source is not ready for proposal publication.');
+    if (!authority) throw new OperationError('owner_unavailable', 'The source is not ready for proposal publication.', 'Check gbrain sources writer status for this source, then retry.');
   } catch (error) {
     if (proposal.status === 'evidence_accepting') await restoreEntitylessProposalIfSettled(engine, proposal.id, proposal.source_id);
     throw proposalActionError(error);
