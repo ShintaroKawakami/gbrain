@@ -31,7 +31,6 @@ import { isConnectorSourceKind } from './connector-identity.ts';
 import { MaintenanceWriteWait } from './maintenance-wait.ts';
 import { auditConflictsCommand, FILE_DRIFT_MESSAGE, liveFileDrift } from './drift-conflicts.ts';
 import { declaredWriteTrust, lowerToDerivedTier, readDerivationDeclaration, recordTaintEdges, type DerivationDeclaration } from '../trust/taint.ts';
-import { prepareEntitylessProposalAccept } from './entityless-proposal-evidence.ts';
 
 export interface MaintenanceAuthority {
   writer: WriteAuthority;
@@ -522,9 +521,7 @@ export async function prepareMaintenanceMutation(engine: BrainEngine, row: Write
 async function prepareMaintenanceKind(engine: BrainEngine, row: WriteRequest, config: GBrainConfig, clock?: ClaimPhaseClock): Promise<PreparedMutation> {
   if (row.authority.remote) throw trustedCliRequired('Remote maintenance publication is not supported.');
   enterClaimStep(clock, 'maintenance_dispatch');
-  if (row.intent?.kind === 'managed_maintenance_entityless_proposal_accept') {
-    return prepareEntitylessProposalAccept(engine, row, config);
-  }
+  if (row.intent?.kind === 'managed_maintenance_entityless_proposal_accept') return (await import('./entityless-proposal-evidence.ts')).prepareEntitylessProposalAccept(engine, row, config);
   if (row.intent?.kind === 'managed_maintenance_restore_extractor_facts') return (await import('../repair/extractor-facts.ts')).prepareExtractorFactsRestore(engine, row);
   if (row.intent?.kind === 'managed_maintenance_expire_captured_facts') return (await import('../repair/captured-facts.ts')).prepareCapturedFactsExpiry(engine, row);
   if (row.intent?.kind === 'managed_maintenance_conversation_label_retire') return (await import('../repair/conversation-labels.ts')).prepareConversationLabelRetirement(engine, row);

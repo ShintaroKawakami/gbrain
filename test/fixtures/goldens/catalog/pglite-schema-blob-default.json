@@ -324,7 +324,7 @@
       "take_nudge_log.take_nudge_log_target_xor": "c CHECK (((take_id IS NOT NULL) <> (proposal_id IS NOT NULL)))",
       "take_proposals.take_proposals_pkey": "p PRIMARY KEY (id)",
       "take_proposals.take_proposals_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
-      "take_proposals.take_proposals_status_check": "c CHECK ((status = ANY (ARRAY['pending'::text, 'accepted'::text, 'rejected'::text, 'superseded'::text])))",
+      "take_proposals.take_proposals_status_check": "c CHECK ((status = ANY (ARRAY['pending'::text, 'accepted'::text, 'rejected'::text, 'superseded'::text, 'evidence_pending'::text, 'evidence_accepting'::text, 'evidence_accepted'::text, 'evidence_rejected'::text])))",
       "take_purges.take_purges_pkey": "p PRIMARY KEY (source_id, subject, claim_hash)",
       "take_purges.take_purges_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
       "think_ab_results.think_ab_results_pkey": "p PRIMARY KEY (id)",
@@ -2831,7 +2831,8 @@
           "18 acted_by text/text NULL",
           "19 promoted_row_num integer/int4 NULL",
           "20 predicted_brier real/float4 NULL",
-          "21 predicted_brier_bucket_n integer/int4 NULL"
+          "21 predicted_brier_bucket_n integer/int4 NULL",
+          "22 evidence jsonb/jsonb NULL"
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },

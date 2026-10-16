@@ -92,3 +92,12 @@ export async function resolveCycleDate(
     return formatDateInTimeZone(instant, 'UTC');
   }
 }
+
+/**
+ * UTC calendar date (YYYY-MM-DD) of a stored timestamp. Not "today": callers
+ * use it to stamp an existing row time (e.g. a fact valid_from) into stable
+ * evidence, where the value must not depend on the cycle timezone.
+ */
+export function utcDateOfTimestamp(at: Date): string {
+  return at.toISOString().slice(0, 10);
+}

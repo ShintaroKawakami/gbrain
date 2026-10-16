@@ -164,7 +164,7 @@ const ROWS: readonly Row[] = [
   ['take_domain_assignments', 'out_of_scope', 'no_memory_text', 'domain pack source'],
   ['take_grade_cache', 'out_of_scope', 'probed_reported', 'prompt_version judge_model_id evidence_signature wave_version verdict', 'verdict'],
   ['take_nudge_log', 'out_of_scope', 'no_memory_text', 'source_id nudge_pattern channel wave_version'],
-  ['take_proposals', 'swept', 'take_proposals', 'source_id page_slug content_hash prompt_version wave_version proposal_run_id status claim_text kind holder domain dedup_against_fence_rows model_id acted_by'],
+  ['take_proposals', 'swept', 'take_proposals', 'source_id page_slug content_hash prompt_version wave_version proposal_run_id status claim_text kind holder domain dedup_against_fence_rows model_id acted_by evidence'],
   ['take_purges', 'out_of_scope', 'text_free_ledger', 'source_id subject claim_hash'],
   ['takes', 'swept', 'take', 'claim kind holder since_date until_date source resolved_unit resolved_source resolved_by embedding resolved_quality embedding_model embedded_text_hash write_principal_kind write_principal_id last_write_principal_kind last_write_principal_id trust_tier write_origin'],
   ['think_ab_results', 'out_of_scope', 'probed_reported', 'source_id wave_version question baseline_answer with_calibration_answer preferred model_id notes', 'question baseline_answer with_calibration_answer'],

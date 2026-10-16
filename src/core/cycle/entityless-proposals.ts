@@ -1,5 +1,6 @@
 /** Deterministic, review-only proposals for source-scoped facts with no entity. */
 
+import { utcDateOfTimestamp } from './cycle-date.ts';
 import { createHash } from 'node:crypto';
 import type { BrainEngine, FactRow } from '../engine.ts';
 import { cosineSimilarity } from '../facts/classify.ts';
@@ -186,7 +187,7 @@ export async function produceEntitylessFactProposals(
         clusters += 1;
         const best = [...evidenceGroup].sort((a, b) => b.confidence - a.confidence || a.id - b.id)[0]!;
         const weight = clamp01(evidenceGroup.reduce((sum, fact) => sum + fact.confidence, 0) / evidenceGroup.length);
-        const since = new Date(Math.min(...evidenceGroup.map(fact => fact.valid_from.getTime()))).toISOString().slice(0, 10);
+        const since = utcDateOfTimestamp(new Date(Math.min(...evidenceGroup.map(fact => fact.valid_from.getTime()))));
         const evidence: EntitylessProposalEvidenceV1 = {
           version: 1,
           reason: 'subject_unknown',
