@@ -156,8 +156,9 @@ export async function submitRememberMutation(ctx: OperationContext, params: Reco
   const { parseTtlParam } = await import('../ops/facts.ts');
   const validUntil = parseTtlParam(p.ttl);
   const entity = typeof p.entity === 'string' && !isNullLikeEntity(p.entity) ? p.entity.trim() : null;
-  const { resolveEntitySlugWithSource } = await import('../entities/resolve.ts');
-  const resolved = entity ? await resolveEntitySlugWithSource(ctx.engine, sourceId, entity) : null;
+  const { resolveEntitySlugWithSource, uniqueExistingPageSlug } = await import('../entities/resolve.ts');
+  const uniquePage = entity ? await uniqueExistingPageSlug(ctx.engine, sourceId, entity) : null;
+  const resolved = entity ? await resolveEntitySlugWithSource(ctx.engine, sourceId, uniquePage ?? entity) : null;
   const inference = entity === null ? await inferRememberTarget(ctx, sourceId, source, p) : null;
   const linked = inference && 'target' in inference ? inference : null;
   const entitySlug = isNullLikeEntity(linked?.target.slug ?? resolved?.slug ?? null)

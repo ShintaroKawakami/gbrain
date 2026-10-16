@@ -667,7 +667,7 @@ async function runPipelineBodyInner(
   abortSignal?: AbortSignal,
 ): Promise<{ inserted: number; duplicate: number; superseded: number; fact_ids: number[]; entity_slugs: string[]; skipped_reason?: import('./extract.ts').ExtractFailureReason; write_gate?: GateTally; fence_refused?: number }> {
   const { extractFactsFromTurnWithOutcome, FactsExtractionError } = await import('./extract.ts');
-  const { resolveEntitySlugWithSource } = await import('../entities/resolve.ts');
+  const { resolveEntitySlugWithSource, uniqueExistingPageSlug } = await import('../entities/resolve.ts');
   const { cosineSimilarity } = await import('./classify.ts');
   const { writeFactsToFence, lookupSourceLocalPath } = await import('./fence-write.ts');
   const { isFactWithdrawn } = await import('./withdrawal.ts');
@@ -772,8 +772,11 @@ async function runPipelineBodyInner(
     // D4: notability filter applied post-extraction, pre-insert.
     if (filter === 'high-only' && f.notability !== 'high') continue;
 
+    const uniquePage = f.entity_slug
+      ? await uniqueExistingPageSlug(ctx.engine, ctx.sourceId, f.entity_slug)
+      : null;
     const resolved = f.entity_slug
-      ? await resolveEntitySlugWithSource(ctx.engine, ctx.sourceId, f.entity_slug)
+      ? await resolveEntitySlugWithSource(ctx.engine, ctx.sourceId, uniquePage ?? f.entity_slug)
       : null;
     const resolvedSlug = resolved?.source === 'fallback_slugify' ? null : resolved?.slug ?? null;
     const resolutionSource = resolved?.source ?? null;
