@@ -16,7 +16,6 @@ import type { BrainEngine } from '../engine.ts';
 import type { ExtractedFact } from '../facts/extract.ts';
 import {
   resolveEntitySlugWithSource,
-  uniqueExistingPageSlug,
   type ResolutionSource,
 } from './resolve.ts';
 
@@ -86,8 +85,7 @@ export async function resolveExtractedEntitiesForSave(
     const raw = facts[i].entity_slug;
     if (raw === null) continue;
     try {
-      const uniquePage = await uniqueExistingPageSlug(engine, sourceId, raw);
-      const resolved = await resolveEntitySlugWithSource(engine, sourceId, uniquePage ?? raw);
+      const resolved = await resolveEntitySlugWithSource(engine, sourceId, raw);
       facts[i] = { ...facts[i], entity_slug: resolved?.source === 'fallback_slugify' ? null : resolved?.slug ?? null };
       if (!resolved) continue;
       stats.counts[resolved.source] = (stats.counts[resolved.source] ?? 0) + 1;

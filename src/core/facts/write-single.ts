@@ -105,7 +105,7 @@ export async function writeSingleFact(
   const { managedPersistenceEnabled } = await import('../persistence/ownership.ts');
   const managed = await managedPersistenceEnabled(engine);
 
-  const { resolveEntitySlugWithSource, uniqueExistingPageSlug } = await import('../entities/resolve.ts');
+  const { resolveEntitySlugWithSource } = await import('../entities/resolve.ts');
   const { decideSingleFact } = await import('./single-prepare.ts');
   const { resolveExcludePrivatePages } = await import('../search/private-visibility.ts');
   const { writeFactsToFence, lookupSourceLocalPath } = await import('./fence-write.ts');
@@ -121,11 +121,8 @@ export async function writeSingleFact(
   // writeSingleFact caller (google/loops-extract, future verbs) gets the
   // same guard.
   const entityRef = isNullLikeEntity(input.entity) ? null : input.entity!.trim();
-  const uniquePage = entityRef
-    ? await uniqueExistingPageSlug(engine, sourceId, entityRef)
-    : null;
   const resolved = entityRef
-    ? await resolveEntitySlugWithSource(engine, sourceId, uniquePage ?? entityRef)
+    ? await resolveEntitySlugWithSource(engine, sourceId, entityRef)
     : null;
   // #5504: a slug the resolver invented is not an entity. Unmanaged writes
   // store NULL (nothing for the stub guard to refuse); the managed intent keeps
