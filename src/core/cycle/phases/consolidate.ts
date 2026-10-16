@@ -136,6 +136,7 @@ export async function runPhaseConsolidate(
         AND expired_at IS NULL
         AND (valid_until IS NULL OR valid_until > now())
         AND entity_slug IS NOT NULL
+        AND entity_slug <> ''
         AND (attributed_to IS NULL OR attributed_to = 'user')
         AND ($2::boolean=false OR visibility='world')
         AND ($1::text IS NULL OR source_id=$1)

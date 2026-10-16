@@ -163,7 +163,9 @@ export async function submitRememberMutation(ctx: OperationContext, params: Reco
   const resolved = entity ? await resolveEntitySlugWithSource(ctx.engine, sourceId, entity) : null;
   const inference = entity === null ? await inferRememberTarget(ctx, sourceId, source, p) : null;
   const linked = inference && 'target' in inference ? inference : null;
-  const entitySlug = linked?.target.slug ?? resolved?.slug ?? null;
+  const entitySlug = isNullLikeEntity(linked?.target.slug ?? resolved?.slug ?? null)
+    ? null
+    : (linked?.target.slug ?? resolved!.slug).trim();
   // A source-scoped absent identity serializes subjectless facts. Bound writers
   // cannot use it to escape their namespace grant.
   const { slug, authority, snapshot, fence, binding, writeThrough } = linked?.target ?? await planRememberTarget(ctx, sourceId, source, entitySlug, null);

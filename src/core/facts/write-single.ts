@@ -129,7 +129,9 @@ export async function writeSingleFact(
   // it database-only as attribution. Decided before the dedup lookup so the
   // exact check keys on the entity the row will carry.
   const fallbackResolution = resolved?.source === 'fallback_slugify';
-  const resolvedSlug = !entityRef ? null : fallbackResolution && !managed ? null : (resolved?.slug ?? entityRef);
+  const resolvedSlug = !entityRef || (fallbackResolution && !managed)
+    ? null
+    : (isNullLikeEntity(resolved?.slug ?? entityRef) ? null : (resolved?.slug ?? entityRef).trim());
   // #4108: provenance for the fence writer's stub guard. Null when the
   // resolver returned nothing (fail-closed — no live page was verified).
   const resolutionSource = resolved?.source ?? null;
