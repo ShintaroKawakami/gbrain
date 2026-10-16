@@ -105,7 +105,7 @@ export async function writeSingleFact(
   const { managedPersistenceEnabled } = await import('../persistence/ownership.ts');
   const managed = await managedPersistenceEnabled(engine);
 
-  const { resolveEntitySlugWithSource } = await import('../entities/resolve.ts');
+  const { resolveEntitySlugWithSource, uniqueExistingPageSlug } = await import('../entities/resolve.ts');
   const { decideSingleFact } = await import('./single-prepare.ts');
   const { resolveExcludePrivatePages } = await import('../search/private-visibility.ts');
   const { writeFactsToFence, lookupSourceLocalPath } = await import('./fence-write.ts');
@@ -121,15 +121,20 @@ export async function writeSingleFact(
   // writeSingleFact caller (google/loops-extract, future verbs) gets the
   // same guard.
   const entityRef = isNullLikeEntity(input.entity) ? null : input.entity!.trim();
+  const uniquePage = entityRef
+    ? await uniqueExistingPageSlug(engine, sourceId, entityRef)
+    : null;
   const resolved = entityRef
-    ? await resolveEntitySlugWithSource(engine, sourceId, entityRef)
+    ? await resolveEntitySlugWithSource(engine, sourceId, uniquePage ?? entityRef)
     : null;
   // #5504: a slug the resolver invented is not an entity. Unmanaged writes
   // store NULL (nothing for the stub guard to refuse); the managed intent keeps
   // it database-only as attribution. Decided before the dedup lookup so the
   // exact check keys on the entity the row will carry.
   const fallbackResolution = resolved?.source === 'fallback_slugify';
-  const resolvedSlug = !entityRef ? null : fallbackResolution && !managed ? null : (resolved?.slug ?? entityRef);
+  const resolvedSlug = !entityRef || (fallbackResolution && !managed)
+    ? null
+    : (isNullLikeEntity(resolved?.slug ?? entityRef) ? null : (resolved?.slug ?? entityRef).trim());
   // #4108: provenance for the fence writer's stub guard. Null when the
   // resolver returned nothing (fail-closed — no live page was verified).
   const resolutionSource = resolved?.source ?? null;
