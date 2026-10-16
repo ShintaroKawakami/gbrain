@@ -63,6 +63,17 @@ function grepPattern(opts: FactListOpts | undefined): string | null {
   return (opts?.grep && opts.grep.trim()) ? '%' + escapeLikePattern(opts.grep.trim()) + '%' : null;
 }
 
+/**
+ * Blank `entity_slug` is the same as no entity. Postgres `IS NOT NULL` still
+ * matches `''`, which made empty-string facts look like a consolidate bucket
+ * and inflate `pending_consolidation_count`. Whitespace-only values store as NULL.
+ */
+export function normalizeStoredEntitySlug(slug: string | null | undefined): string | null {
+  if (slug == null) return null;
+  const trimmed = slug.trim();
+  return trimmed === '' ? null : trimmed;
+}
+
 export async function insertFact(
   exec: SqlExecutor,
   resolveCast: ResolveEmbeddingCast | undefined,
@@ -75,7 +86,7 @@ export async function insertFact(
     const visibility = input.visibility ?? 'private';
     const notability = input.notability ?? 'medium';
     const confidence = input.confidence ?? 1.0;
-    const entitySlug = input.entity_slug ?? null;
+    const entitySlug = normalizeStoredEntitySlug(input.entity_slug);
     const context = input.context ?? null;
     const sourceSession = input.source_session ?? null;
     const embedding = input.embedding ?? null;
@@ -228,7 +239,7 @@ export async function insertFacts(
         const visibility = input.visibility ?? 'private';
         const notability = input.notability ?? 'medium';
         const confidence = input.confidence ?? 1.0;
-        const entitySlug = input.entity_slug ?? null;
+        const entitySlug = normalizeStoredEntitySlug(input.entity_slug);
         const context = input.context ?? null;
         const sourceSession = input.source_session ?? null;
         const embedding = input.embedding ?? null;
@@ -519,6 +530,7 @@ export async function countUnconsolidatedFacts(exec: LegacyUnscopedRead, source_
       SELECT COUNT(*)::int AS count FROM facts
       WHERE source_id = ${source_id}
         AND entity_slug IS NOT NULL
+        AND entity_slug <> ''
         AND consolidated_at IS NULL
         AND expired_at IS NULL
         AND (valid_until IS NULL OR valid_until > now())
