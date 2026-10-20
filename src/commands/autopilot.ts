@@ -19,6 +19,8 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync, chmodSync, statSync } from 'fs';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
+import { readGlobalMaintenanceVerdict } from '../core/minions/global-maintenance-stall.ts';
+import { readDaemonStaleAfter } from '../core/autopilot-heartbeat.ts';
 import { detectExecutionEnvironment } from '../core/execution-env.ts';
 import { join, dirname, isAbsolute, resolve as resolvePath } from 'path';
 import { execSync } from '../core/spawn.ts';
@@ -52,6 +54,7 @@ import { detectInstallMethod, readInstallTargetFloor } from './upgrade.ts';
 import { evaluateQuietHours } from '../core/minions/quiet-hours.ts';
 import { inspectLock } from '../core/db-lock.ts';
 import { relativeSourceLocalPathSkipWarning } from '../core/sources-load.ts';
+import { installRepoFallback } from './autopilot/install-repo.ts';
 // Path helpers live in a LEAF core module so other commands (gbrain migrate)
 // can read the daemon's state files without importing this one — a dynamic
 // import of a command module drags its whole flag surface into the importer's
@@ -531,7 +534,7 @@ export async function attemptAutopilotSelfUpgrade(
 }
 
 /** Flags that consume the following argv token as their value (#1525). */
-const AUTOPILOT_VALUE_FLAGS = new Set(['--repo', '--interval', '--target', '--reason']);
+const AUTOPILOT_VALUE_FLAGS = new Set(['--repo', '--interval', '--target', '--reason', '--phase']);
 
 /** Positional spellings → their canonical flags. A Map (not a plain object)
  * so prototype-chain words like `constructor` stay unknown positionals. */
@@ -618,6 +621,7 @@ const AUTOPILOT_MODES: Array<{ flags: string[]; run: (engine: BrainEngine, args:
   { flags: ['--uninstall'], run: () => { uninstallDaemon(); } },
   { flags: ['--status'], run: (_engine, args) => { runAutopilotStatus(args); } },
   { flags: ['--pause', '--resume'], run: async (_engine, args) => (await import('./autopilot-pause.ts')).runAutopilotPauseCommand(args) },
+  { flags: ['--retry-global'], run: async (engine, args) => (await import('./autopilot-retry-global.ts')).runAutopilotRetryGlobal(engine, args) },
 ];
 
 export async function runAutopilot(engine: BrainEngine, args: string[]) {
@@ -628,7 +632,8 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
       '       gbrain autopilot --install [--repo <path>]\n' +
       '       gbrain autopilot --uninstall\n' +
       '       gbrain autopilot --status [--json]\n' +
-      '       gbrain autopilot pause [--reason <text>] | resume   (operator hold; upgrade and --install keep it)\n\n' +
+      '       gbrain autopilot pause [--reason <text>] | resume   (operator hold; upgrade and --install keep it)\n' +
+      '       gbrain autopilot --retry-global [--phase <name>] [--json]   (end a failing maintenance phase\'s back-off)\n\n' +
       'Self-maintaining brain daemon. Runs the full maintenance cycle\n' +
       '(lint + backlinks + sync + extract + embed + orphans) on an interval.\n\n' +
       'For a one-shot cron-triggered cycle, see `gbrain dream`.',
@@ -901,7 +906,7 @@ async function installDaemon(engine: BrainEngine, args: string[]) {
     console.error(guardMsg);
     process.exit(1);
   }
-  const rawRepoPath = parseArg(args, '--repo') || await engine.getConfig('sync.repo_path');
+  const rawRepoPath = parseArg(args, '--repo') || await installRepoFallback(engine);
   if (!rawRepoPath) {
     console.error('No repo path. Use --repo or run gbrain sync --repo first.');
     process.exit(1);
@@ -909,7 +914,7 @@ async function installDaemon(engine: BrainEngine, args: string[]) {
   // #3696: the daemon runs with an arbitrary cwd (launchd: `/`), so a
   // relative `--repo .` baked into the wrapper script resolves to a phantom
   // path at daemon runtime. Resolve NOW, against the installer's cwd.
-  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- rawRepoPath is the local operator's own --repo CLI arg or the operator-written sync.repo_path config row; installDaemon is reachable only via `gbrain autopilot --install` on the trusted local CLI (never MCP/remote), and absolutizing it here IS the #3696 fix
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- rawRepoPath is the local operator's own --repo CLI arg, the operator-written sync.repo_path config row or the default source's local_path; installDaemon is reachable only via `gbrain autopilot --install` on the trusted local CLI (never MCP/remote), and absolutizing it here IS the #3696 fix
   const repoPath = resolvePath(rawRepoPath);
 
   const forcedTarget = parseArg(args, '--target') as InstallTarget | undefined;
@@ -1478,6 +1483,9 @@ export interface AutopilotStatusReport {
   paused_reason: string | null;
   heartbeat_age_seconds: number | null;
   stale_after_seconds: number;
+  /** #7003: threshold from the running daemon's heartbeat sidecar or the --interval flag; its next tick while it sleeps. */
+  stale_after_source: 'daemon' | 'flag';
+  next_tick_at: string | null;
   last_log: string;
 }
 
@@ -1488,21 +1496,24 @@ export interface AutopilotStatusReport {
  *       cooperative pause marker — a live migrate, or one that died without
  *       cleaning up; either way the brain is not being kept current)
  *   2 — the daemon took itself out of rotation (repo gone)
+ * A daemon that ticks but reports brain-wide maintenance stalled (its latest
+ * verdict file, GBRA-130 C-6) turns a 0 into 1.
  */
-export function autopilotStatusExitCode(state: AutopilotState): number {
+export function autopilotStatusExitCode(state: AutopilotState, globalMaintenanceStalled = false): number {
   if (state === 'disabled') return 2;
   if (state === 'stale' || state === 'never_run' || state === 'paused') return 1;
-  return 0;
+  return globalMaintenanceStalled ? 1 : 0;
 }
 
 /**
  * Pure classifier so the tri-state is testable without an installed daemon.
  *
  * The heartbeat is the lock mtime, which the tick loop already refreshes every
- * pass (`utimesSync(lockPath, ...)`). Deliberately NOT a new artifact: a second
- * one could disagree with the first, and a daemon still running a pre-upgrade
- * binary would never write it, so a healthy install would report stale until it
- * happened to relaunch.
+ * pass (`utimesSync(lockPath, ...)`). #7003: the threshold comes from the
+ * daemon's own heartbeat sidecar when one matches the lock (its next tick, so an
+ * adaptive 2x sleep is not stale); a missing, foreign or older sidecar (a daemon
+ * still on a pre-#7003 binary) falls back to the flag rule below, so liveness
+ * never depends on the sidecar existing.
  */
 export function classifyAutopilotStatus(input: {
   installed: boolean;
@@ -1511,6 +1522,8 @@ export function classifyAutopilotStatus(input: {
   pausedReason?: string | null;
   heartbeatAgeSeconds: number | null;
   intervalSeconds: number;
+  /** #7003: the running daemon's own threshold (autopilot-heartbeat.ts daemonStaleAfterSeconds); wins over intervalSeconds. */
+  daemon?: { staleAfter: number; nextTickAt: string | null } | null;
   lastLog: string;
 }): AutopilotStatusReport {
   // Tolerance = 6 intervals. The adaptive scheduler sleeps TWO intervals
@@ -1522,7 +1535,9 @@ export function classifyAutopilotStatus(input: {
   // non-positive interval (a typo'd flag upstream) would make staleAfter NaN
   // and every age comparison false — reading a long-dead daemon as 'fresh' —
   // so the pure layer defends itself too.
-  const staleAfter = Number.isFinite(input.intervalSeconds) && input.intervalSeconds > 0
+  const daemon = input.daemon && Number.isFinite(input.daemon.staleAfter) && input.daemon.staleAfter > 0 ? input.daemon : null;
+  const staleAfter = daemon ? daemon.staleAfter
+    : Number.isFinite(input.intervalSeconds) && input.intervalSeconds > 0
     ? input.intervalSeconds * 6
     : 1800;
   const pausedReason = input.pausedReason ?? null;
@@ -1546,6 +1561,8 @@ export function classifyAutopilotStatus(input: {
     paused_reason: pausedReason,
     heartbeat_age_seconds: input.heartbeatAgeSeconds,
     stale_after_seconds: staleAfter,
+    stale_after_source: daemon ? 'daemon' : 'flag',
+    next_tick_at: daemon?.nextTickAt ?? null,
     last_log: input.lastLog,
   };
 }
@@ -1586,12 +1603,15 @@ function showStatus(json: boolean, intervalSeconds: number) {
     pausedReason,
     heartbeatAgeSeconds,
     intervalSeconds,
+    daemon: readDaemonStaleAfter(),
     lastLog: lastLine,
   });
   const processing = readAutopilotProcessingStatus();
+  const globalMaintenance = readGlobalMaintenanceVerdict();
+  const stalled = globalMaintenance !== null && globalMaintenance.status !== 'ok';
 
   if (json) {
-    console.log(JSON.stringify({ ...report, ...processing, job: jobStatus.report }));
+    console.log(JSON.stringify({ ...report, ...processing, job: jobStatus.report, global_maintenance: globalMaintenance }));
   } else {
     switch (report.state) {
       case 'not_installed':
@@ -1630,10 +1650,11 @@ function showStatus(json: boolean, intervalSeconds: number) {
       if (processing.processing_state === 'configuration_blocked') console.log('Repair the worker and selected child installation, then explicitly restart autopilot.');
     }
     for (const line of jobStatus.lines) console.log(line);
+    if (stalled) console.log(`Global maintenance: ${globalMaintenance.status.toUpperCase()}. ${globalMaintenance.message}`);
     if (lastLine) console.log(`Last log: ${lastLine}`);
   }
 
-  setCliExitVerdict(autopilotStatusExitCode(report.state));
+  setCliExitVerdict(autopilotStatusExitCode(report.state, stalled));
 }
 
 function escapeXml(s: string): string {

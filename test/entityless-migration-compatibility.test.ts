@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { LATEST_VERSION, MIGRATIONS, runMigrations } from '../src/core/migrate.ts';
-import { v250 } from '../src/core/schema-migrations/v250-take-proposal-evidence.ts';
+import { v263 } from '../src/core/schema-migrations/v263-take-proposal-evidence.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
@@ -41,10 +41,12 @@ for (const backend of testBackends()) describe(`entityless migration compatibili
     rmSync(testHome, { recursive: true, force: true });
   });
 
-  test('v250 adds evidence on top of upstream v184–v249 (v239 = extract_rollup_halt_reasons)', async () => {
-    expect(LATEST_VERSION).toBeGreaterThanOrEqual(250);
-    expect(MIGRATIONS.find(migration => migration.version === 250)?.name)
+  test('v263 adds evidence on top of upstream v184–v262 (v250 = persistence_request_id_index)', async () => {
+    expect(LATEST_VERSION).toBeGreaterThanOrEqual(263);
+    expect(MIGRATIONS.find(migration => migration.version === 263)?.name)
       .toBe('take_proposal_evidence');
+    expect(MIGRATIONS.find(migration => migration.version === 250)?.name)
+      .toBe('persistence_request_id_index');
     expect(MIGRATIONS.find(migration => migration.version === 239)?.name)
       .toBe('extract_rollup_halt_reasons');
     expect(MIGRATIONS.find(migration => migration.version === 200)?.name)
@@ -63,8 +65,8 @@ for (const backend of testBackends()) describe(`entityless migration compatibili
         'legacy claim','fact','self',0.7,'synthetic-test')`);
     await engine.setConfig('version', '249');
 
-    expect(await runMigrations(engine)).toEqual({ applied: 1, current: 250 });
-    expect(await engine.getConfig('version')).toBe('250');
+    expect(await runMigrations(engine)).toEqual({ applied: 14, current: 263 });
+    expect(await engine.getConfig('version')).toBe('263');
 
     const tables = await engine.executeRaw<{ table_name: string }>(`SELECT table_name FROM information_schema.tables
       WHERE table_schema='public' AND table_name=ANY($1::text[]) ORDER BY table_name`,
@@ -84,8 +86,8 @@ for (const backend of testBackends()) describe(`entityless migration compatibili
     }
     await engine.executeRaw("UPDATE take_proposals SET status='evidence_pending' WHERE prompt_version='entityless-fact-review-v1'");
 
-    expect(await runMigrations(engine)).toEqual({ applied: 0, current: 250 });
-    await engine.runMigration(250, v250.sql);
+    expect(await runMigrations(engine)).toEqual({ applied: 0, current: 263 });
+    await engine.runMigration(263, v263.sql);
     const [evidence] = await engine.executeRaw<{ status: string; evidence: unknown }>(`SELECT status,evidence FROM take_proposals
       WHERE prompt_version='entityless-fact-review-v1'`);
     expect(evidence?.status).toBe('evidence_pending');

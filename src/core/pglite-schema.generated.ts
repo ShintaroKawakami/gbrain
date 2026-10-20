@@ -300,7 +300,10 @@ CREATE TABLE IF NOT EXISTS ingest_log (
   source_ref    TEXT    NOT NULL,
   pages_updated JSONB   NOT NULL DEFAULT '[]',
   summary       TEXT    NOT NULL DEFAULT '',
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  writer_version TEXT,
+  writer_host_id UUID,
+  writer_segment_reader BOOLEAN
 );
 
 CREATE INDEX IF NOT EXISTS idx_ingest_log_source_type_created
@@ -1279,6 +1282,17 @@ CREATE TABLE IF NOT EXISTS page_extraction_state (
 );
 CREATE INDEX IF NOT EXISTS page_extraction_state_truncated_idx
   ON page_extraction_state (pipeline, page_id) WHERE input_truncated IS NOT NULL;
+CREATE TABLE IF NOT EXISTS page_view_digests (
+  page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+  revision TEXT NOT NULL,
+  view TEXT NOT NULL CHECK (view IN ('read','markdown')),
+  audience TEXT NOT NULL CHECK (audience IN ('trusted','remote')),
+  total_bytes BIGINT NOT NULL CHECK (total_bytes >= 0),
+  total_lines BIGINT NOT NULL CHECK (total_lines >= 0),
+  sha256 TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (page_id, revision, view, audience)
+);
 -- Wave B segmented page storage (migration v248): segment texts, the
 -- generation-ranged body manifest and body stagings (src/core/page-body/).
 -- Before the persistence region so the managed-writer guard covers them.
@@ -1360,6 +1374,15 @@ CREATE TABLE IF NOT EXISTS page_body_staging_parts (
   body       BYTEA   NOT NULL,
   PRIMARY KEY (staging_id, part_no)
 );
+CREATE TABLE IF NOT EXISTS page_body_staging_texts (
+  staging_id UUID  NOT NULL REFERENCES page_body_stagings(id) ON DELETE CASCADE,
+  source_id  TEXT  NOT NULL,
+  sha256     BYTEA NOT NULL,
+  PRIMARY KEY (staging_id, sha256)
+);
+CREATE INDEX IF NOT EXISTS page_body_staging_texts_text ON page_body_staging_texts (source_id, sha256);
+
+
 
 -- Durable concurrent persistence (migration 151).
 CREATE TABLE IF NOT EXISTS persistence_brain (
@@ -1460,6 +1483,8 @@ CREATE INDEX IF NOT EXISTS persistence_requests_compactable
   ON persistence_requests(completed_at) WHERE recovery IS NULL AND NOT compacted AND state IN ('committed','conflict','failed','cancelled');
 CREATE INDEX IF NOT EXISTS persistence_requests_slug_intent
   ON persistence_requests(source_id,slug,sequence) WHERE intent IS NOT NULL AND NOT compacted;
+CREATE INDEX IF NOT EXISTS persistence_requests_request_id
+  ON persistence_requests(source_id,request_id);
 CREATE INDEX IF NOT EXISTS persistence_requests_principal ON persistence_requests(principal_kind,principal_id,sequence DESC);
 CREATE TABLE IF NOT EXISTS persistence_effects (
     id bigserial PRIMARY KEY,
@@ -1490,6 +1515,7 @@ CREATE TABLE IF NOT EXISTS persistence_consumers (
     version text NOT NULL,
     boot_id text,
     process_start text,
+    segment_reader boolean,
     PRIMARY KEY(host_id,pid,nonce)
   );
 
@@ -2528,6 +2554,52 @@ DO \$rls\$ BEGIN
     ALTER TABLE belief_redactions ENABLE ROW LEVEL SECURITY;
   END IF;
 END \$rls\$;
+
+CREATE TABLE IF NOT EXISTS sync_wanted_markers (
+  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  intent TEXT NOT NULL CHECK (intent IN ('freshness','pull','full')),
+  source_incarnation TEXT,
+  wanted_head TEXT,
+  generation BIGINT NOT NULL DEFAULT 1,
+  first_due_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  requested_by TEXT NOT NULL,
+  job_id BIGINT,
+  PRIMARY KEY (source_id, intent)
+);
+CREATE TABLE IF NOT EXISTS sync_notifier_leases (
+  host_id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL,
+  fence BIGINT NOT NULL DEFAULT 1,
+  resident_kind TEXT NOT NULL,
+  pid INTEGER,
+  renewed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sync_notifier_sources (
+  source_id TEXT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+  source_incarnation TEXT,
+  syncer_host_id TEXT,
+  syncer_recorded_at TIMESTAMPTZ,
+  state TEXT NOT NULL DEFAULT 'idle' CHECK (state IN ('idle','due','running','retry','operator_blocked')),
+  reason TEXT,
+  first_due_at TIMESTAMPTZ,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_retry_at TIMESTAMPTZ,
+  last_progress_at TIMESTAMPTZ,
+  last_error_code TEXT,
+  last_error TEXT,
+  last_error_at TIMESTAMPTZ,
+  trace_path TEXT,
+  observed_head TEXT,
+  observed_at TIMESTAMPTZ,
+  detection_mode TEXT CHECK (detection_mode IN ('watch','poll')),
+  owner_host_id TEXT,
+  owner_kind TEXT,
+  owner_pid INTEGER,
+  owner_seen_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 `;
 

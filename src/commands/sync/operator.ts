@@ -24,8 +24,10 @@ export function printSyncStatusHelp(): void {
   console.log(`Usage: gbrain sync status --source <id> [--detail] [--json]
 
 Where a managed catch-up stands and what to do next, for an operator agent:
-the cursor (index/total, pinned target, last advance), pages committed in the
-last 10 minutes, every held file and the last recorded failure, each with
+the newest sync pass (convergence: outcome, round, candidates, settled,
+remaining, classes) or, for a company-brain source, the cursor (index/total,
+pinned target, last advance), pages committed in the last 10 minutes, every
+held file and the last recorded failure, each with
   class         page | connection | systemic
   safe_actions  retry | retry_when_clean | repair | reconcile | upgrade | none
   needs_human   whether a person has to decide or act (human_reason says why)
@@ -44,6 +46,16 @@ The loop: run this every few minutes; when committed_last_10m is 0 and
 needs_human is false, run \`gbrain sync unblock --source <id> --apply\`, then
 the sync it prints; when needs_human is true, page a person with the slug it
 names; when a *_read field is not_read and you need it, run its fix.
+
+convergence.classes counts the newest round's paths by class, each with an
+action (who finishes it):
+  none    matched, adopt, kept, untracked, gone, deleted_same, legacy_same, db_ahead
+  owner   sync finishes it: in_flight, import, reparse, delete, keep_db,
+          keep_db_pending, legacy_unverified, paused_keep_db
+  repair  a person decides: held, drift, delete_drift, deleted_edited, dirty,
+          spelling, deletes_withheld
+Committed mode reads a file's working-copy dirtiness only for candidates, so
+dirty counts only paths sync would otherwise admit.
 
 Decision table: docs/guides/sync-unblock-runbook.md
 `);
@@ -83,6 +95,35 @@ Runbook: docs/guides/sync-unblock-runbook.md
 `);
 }
 
+/**
+ * #6803: the operator verb a `gbrain sync` argument vector asks for, shared by
+ * the CLI's pre-connect preflight (no watchdog, no owner delegation) and
+ * `runSyncInner`. `gbrain sync --status` is the status read, the same as
+ * `gbrain sync status` (it used to run a full sync, because nothing read the
+ * flag). `--preview` and `--check` are read by no sync path, so a sync that
+ * would silently run past them is refused.
+ */
+export function syncOperatorVerb(args: readonly string[]): 'status' | 'unblock' | null {
+  if (args[0] === 'status' || args[0] === 'unblock') return args[0];
+  if (args[0] === 'trigger') return null;
+  const unread = args.find(a => a === '--preview' || a === '--check' || a.startsWith('--preview=') || a.startsWith('--check='));
+  if (unread) {
+    const flag = unread.split('=')[0];
+    throw opError('invalid_params', `gbrain sync does not read ${flag}; it would have run a full sync.`,
+      'Preview a sync with --dry-run, or read where the source stands with gbrain sync status.',
+      { fix: { argv: ['gbrain', 'sync', ...args.filter(a => a !== unread && a !== '--dry-run'), '--dry-run'], consent: [], actor: 'agent', requires_exclusive: false,
+        why: 'The same sync with --dry-run reports what it would import and writes nothing.' } });
+  }
+  return args.includes('--status') ? 'status' : null;
+}
+
+/** `runSyncInner`'s operator route: `sync --status` prints one hint, then runs exactly `sync status`. */
+export async function runSyncOperator(engine: BrainEngine, verb: 'status' | 'unblock', args: string[]): Promise<void> {
+  if (args[0] === verb) return verb === 'status' ? runSyncStatus(engine, args.slice(1)) : runSyncUnblock(engine, args.slice(1));
+  process.stderr.write('[gbrain] sync --status is the status read, the same as gbrain sync status (it never syncs).\n');
+  return runSyncStatus(engine, args.filter(a => a !== '--status'));
+}
+
 function sourceOf(args: string[]): string {
   const explicit = args.find((a, i) => args[i - 1] === '--source') ?? null;
   const source = resolveSourceIdEngineFree(explicit, process.cwd());
@@ -97,20 +138,30 @@ export async function runSyncStatus(engine: BrainEngine, args: string[]): Promis
   const status = await readSyncStatus(engine, sourceId, { detail: args.includes('--detail') });
   const ctx = cliRenderContext();
   // #6696 (A4): the capacity picture rides every status read (unthrottled), from the 60 s snapshot.
-  const { cachedCapacitySnapshot, capacityNotices } = await import('../../core/persistence/capacity-snapshot.ts');
+  // #6803 C4: one bounded wait per status read, shared with its notices; a slow snapshot reads unknown for this call only.
+  const { capacitySnapshotWithin, capacityNotices, CAPACITY_READ_WAIT_MS } = await import('../../core/persistence/capacity-snapshot.ts');
   const { renderNotice } = await import('../../core/agent-output.ts');
-  const snapshot = await cachedCapacitySnapshot(engine);
-  const notices = (await capacityNotices(engine, { throttle: false })).map(notice => renderNotice(notice, ctx));
+  const snapshot = await capacitySnapshotWithin(engine, Date.now() + CAPACITY_READ_WAIT_MS);
+  const notices = (await capacityNotices(engine, { throttle: false, snapshot })).map(notice => renderNotice(notice, ctx));
+  // #6858 ask 6: commit→searchable / commit→embedded latency over 24 h (null for a source with no managed binding).
+  const { readSyncFreshness, formatSyncFreshness } = await import('../../core/persistence/sync-freshness.ts');
+  const [freshness = null] = await readSyncFreshness(engine, { sourceIds: [sourceId] }).catch(() => []);
+  const { readNotifierBlock, formatNotifierBlock } = await import('../../core/notifier/status.ts');
+  const notifierBlock = await readNotifierBlock(engine, sourceId).catch(() => null);
+  const notifier = notifierBlock && { ...notifierBlock, fix: notifierBlock.fix ? renderAction(notifierBlock.fix, ctx) : null };
   const read = (r: typeof status.cursors_read) => r.status === 'read' ? r : { ...r, fix: renderAction(r.fix, ctx) };
-  const rendered = { ...status, holds: status.holds.map(hold => ({ ...hold, fix: renderAction(hold.fix, ctx) })), next: status.next ? renderAction(status.next, ctx) : null,
+  const rendered = { ...status, holds: status.holds.map(hold => ({ ...hold, fix: renderAction(hold.fix, ctx) })),
+    git_push_holds: status.git_push_holds.map(hold => ({ ...hold, fix: renderAction(hold.fix, ctx) })), next: status.next ? renderAction(status.next, ctx) : null,
     checkpoint_blockers_read: read(status.checkpoint_blockers_read), cursors_read: read(status.cursors_read), terminal_failures_read: read(status.terminal_failures_read),
-    capacity: { status: snapshot.status, pause_pct: snapshot.pause_pct, low: snapshot.low, paused: snapshot.paused }, ...(notices.length ? { notices } : {}) };
+    capacity: { status: snapshot.status, pause_pct: snapshot.pause_pct, low: snapshot.low, paused: snapshot.paused }, freshness, notifier, ...(notices.length ? { notices } : {}) };
   if (args.includes('--json')) return writeJsonDocument(JSON.stringify(rendered, null, 2));
   const c = status.cursor;
   console.log(syncStatusHeadline(status));
   console.log(`  ${c ? c.done ? `last run finished at ${c.index}/${c.total} (pinned ${c.pinned_target?.slice(0, 8) ?? '?'})` : `cursor ${c.index}/${c.total} at pinned target ${c.pinned_target?.slice(0, 8) ?? '?'}`
     + `${c.last_advance_at ? `, last advance ${c.last_advance_at}` : ''}` : 'no managed cursor'}`);
   console.log(`  committed in the last 10 minutes: ${status.committed_last_10m}${status.rate_pages_per_min !== null ? `, ${status.rate_pages_per_min} pages/min` : ''}`);
+  if (freshness) console.log(`  freshness: ${formatSyncFreshness(freshness)}`);
+  if (notifierBlock) console.log(`  ${formatNotifierBlock(sourceId, notifierBlock)}`);
   console.log(`  holds: ${status.holds.length}${status.holds.length ? ` (${status.holds.filter(h => h.needs_human).length} need a person)` : ''}; last error: ${status.last_error ? `${status.last_error.code} [${status.last_error.class}]` : 'none'}`);
   for (const hold of status.holds) console.log(`    ${hold.path}${hold.slug ? ` (${hold.slug})` : ''}: ${hold.code} [${hold.class}] safe: ${hold.safe_actions.join(',')}${hold.needs_human ? ` NEEDS HUMAN: ${hold.human_reason}` : ''}${hold.attempts > 1 ? ` (held ${hold.attempts} times)` : ''}`);
   if (status.last_error) console.log(`    ${status.last_error.path ?? ''}: ${status.last_error.code} safe: ${status.last_error.safe_actions.join(',')}${status.last_error.needs_human ? ` NEEDS HUMAN: ${status.last_error.human_reason}` : ''}`);
@@ -127,6 +178,7 @@ export async function runSyncStatus(engine: BrainEngine, args: string[]): Promis
     for (const b of t.active_blockers) console.log(`    BLOCKING ${b.kind}: request ${b.request_id}${b.slug ? ` (${b.slug})` : ''} [${b.category}]`);
     if (t.active_blockers.length || t.unresolved.rows) console.log(`    drill down: ${t.drill_down.join(' ')}`);
   }
+  for (const hold of status.git_push_holds) console.log(`  git backups not pushed: ${hold.retrying} retrying, ${hold.parked} parked (${hold.codes.join(', ')}) since ${hold.oldest_at}${hold.conflict ? `; CONFLICT in ${hold.conflict.paths.join(', ')} needs a person` : ''}`);
   const connector = status.connector_last_error;
   if (connector) console.log(`  connector: ${connector.stopped ? 'STOPPED, ' : ''}the last ${connector.consecutive} run(s) ended on ${connector.code}${connector.slug ? ` at ${connector.slug}` : ''}: ${connector.message}`);
   for (const notice of notices) console.log(`  [gbrain notice ${notice.code}] ${notice.why}`);
@@ -150,6 +202,13 @@ export function syncStatusHeadline(status: Pick<SyncStatus, 'source_id' | 'state
     case 'needs_human': return `Source ${status.source_id} is blocked: a person has to decide (see NEEDS HUMAN below).`;
     case 'head_blocked': return `Source ${status.source_id} is blocked: its oldest write waits on something only an operator clears.`;
     case 'recovery_blocked': return `Source ${status.source_id} is blocked: a write's recovery record found changed bytes on disk.`;
+    case 'pass_unfinished': return `Source ${status.source_id} is resumable: the newest sync pass did not finish; the next sync continues it.`;
+    case 'not_converged': return `Source ${status.source_id} is resumable: the newest sync pass ran out of rounds before every path settled.`;
+    case 'settle_mismatch': return `Source ${status.source_id} is resumable: a path keeps settling without reading settled; three passes in a row hold it.`;
+    case 'deletes_withheld': return `Source ${status.source_id} is blocked: sync withheld a mass delete; the rest of the source is synced.`;
+    case 'selection_scoped': return `Source ${status.source_id} is synced at a narrower selection; the plain sync runs the configured one.`;
+    case 'admission_paused': return `Source ${status.source_id} is resumable: sync.admission pauses what sync admits.`;
+    case 'writeback_failed': return `Source ${status.source_id} is blocked: the Git effect of a file sync rewrote failed and is parked; the checkout lags the brain.`;
   }
 }
 

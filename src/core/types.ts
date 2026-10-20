@@ -349,6 +349,8 @@ export interface PageFilters {
    * queries to a tier directory without loading every page into memory.
    */
   slugPrefix?: string;
+  /** Literal slug prefixes to omit before ordering/pagination. Opt-in: ordinary listings remain unrestricted. */
+  excludeSlugPrefixes?: string[];
   /**
    * v0.26.5: include soft-deleted pages (rows with `deleted_at IS NOT NULL`).
    * Default false: hides soft-deleted pages from `list_pages` so agents see the
@@ -691,13 +693,11 @@ export interface Chunk {
   parent_symbol_path?: string[] | null;
   doc_comment?: string | null;
   symbol_name_qualified?: string | null;
-  /**
-   * v0.27.1 multimodal. Read side of ChunkInput.modality — must round-trip
-   * through getChunks → embed-stale merge → upsertChunks or image rows get
-   * reset to 'text' (EXCLUDED.modality on the upsert) and vanish from the
-   * image search arm.
-   */
+  /** v0.27.1 multimodal. Read side of ChunkInput.modality — must round-trip through getChunks → embed-stale
+   * merge → upsertChunks or image rows get reset to 'text' (EXCLUDED.modality) and vanish from the image arm. */
   modality?: 'text' | 'image';
+  /** #6871: the image vector; only getChunksWithEmbeddings reads it, so `gbrain migrate` carries it. */
+  embedding_image?: Float32Array | null;
   /** v244: UTF-8 byte span in the chunk_source's projected text (see ChunkInput); null when unrecorded. */
   projected_byte_start?: number | null;
   projected_byte_end?: number | null;
@@ -2070,7 +2070,7 @@ export const DEGRADED_STAGES = [
   'safe_index_pending',
   'vector_candidates_incomplete',
   'keyword_candidates_incomplete',
-  'projection_pending',
+  'projection_pending', 'projection_by_design',
   'projection_status_unknown',
   'keyword_count_unavailable',
 ] as const;

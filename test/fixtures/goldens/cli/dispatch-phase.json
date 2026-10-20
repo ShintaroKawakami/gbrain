@@ -45,6 +45,25 @@
         "thinClient": "none",
         "thinClientRoutedSubcommands": []
       },
+      "append": {
+        "hasSwitchCase": false,
+        "phase": "pre-connect-own-engine",
+        "preConnectRules": [
+          {
+            "condition": "command === 'append'",
+            "connectsEngine": true,
+            "refusesThinClient": false,
+            "routesThinClient": false,
+            "terminates": true,
+            "thinClientCheck": false,
+            "unconditionalFor": [
+              "append"
+            ]
+          }
+        ],
+        "thinClient": "none",
+        "thinClientRoutedSubcommands": []
+      },
       "apply-migrations": {
         "hasSwitchCase": false,
         "phase": "pre-connect",
@@ -143,8 +162,10 @@
         "hasSwitchCase": true,
         "phase": "post-connect",
         "preConnectRules": [],
-        "thinClient": "refuse",
-        "thinClientRoutedSubcommands": []
+        "thinClient": "route-then-refuse",
+        "thinClientRoutedSubcommands": [
+          "changes"
+        ]
       },
       "bench": {
         "hasSwitchCase": false,
@@ -1872,7 +1893,16 @@
             "unconditionalFor": []
           },
           {
-            "condition": "command === 'sync' && !syncOperator",
+            "condition": "command === 'sync' && args[0] === 'trigger' && await (await import('../commands/sync-delegate.ts')).maybeTriggerThroughServe(loadConfig(), args.slice(1))",
+            "connectsEngine": false,
+            "refusesThinClient": false,
+            "routesThinClient": false,
+            "terminates": true,
+            "thinClientCheck": false,
+            "unconditionalFor": []
+          },
+          {
+            "condition": "command === 'sync' && !syncOperator && args[0] !== 'trigger'",
             "connectsEngine": false,
             "refusesThinClient": false,
             "routesThinClient": false,
@@ -2179,6 +2209,9 @@
       ]
     },
     "thinClientRoutes": {
+      "beliefs": [
+        "changes"
+      ],
       "cache": [
         "stats"
       ],

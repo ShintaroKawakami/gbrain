@@ -28,26 +28,32 @@ export const PUBLIC_BY_TERMINAL: Readonly<Record<TerminalCategory, PublicCategor
   operator_cancelled: 'superseded', caller_conflict: 'conflict', file_conflict: 'drift', canonical_file_missing: 'file_missing', fence_unrenderable: 'defect',
   writer_guard: 'defect', database_refusal: 'config', owner_exception: 'defect', legacy_publication_refusal: 'superseded',
   sync_fault: 'defect', transport: 'transient', caller_refusal: 'content_refused', gbrain_defect: 'defect', diagnosis_required: 'defect',
+  schema_missing: 'storage',
 };
 
 /** Fault codes (holds, run stops, receipts) by name; a test pins that every `SYNC_FAULT_TABLE` code is here. */
 export const PUBLIC_BY_CODE: Readonly<Record<string, PublicCategory>> = {
   worktree_dirty: 'drift', file_drift: 'drift', source_changed: 'drift', pinned_git_worktree_conflict: 'drift',
-  concurrent_write: 'conflict', revision_conflict: 'conflict', page_identity_changed: 'conflict',
+  concurrent_write: 'conflict', revision_conflict: 'conflict', page_identity_changed: 'conflict', legacy_slug_conflict: 'conflict', origin_conflict: 'conflict', origin_conflict_decision: 'conflict', page_identity_decision: 'conflict',
+  settle_mismatch: 'defect', page_write_failed: 'defect',
   invalid_fence: 'content_refused', invalid_frontmatter: 'content_refused', frontmatter_slug_conflict: 'content_refused', rename_held: 'content_refused',
+  rename_identity_unreadable: 'content_refused', rename_reconcile_failed: 'conflict',
   file_too_large: 'content_refused', content_rejected: 'content_refused', managed_image_sync_unsupported: 'content_refused',
-  purged_content: 'content_refused', write_gate_rejected: 'content_refused',
+  purged_content: 'content_refused', write_gate_rejected: 'content_refused', file_unreadable: 'content_refused', frontmatter_alias_limit: 'content_refused',
+  absent_from_worktree: 'file_missing', unsupported_path: 'content_refused',
   file_database_drift: 'drift', raw_file_changed: 'drift', pending_import: 'transient',
   source_binding_changed: 'config', unsafe_file_target: 'config',
   canonical_file_missing: 'file_missing',
   parser_regression: 'defect', outside_fence: 'defect', preparation_systemic: 'defect', drain_stalled: 'defect',
   cancelled: 'superseded', knock_on: 'superseded', run_replaced: 'superseded', knock_on_exhausted: 'superseded', cursor_incarnation_retired: 'superseded',
-  preparation_stalled: 'transient', sync_incomplete: 'transient', connection_lost: 'transient', database_contention: 'transient', write_capacity: 'transient',
+  preparation_stalled: 'transient', sync_incomplete: 'transient', connection_lost: 'transient', database_contention: 'transient', write_interrupted: 'transient', write_capacity: 'transient',
   write_capacity_backpressure: 'transient', capacity_paused: 'transient', sync_drain_lease_held: 'transient', graduation_in_progress: 'transient',
   storage_error: 'storage', recovery_required: 'storage',
   permission_denied: 'permission',
   owner_unavailable: 'config', writer_coordinator_required: 'config', write_quota_exhausted: 'config', write_quota_insufficient: 'config', plan_stale: 'config',
   slug_root_mode_mismatch: 'config', invalid_params: 'config',
+  // GBRA-133 (#6712 PR 4b lane F): a file whose text holds NUL bytes, and a committed file whose Git object is gone.
+  content_null_bytes: 'content_refused', git_object_missing: 'storage', path_not_utf8: 'content_refused',
 };
 
 /** A registry code's class, for a code neither table names. */

@@ -24,7 +24,7 @@ import { FULL_ROBOT_SECONDS, ROBOT_TOPOLOGY, restrict, runRobotPhase, type Robot
 import { robotFailure, robotFullGate, runValidation, spawnWorker } from '../scripts/persistence/validate.ts';
 import { faultPoint, installFaultHook, type FaultDetail, type FaultPoint } from '../src/core/persistence/fault-points.ts';
 import { shrinkRun } from '../scripts/persistence/shrink.ts';
-import { runSchedule, runSteps } from '../scripts/persistence/crash-robot.ts';
+import { finish, runSchedule, runSteps, seamCounter } from '../scripts/persistence/crash-robot.ts';
 import { installLockOrderTrace, lockOrderReport } from '../scripts/persistence/lock-order.ts';
 import { prepareTopology } from '../scripts/persistence/history-fixture.ts';
 import { claimPersistenceEffect, releaseAbandonedClaims } from '../src/core/persistence/effect-journal.ts';
@@ -393,6 +393,77 @@ process.stdout.write('{"event":"continued"}\\n');
         { event: 'fault', point: 'consumer:preparing', nth: 2, detail: { requestId: 'b' } },
       ]);
     } finally { child.kill('SIGKILL'); await child.exited; rmSync(dir, { recursive: true, force: true }); }
+  }, 90_000);
+
+  test('#6896: consumer:claiming counts claim epochs, so a run with fewer idle claim passes still reaches every slot the count role saw', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-crash-robot-claim-'));
+    const path = join(dir, 'claim.ts');
+    // Count role: busy and idle claim attempts around two preparations (and a re-run one). Run: the same requests, no idle ticks.
+    writeFileSync(path, `import { faultPoint, installFaultHook } from ${JSON.stringify(join(import.meta.dir, '../src/core/persistence/fault-points.ts'))};
+import { robotFaultHook, seamCounter } from ${JSON.stringify(join(import.meta.dir, '../scripts/persistence/crash-robot.ts'))};
+const counted = seamCounter(); let slots = 0;
+installFaultHook((point, detail) => { const advanced = counted(point, detail); if (point === 'consumer:claiming') slots += advanced; });
+const claim = () => faultPoint('consumer:claiming');
+const prepare = (writeId: string) => faultPoint('consumer:preparing', { requestId: writeId, writeId });
+await claim(); await claim(); await prepare('w1'); await claim(); await claim(); await claim(); await prepare('w1'); await prepare('w2'); await claim(); await claim();
+process.stdout.write(JSON.stringify({ event: 'counts', slots }) + '\\n');
+installFaultHook(robotFaultHook({ point: 'consumer:claiming', nth: slots }));
+await claim(); await prepare('w1'); await claim(); await prepare('w2'); await claim();
+process.stdout.write('{"event":"continued"}\\n');
+`);
+    const child = Bun.spawn([process.execPath, '--no-env-file', path], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
+    try {
+      const lines: Record<string, unknown>[] = [];
+      const reader = child.stdout.getReader(); const decoder = new TextDecoder(); let pending = '';
+      const deadline = Date.now() + 60_000;
+      while (lines.length < 2 && Date.now() < deadline) {
+        const chunk = await Promise.race([reader.read(), Bun.sleep(deadline - Date.now()).then(() => null)]);
+        if (!chunk || chunk.done) break;
+        pending += decoder.decode(chunk.value, { stream: true });
+        for (let newline = pending.indexOf('\n'); newline >= 0; newline = pending.indexOf('\n')) {
+          lines.push(JSON.parse(pending.slice(0, newline))); pending = pending.slice(newline + 1);
+        }
+      }
+      reader.releaseLock();
+      expect(lines).toEqual([
+        { event: 'counts', slots: 3 },
+        { event: 'fault', point: 'consumer:claiming', nth: 3, detail: {} },
+      ]);
+    } finally { child.kill('SIGKILL'); await child.exited; rmSync(dir, { recursive: true, force: true }); }
+  }, 90_000);
+
+  test('#6957: finish waits for the claim pass after its probe, so the last claim epoch a count role sees is reached in every run', async () => {
+    await robotBrain(async ({ world }) => {
+      const counted = seamCounter(); const prepared = new Set<string>(); let slots = 0;
+      world.claimPasses = 0;
+      // Every claim pass is slow to start, so the one the consumer makes after the probe commits lands only when finish waits for it.
+      installFaultHook(async (point, detail) => {
+        if (point === 'consumer:preparing' && detail.writeId) prepared.add(detail.writeId);
+        if (point !== 'consumer:claiming') { counted(point, detail); return; }
+        await Bun.sleep(1000);
+        world.claimPasses!++; slots += counted(point, detail);
+      });
+      try { await finish(world, new ReferenceModel(world), 'probe only'); }
+      finally { installFaultHook(undefined); }
+      expect({ prepared: prepared.size, slots }).toEqual({ prepared: 1, slots: 2 });
+    });
+  }, 90_000);
+
+  test('seed 5105: finish drains its probe\'s effects, so the probe\'s effect:git:mid a count role may see is reached in every run', async () => {
+    await robotBrain(async ({ world }) => {
+      const reached: string[] = [];
+      world.claimPasses = 0;
+      // Every effect seam is slow, so the probe's git effect reaches its seam only when finish waits for it.
+      installFaultHook(async (point, detail) => {
+        if (point === 'consumer:claiming') { world.claimPasses!++; return; }
+        if (!point.startsWith('effect:')) return;
+        await Bun.sleep(1500);
+        reached.push(`${point}:${detail.requestId}`);
+      });
+      try { await finish(world, new ReferenceModel(world), 'probe only'); }
+      finally { installFaultHook(undefined); }
+      expect(reached.filter(seam => seam.startsWith('effect:git:mid:'))).toHaveLength(1);
+    });
   }, 90_000);
 
   test('a hook that cannot report its fault emits fault_hook_error and still freezes', async () => {

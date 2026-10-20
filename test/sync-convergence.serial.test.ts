@@ -59,7 +59,6 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import postgres from '#postgres';
@@ -75,6 +74,7 @@ import { PUBLICATION_CEILING_DEFAULT_MS, publicationLeaseMs } from '../src/core/
 import { assertSafeE2eDatabaseUrl } from './helpers/db-guard.ts';
 import { keylessBrainEnv } from './helpers/provider-env.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { LatencyProxy } from './helpers/latency-proxy.ts';
 import type { ViolationClass } from '../scripts/persistence/model.ts';
 
 const REPO_ROOT = resolve(import.meta.dir, '..');
@@ -214,7 +214,8 @@ function statusProblems(status: Record<string, unknown> | null, expected: Status
 
 /**
  * One writer operation that returned success, recorded by the harness at the moment it saw the success (never read
- * back from the brain). `touches` is where the write landed: the page in the database, its file, or (for `remember`)
+ * back from the brain), or a write the brain accepted (exit 10) that had not settled when its writer stopped, recorded
+ * when its receipt, read after recovery, said committed (`Brain.settlePending`). `touches` is where the write landed: the page in the database, its file, or (for `remember`)
  * an additive fact row. `marker` is text that only this write put there; `null` on a page location is a deletion.
  */
 interface Ack { kind: 'commit' | 'put' | 'remember' | 'maintenance' | 'db_only' | 'git_mv' | 'git_rm' | 'unlink'; slug: string;
@@ -271,55 +272,6 @@ function bigPage(facts: number, timeline: number, version: string): string {
 }
 const entityText = '---\ntype: person\ntitle: Alice Example\n---\n\nAlice Example works with acme-example.\n';
 
-// ---------------------------------------------------------------- the latency proxy
-
-/** A TCP proxy that delays every chunk by half the configured round trip in each direction, preserving order. */
-class LatencyProxy {
-  private server: Server;
-  private sockets = new Set<Socket>();
-  port = 0;
-  constructor(private target: { host: string; port: number }, private oneWayMs: number) {
-    this.server = createServer(client => this.accept(client));
-  }
-  async listen(): Promise<void> {
-    await new Promise<void>(done => this.server.listen(0, '127.0.0.1', done));
-    const address = this.server.address();
-    if (!address || typeof address === 'string') throw new Error('latency proxy has no port');
-    this.port = address.port;
-  }
-  private delayed(from: Socket, to: Socket): void {
-    const queue: { at: number; chunk: Buffer }[] = [];
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const drain = () => {
-      timer = undefined;
-      const now = performance.now();
-      while (queue.length && queue[0].at <= now) { const { chunk } = queue.shift()!; if (!to.destroyed) to.write(chunk); }
-      if (queue.length) timer = setTimeout(drain, Math.max(0, queue[0].at - performance.now()));
-    };
-    from.on('data', (chunk: Buffer) => {
-      queue.push({ at: performance.now() + this.oneWayMs, chunk });
-      if (!timer) timer = setTimeout(drain, this.oneWayMs);
-    });
-    from.on('end', () => { const close = () => (queue.length ? setTimeout(close, this.oneWayMs) : to.end()); close(); });
-  }
-  private accept(client: Socket): void {
-    const upstream = createConnection(this.target);
-    for (const socket of [client, upstream]) {
-      this.sockets.add(socket);
-      socket.on('close', () => this.sockets.delete(socket));
-      socket.on('error', () => { client.destroy(); upstream.destroy(); });
-    }
-    this.delayed(client, upstream);
-    this.delayed(upstream, client);
-  }
-  /** Mode (f): every live connection through the pooler drops at once, as a pooler restart looks to its clients. */
-  drop(): number { const n = this.sockets.size; for (const socket of this.sockets) socket.destroy(); return n; }
-  async close(): Promise<void> {
-    for (const socket of this.sockets) socket.destroy();
-    await new Promise<void>(done => this.server.close(() => done()));
-  }
-}
-
 // ---------------------------------------------------------------- one brain
 
 interface Fault { point: FaultPoint; nth: number; marker: string; operation?: string; path?: string; action?: 'kill' | 'edit' | 'stall' | 'throw';
@@ -356,6 +308,8 @@ class Brain {
   pooledUrl = ''; directUrl = '';
   serves: StdioServe[] = [];
   ledger = new Ledger();
+  /** Writes the brain accepted (exit 10) that had not settled when their writer stopped; `settlePending` reads their receipts after recovery. */
+  pending: Array<{ write: Omit<Ack, 'ack'>; requestId: string }> = [];
   plan: string[] = [];
   fired: Record<string, string | null> = {};
   killedPids = new Set<number>();
@@ -508,6 +462,21 @@ class Brain {
     this.elapsed.recovery_ms = performance.now() - started;
     this.keepLog('recovery-serve.log', serve.stderr);
     this.note(`elapsed: ${Object.entries(this.elapsed).map(([k, ms]) => `${k.replace(/_ms$/, '')} ${(ms / 1000).toFixed(1)}s`).join(', ')}; recovery took ${this.recoveryRuns.length} sync run(s)`);
+  }
+
+  /**
+   * #6841: an accepted write still queued when its writer gave up may commit later, after a write the ledger holds.
+   * Once the brain has converged, each one's receipt is read the way the write protocol tells a client to after exit
+   * 10 (get_write_request). A committed write is acknowledged then: it may have landed any time since its start, so it
+   * is concurrent with every write in that window. Any other state means it never landed and stays out of the ledger.
+   */
+  async settlePending(receiptState = async (requestId: string) =>
+    lastJson((await this.spawnCli(['call', '--source', SOURCE, 'get_write_request', JSON.stringify({ request_id: requestId })]).result).out)?.state): Promise<void> {
+    for (const { write, requestId } of this.pending) {
+      const state = await receiptState(requestId);
+      if (state === 'committed') this.ledger.record({ ...write, ack: performance.now() });
+      this.note(`accepted ${write.kind} of ${write.slug} (request ${requestId}) unsettled when its writer stopped: receipt ${String(state ?? 'unreadable')}`);
+    }
   }
 
   async teardown(): Promise<void> {
@@ -684,9 +653,13 @@ class StdioServe {
 
 // ---------------------------------------------------------------- the writers of mode (c)
 
-/** A writer call that retries an unsettled attempt (exit 10, a lost owner) with the same request id and a terminal refusal with a new one. */
-async function acknowledged(b: Brain, label: string, call: (requestId: string) => SyncRun, stop: () => boolean): Promise<{ start: number; ack: number } | null> {
+/**
+ * A writer call that retries an unsettled attempt (exit 10, a lost owner) with the same request id and a terminal refusal with a new one.
+ * When the attempts or the chaos run out on an unsettled attempt, the request it names may still commit, so it comes back `pending`.
+ */
+async function acknowledged(b: Brain, label: string, call: (requestId: string) => SyncRun, stop: () => boolean): Promise<{ start: number; ack: number } | { pending: string } | null> {
   let requestId = randomUUID();
+  let unsettled = false;
   for (let attempt = 1; attempt <= 20 && !stop(); attempt++) {
     const start = performance.now();
     const r = await call(requestId).result;
@@ -694,11 +667,13 @@ async function acknowledged(b: Brain, label: string, call: (requestId: string) =
     if (r.code === 0) return { start, ack: performance.now() };
     const terminal = /\((conflict|failed|cancelled)\)/.test(r.err);
     b.note(`writer ${label} attempt ${attempt} exit ${r.code}${terminal ? ' (terminal; next attempt uses a new request id)' : ''}: ${r.err.trim().split('\n').slice(-1)[0] ?? ''}`);
+    unsettled = !terminal;
     if (terminal) requestId = randomUUID();
     await Bun.sleep(3000);
   }
-  return null;
+  return unsettled ? { pending: requestId } : null;
 }
+const outcome = (ok: { ack: number } | { pending: string } | null) => !ok ? 'unacknowledged' : 'pending' in ok ? `pending ${ok.pending}` : 'ok';
 /** Rewrites notes through the coordinator (`gbrain put`), remembers facts on the entity page and runs the managed timeline maintenance job until `stop`. */
 async function runWriters(b: Brain, putTargets: string[], stop: () => boolean): Promise<string[]> {
   const results: string[] = [];
@@ -710,8 +685,10 @@ async function runWriters(b: Brain, putTargets: string[], stop: () => boolean): 
       // The start is taken before the first attempt: a retried put may have committed on an earlier attempt.
       const start = performance.now();
       const ok = await acknowledged(b, slug, requestId => b.spawnCli(['put', slug, '--source-id', SOURCE, '--force', '--request-id', requestId, '--wait-ms', '10000'], { stdin: content }), stop);
-      if (ok) b.ledger.record({ kind: 'put', slug, marker, touches: ['db', 'file'], start, ack: ok.ack });
-      results.push(`put ${slug}=${ok ? 'ok' : 'unacknowledged'}`);
+      const write = { kind: 'put', slug, marker, touches: ['db', 'file'], start } satisfies Omit<Ack, 'ack'>;
+      if (ok && 'ack' in ok) b.ledger.record({ ...write, ack: ok.ack });
+      if (ok && 'pending' in ok) b.pending.push({ write, requestId: ok.pending });
+      results.push(`put ${slug}=${outcome(ok)}`);
       await Bun.sleep(b.between(200, 1500));
     }
   };
@@ -721,8 +698,10 @@ async function runWriters(b: Brain, putTargets: string[], stop: () => boolean): 
       const start = performance.now();
       const ok = await acknowledged(b, `remember-${k}`, requestId => b.spawnCli(['call', '--source', SOURCE, 'remember',
         JSON.stringify({ fact, entity: ENTITY, infer_entity: false, provenance: 'convergence harness', request_id: requestId })]), stop);
-      if (ok) b.ledger.record({ kind: 'remember', slug: ENTITY, marker: fact, touches: 'fact', start, ack: ok.ack });
-      results.push(`remember ${k}=${ok ? 'ok' : 'unacknowledged'}`);
+      const write = { kind: 'remember', slug: ENTITY, marker: fact, touches: 'fact', start } satisfies Omit<Ack, 'ack'>;
+      if (ok && 'ack' in ok) b.ledger.record({ ...write, ack: ok.ack });
+      if (ok && 'pending' in ok) b.pending.push({ write, requestId: ok.pending });
+      results.push(`remember ${k}=${outcome(ok)}`);
       await Bun.sleep(b.between(1000, 4000));
     }
   };
@@ -821,6 +800,27 @@ describe('convergence harness calibration (#6650 L0, #6712 PR 0)', () => {
     expect(ledger.problems(new Map([['n', 'v1']]), page('v1'), new Set(['fact-1']))).toHaveLength(2);
     expect(ledger.problems(new Map([['n', 'v2']]), page('v2'), new Set())).toEqual(['fact on e: lost acknowledged remember "fact-1"']);
   });
+  // Forced probe (#6841): a put the brain accepted but had not settled when its writer gave up committed after a later
+  // harness commit; dropped from the ledger, its bytes read as the commit's lost write. Its receipt decides it now.
+  test('an accepted write that settles after its writer stopped counts by its receipt', async () => {
+    const b = new Brain('pending-probe', ['c']);
+    const pending = { code: 10, out: '', err: 'Exit 10: accepted, not yet committed.', ms: 0 };
+    let attempts = 0;
+    const ok = await acknowledged(b, 'notes/n', () => ({ proc: undefined as never, result: Promise.resolve(pending) }), () => attempts++ > 0);
+    expect(ok).toEqual({ pending: expect.any(String) });
+    const put = { kind: 'put', slug: 'n', marker: 'put-bytes', touches: ['db', 'file'], start: 0 } satisfies Omit<Ack, 'ack'>;
+    b.ledger.record({ kind: 'commit', slug: 'n', marker: 'commit-bytes', touches: ['db', 'file'], start: 1, ack: 2 });
+    b.pending.push({ write: put, requestId: (ok as { pending: string }).pending });
+    const final = (body: string) => b.ledger.problems(new Map([['n', body]]), new Map([['n', { body }]]), new Set());
+    await b.settlePending(async () => 'committed');
+    expect(final('put-bytes')).toEqual([]);
+    expect(final('commit-bytes')).toEqual([]);
+    const refused = new Brain('pending-probe', ['c']);
+    refused.ledger.record({ kind: 'commit', slug: 'n', marker: 'commit-bytes', touches: ['db', 'file'], start: 1, ack: 2 });
+    refused.pending.push({ write: put, requestId: 'r' });
+    await refused.settlePending(async () => 'conflict');
+    expect(refused.ledger.problems(new Map([['n', 'put-bytes']]), new Map([['n', { body: 'put-bytes' }]]), new Set())).toHaveLength(2);
+  });
   // Forced probe: a harness commit leaves another writer's uncommitted bytes alone (a swept commit raced `remember`'s write-through into a concurrent_write hold).
   test('a harness commit commits only the files it wrote', () => {
     const b = new Brain('commit-probe', ['a']);
@@ -913,6 +913,7 @@ scenario(['a', 'b', 'c'], 'managed sync converges after a seeded kill loop of cl
     b.elapsed.chaos_ms = performance.now() - chaosStarted;
     b.note(`writers: ${results.join(' ')}`);
     await b.recover();
+    await b.settlePending();
     for (const [i, run] of b.recoveryRuns.entries()) { syncErrs[`recovery ${i + 1}`] = run.err; ownerKillStalls[`recovery run ${i + 1}`] = worstStall(run.err); }
   }, SCENARIO_TIMEOUT_MS);
   afterAll(() => b.teardown(), 120_000);

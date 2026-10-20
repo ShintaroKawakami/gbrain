@@ -22,7 +22,7 @@ import { automaticSyncSkip, isSyncDisabledConfig } from '../../core/sync-policy.
 import { composeAbortSignals } from '../../core/sync-reconcile.ts';
 import { acknowledgeFailures, unacknowledgedSyncFailures } from '../../core/sync.ts';
 import type { SyncResult, SyncOpts } from '../sync.ts';
-import { printSyncHelp, parseSyncFlags, parseSyncFanoutFlags } from './args.ts';
+import { printSyncHelp, parseSyncFlags, parseSyncFanoutFlags, noteRetryFailedDeprecated } from './args.ts';
 import { implyManagedNoPull, refuseManagedForbiddenFlags } from './managed-no-pull.ts';
 import { legacyLedgerRows } from '../../core/persistence/legacy-sync-failures.ts';
 import type { SyncFlags, SyncFanoutFlags } from './args.ts';
@@ -62,9 +62,10 @@ type PerSourceResult = {
  * scope): under `--json` as rendered `notices`, otherwise as stderr lines.
  */
 async function syncCapacityNotices(engine: BrainEngine, json: boolean, result?: SyncResult): Promise<{ notices?: unknown[] }> {
-  const { capacityNotices } = await import('../../core/persistence/capacity-snapshot.ts');
-  // #6712 PR 2 (L5): a degraded post-checkpoint tail rides the same notices.
-  const notices = [...(result?.tail?.notice ? [result.tail.notice] : []), ...await capacityNotices(engine).catch(() => [])].map(notice => renderNotice(notice, cliRenderContext()));
+  const { capacityNotices, CAPACITY_READ_WAIT_MS } = await import('../../core/persistence/capacity-snapshot.ts');
+  // #6712 PR 2 (L5): a degraded post-checkpoint tail rides the same notices. #6803 C4: the snapshot wait is bounded.
+  const capacity = await capacityNotices(engine, { throttle: true, deadlineAt: Date.now() + CAPACITY_READ_WAIT_MS }).catch(() => []);
+  const notices = [...(result?.tail?.notice ? [result.tail.notice] : []), ...capacity].map(notice => renderNotice(notice, cliRenderContext()));
   if (!json) for (const notice of notices) process.stderr.write(`[gbrain notice ${notice.code}] ${notice.why}\n`);
   return notices.length ? { notices } : {};
 }
@@ -89,10 +90,10 @@ export async function runSyncInner(engine: BrainEngine, args: string[]) {
     return runSyncTrigger(engine, args.slice(1));
   }
   // #6340: the operator contract (status / unblock) reads and schedules; it never runs a sync.
-  if (args[0] === 'status' || args[0] === 'unblock') {
-    const { runSyncStatus, runSyncUnblock } = await import('./operator.ts');
-    return args[0] === 'status' ? runSyncStatus(engine, args.slice(1)) : runSyncUnblock(engine, args.slice(1));
-  }
+  // #6803: `sync --status` is canonicalized to `sync status` by the same classifier the CLI preflight uses.
+  const { syncOperatorVerb, runSyncOperator } = await import('./operator.ts');
+  const operatorVerb = syncOperatorVerb(args);
+  if (operatorVerb) return runSyncOperator(engine, operatorVerb, args);
 
   // v0.37 fix wave (Lane D.4 + CDX2-12): print usage when `--help`/`-h` is
   // passed. Pre-fix this was unreachable because the dispatcher's generic
@@ -108,6 +109,7 @@ export async function runSyncInner(engine: BrainEngine, args: string[]) {
   if (args.includes('--acknowledge-managed')) return runAcknowledgeManaged(engine, args);
 
   const flags = parseSyncFlags(args);
+  noteRetryFailedDeprecated(args);
   const { repoPath, dryRun, skipFailed, syncAll, jsonOut, breakLock, forceBreakLock, maxAgeSeconds } = flags;
   let { noEmbed } = flags;
 
@@ -788,7 +790,7 @@ async function runSingleSourceSync(
 ): Promise<void> {
   const {
     repoPath, watch, interval, dryRun, full, noPull, noBulk, lanes, noExtract, skipFailed, retryFailed, resetCheckpoint, noSchemaPack,
-    includeGitignored, workingTree, jsonOut, yesFlag, noAutoEmbed, strategyArg, srcSubpath,
+    includeGitignored, workingTree, jsonOut, redactPaths, yesFlag, noAutoEmbed, strategyArg, srcSubpath,
     excludePatterns, includeHiddenPatterns, concurrency, timeoutSeconds,
   } = flags;
   const { sourceId, companyPolicy, noEmbed, resumeCommand, args } = input;
@@ -815,6 +817,7 @@ async function runSingleSourceSync(
     includeHidden: includeHiddenPatterns.length > 0 ? includeHiddenPatterns : undefined,
     signal: composeAbortSignals(singleSourceInterrupt.signal, singleSourceController?.signal),
     drain: true, noBulk, lanes, followDrainLease: true, drainHolder: { kind: 'cli', id: null },
+    ...(yesFlag ? { costApproved: true } : {}),
   };
 
   // v0.42.42.0 (#2139, Step 4b): single-source `gbrain sync` gets the SAME
@@ -882,12 +885,25 @@ async function runSingleSourceSync(
     // v0.41.13.0 (T6): try/finally clears the single-source timer so it
     // doesn't fire after performSync resolves OR throws.
     let result: SyncResult;
+    // #6712 PR 4a: a managed dry run also reports the read-only convergence shadow (sync-convergence.ts).
+    const readConvergence = async () => (await import('../../core/persistence/sync-pass.ts')).dryRunConvergence(engine,
+      { sourceId, full: !!full, workingTree, redactPaths: !!redactPaths, noEmbed, noExtract: !!noExtract, noSchemaPack: !!noSchemaPack });
     process.on('SIGINT', onSingleSourceSigint);
     try {
       // #6317 (D1 a′): on a managed Postgres brain whose host a live serve owns, the drain runs inside that serve as this
       // CLI's writer and returns the same SyncResult; every other case keeps this process's own consumer.
       const delegated = companyPolicy ? null : await (await import('../sync-delegate.ts')).maybeDelegateManagedSyncToServe(engine, args, opts);
       result = delegated?.kind === 'delegated' ? delegated.result : await performSync(engine, opts);
+    } catch (error) {
+      // A refused managed dry run (a case- or separator-only spelling pair) still carries its convergence receipt in the
+      // refusal's envelope; the refusal and its exit code are unchanged.
+      const { OperationError } = await import('../../core/ops/contract.ts');
+      if (!(dryRun && jsonOut && !companyPolicy && error instanceof OperationError)) throw error;
+      const convergence = await readConvergence();
+      if (!convergence) throw error;
+      const [{ writeCliError }, { setCliExitVerdict }] = await Promise.all([import('../../cli/cli-error.ts'), import('../../core/cli-force-exit.ts')]);
+      setCliExitVerdict(writeCliError(error, 'sync', { json: true, extra: { convergence }, emit: emitJson }));
+      return;
     } finally {
       if (singleSourceTimer !== undefined) clearTimeout(singleSourceTimer);
       process.off('SIGINT', onSingleSourceSigint);
@@ -961,8 +977,9 @@ async function runSingleSourceSync(
       }
     }
     const capacity = await syncCapacityNotices(engine, jsonOut, result);
+    const convergence = jsonOut && result.status === 'dry_run' && !companyPolicy ? await readConvergence() : undefined;
     if (jsonOut) {
-      emitJson(JSON.stringify({ ...buildSingleSyncJsonEnvelope(sourceId, result, singleEmbedBackfill, singleCostGate),
+      emitJson(JSON.stringify({ ...buildSingleSyncJsonEnvelope(sourceId, result, singleEmbedBackfill, singleCostGate), ...(convergence ? { convergence } : {}),
         ...(result.managedWrite ? { managed_write: result.managedWrite } : {}), ...drainJsonFields(result, resumeCommand, sourceId),
         ...(result.tail ? { tail: syncTailJsonFields(result).tail } : {}), ...capacity }));
     }

@@ -268,6 +268,8 @@ export interface ExtractInput {
   sessionId?: string | null;
   /** Existing canonical entity slugs the agent already resolved (D4 hint). */
   entityHints?: string[];
+  /** Hints the prompt forwards; defaults to ENTITY_HINTS_CAP (the extract_facts contract). */
+  entityHintsCap?: number;
   /** Source identifier for provenance — e.g. 'mcp:put_page' or 'mcp:extract_facts'. */
   source: string;
   /**
@@ -649,7 +651,7 @@ export async function extractFactsFromTurnWithOutcome(
   const dateLine = variant.dateGrounding ? `${observationDateLine(input.observationDate ?? null)}\n` : '';
   const userContent = `${dateLine}<turn>\n${cleaned}\n</turn>\n\nExtract up to ${cap} facts.${
     input.entityHints && input.entityHints.length
-      ? ` Known entity slugs the user already mentioned: ${input.entityHints.slice(0, ENTITY_HINTS_CAP).join(', ')}.`
+      ? ` Known entity slugs the user already mentioned: ${input.entityHints.slice(0, input.entityHintsCap ?? ENTITY_HINTS_CAP).join(', ')}.`
       : ''
   }`;
   let result: ChatResult;
@@ -665,6 +667,10 @@ export async function extractFactsFromTurnWithOutcome(
       maxTokens,
       abortSignal: input.abortSignal,
       responseSchema,
+      // The system prompt is identical across consecutive calls (everything
+      // per-call rides in userContent), so bulk extraction reads it from the
+      // provider's prompt cache instead of paying full input for it each time.
+      cacheSystem: true,
     });
     // #2113: never checked pre-fix — a truncated response (stopReason
     // 'length', e.g. reasoning tokens eating the cap on mandatory-reasoning
@@ -683,6 +689,7 @@ export async function extractFactsFromTurnWithOutcome(
         maxTokens: effectiveMaxTokens,
         abortSignal: input.abortSignal,
         responseSchema,
+        cacheSystem: true,
       });
       if (result.stopReason === 'length') {
         process.stderr.write(
@@ -716,6 +723,8 @@ export async function extractFactsFromTurnWithOutcome(
       'retrying once with an explicit JSON-only reminder\n',
     );
     try {
+      // No cacheSystem: the appended note makes this system block differ from
+      // every other call's, so a cache write here would never be read.
       result = await chat({
         model,
         system: `${extractorSystem}\nThe previous attempt returned invalid JSON or an invalid facts schema. ` +

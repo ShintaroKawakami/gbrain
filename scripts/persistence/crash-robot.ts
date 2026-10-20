@@ -91,7 +91,7 @@ export async function settlePending(world: World, model: ReferenceModel): Promis
   await model.settleLate(pending, observed);
 }
 
-/** Finish a schedule: drain, check drained invariants, prove a fresh write still admits. */
+/** Finish a schedule: drain, check drained invariants, prove a fresh write still admits, and drain that write's effects. */
 export async function finish(world: World, model: ReferenceModel, label: string, drainMs: number = DRAIN_BOUND_MS[world.engine.kind]): Promise<void> {
   const drained = await drain(world.engine, world, drainMs);
   if (!drained) model.violate({ class: 'wedge', detail: `${label}: requests or effects did not drain within ${drainMs / 1000} s` });
@@ -103,6 +103,27 @@ export async function finish(world: World, model: ReferenceModel, label: string,
     { slug: `notes/probe-${randomUUID().slice(0, 8)}`, content: pageBody('notes/probe', 'mk-probe0') });
   const seen = await executeOp(world, probe);
   if (seen.status !== 'committed') model.violate({ class: 'wedge', detail: `${label}: a fresh write after the schedule ended ${seen.status}/${seen.code}` });
+  await awaitClaimPass(world);
+  // The probe's own effects (its git commit among them) reach their seams only if the worker waits for them: a count
+  // role that happened to see the probe's effect:git:mid planned a fault no run was sure to reach (seed 5105).
+  if (!await drain(world.engine, world, drainMs)) model.violate({ class: 'wedge', detail: `${label}: the probe's effects did not drain within ${drainMs / 1000} s` });
+}
+
+/**
+ * #6957: wait for a consumer claim pass after the probe was prepared. The consumer makes one after every write it
+ * finishes, but a worker that returned at once stopped it first, unless timing let the pass in: a CI count role saw
+ * that pass as claim epoch 5 of caller_bound_replay, every replay of the run exited before making it, and its fault
+ * at consumer:claiming#5 went unreached. Waiting makes the last claim epoch part of every counted and run schedule.
+ * Only a worker whose fault hook counts claim passes (`world.claimPasses`) waits.
+ */
+async function awaitClaimPass(world: World): Promise<void> {
+  if (world.claimPasses === undefined) return;
+  const before = world.claimPasses;
+  const deadline = Date.now() + 30_000;
+  while (world.claimPasses === before && Date.now() < deadline) {
+    startPersistenceConsumer(world.engine, world.config).wake();
+    await Bun.sleep(50);
+  }
 }
 
 export async function runSchedule(world: World, schedule: Schedule): Promise<ScheduleResult> {
@@ -177,16 +198,32 @@ function freeze(event: Record<string, unknown>): never {
  * share one `requestId`.
  */
 const PER_REQUEST_SEAMS: ReadonlySet<FaultPoint> = new Set<FaultPoint>(['consumer:preparing', 'consumer:prepared']);
-/** True when this pass counts toward the seam's nth: always, except a repeat of the same request at a per-request seam. */
-export function seamCounter(): (point: FaultPoint, detail: FaultDetail) => boolean {
-  const seen = new Set<string>();
+/**
+ * #6896: `consumer:claiming` fires before every claim attempt, the consumer's idle ticks and the passes that find
+ * the root busy included, so how many passes a run makes follows wall-clock time, not the schedule (a count role
+ * saw 19, the run made fewer and its fault at #19 went unreached). It counts in claim epochs instead: the number of
+ * distinct write request rows that have reached `consumer:preparing`. The first pass at epoch e or later advances
+ * the count to e + 1, so slot n is the first claim attempt after n - 1 requests were prepared; requests of one root
+ * are claimed one after another, and `finish` waits for a claim pass after its probe, the last request (#6957), so
+ * every slot the count role saw comes again in the run.
+ */
+/** How far this pass advances the seam's count: 1, 0 for a repeat of the same request at a per-request seam, the epochs passed at the claim seam. */
+export function seamCounter(): (point: FaultPoint, detail: FaultDetail) => number {
+  const seen = new Set<string>(), prepared = new Set<string>();
+  let claimSlots = 0;
   return (point, detail) => {
     const request = detail.writeId ?? detail.requestId;
-    if (!PER_REQUEST_SEAMS.has(point) || !request) return true;
+    if (point === 'consumer:preparing' && request) prepared.add(request);
+    if (point === 'consumer:claiming') {
+      const advanced = Math.max(0, prepared.size + 1 - claimSlots);
+      claimSlots += advanced;
+      return advanced;
+    }
+    if (!PER_REQUEST_SEAMS.has(point) || !request) return 1;
     const key = `${point}\u0000${request}`;
-    if (seen.has(key)) return false;
+    if (seen.has(key)) return 0;
     seen.add(key);
-    return true;
+    return 1;
   };
 }
 
@@ -201,7 +238,10 @@ export function robotFaultHook(fault: NonNullable<RobotConfig['fault']>): (point
   let seen = 0;
   const counts = seamCounter();
   return (point, detail) => {
-    if (point !== fault.point || (fault.operation && detail.operation !== fault.operation) || !counts(point, detail) || ++seen !== fault.nth) return;
+    const advanced = counts(point, detail);
+    if (point !== fault.point || (fault.operation && detail.operation !== fault.operation) || !advanced) return;
+    seen += advanced;
+    if (seen < fault.nth) return;
     try { freeze({ event: 'fault', point, nth: seen, detail }); }
     catch (error) { freeze({ event: 'fault_hook_error', point, nth: seen, message: error instanceof Error ? error.message : String(error) }); }
   };
@@ -372,8 +412,12 @@ export async function robotWorker(role: 'count' | 'run' | 'recover', config: Rob
     installLockOrderTrace();
     const counts: Record<string, number> = {};
     const counted = seamCounter();
-    if (role === 'count') installFaultHook((point, detail) => { if (counted(point, detail)) counts[point] = (counts[point] ?? 0) + 1; });
-    if (role === 'run' && config.fault) installFaultHook(robotFaultHook(config.fault));
+    const hook = role === 'count' ? (point: FaultPoint, detail: FaultDetail) => { const advanced = counted(point, detail); if (advanced) counts[point] = (counts[point] ?? 0) + advanced; }
+      : role === 'run' && config.fault ? robotFaultHook(config.fault) : undefined;
+    if (hook) {
+      world.claimPasses = 0;
+      installFaultHook((point, detail) => { if (point === 'consumer:claiming') world.claimPasses!++; hook(point, detail); });
+    }
     if (role === 'run') {
       let next = 0; let inFlight: string[] = [];
       world.onSubmit = () => writeState(config, world, model, checkouts, next, inFlight);

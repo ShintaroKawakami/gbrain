@@ -158,6 +158,8 @@
       "page_body_staging_parts.page_body_staging_parts_part_no_check": "c CHECK ((part_no >= 0))",
       "page_body_staging_parts.page_body_staging_parts_pkey": "p PRIMARY KEY (staging_id, part_no)",
       "page_body_staging_parts.page_body_staging_parts_staging_id_fkey": "f FOREIGN KEY (staging_id) REFERENCES page_body_stagings(id) ON DELETE CASCADE",
+      "page_body_staging_texts.page_body_staging_texts_pkey": "p PRIMARY KEY (staging_id, sha256)",
+      "page_body_staging_texts.page_body_staging_texts_staging_id_fkey": "f FOREIGN KEY (staging_id) REFERENCES page_body_stagings(id) ON DELETE CASCADE",
       "page_body_stagings.page_body_stagings_declared_bytes_check": "c CHECK ((declared_bytes >= 0))",
       "page_body_stagings.page_body_stagings_kind_check": "c CHECK ((kind = ANY (ARRAY['upload'::text, 'import'::text, 'sync'::text, 'put'::text, 'append'::text, 'edit'::text, 'resegment'::text])))",
       "page_body_stagings.page_body_stagings_mode_check": "c CHECK ((mode = ANY (ARRAY['create'::text, 'replace'::text, 'append'::text])))",
@@ -191,6 +193,12 @@
       "page_segment_texts.page_segment_texts_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
       "page_versions.page_versions_page_id_fkey": "f FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE",
       "page_versions.page_versions_pkey": "p PRIMARY KEY (id)",
+      "page_view_digests.page_view_digests_audience_check": "c CHECK ((audience = ANY (ARRAY['trusted'::text, 'remote'::text])))",
+      "page_view_digests.page_view_digests_page_id_fkey": "f FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE",
+      "page_view_digests.page_view_digests_pkey": "p PRIMARY KEY (page_id, revision, view, audience)",
+      "page_view_digests.page_view_digests_total_bytes_check": "c CHECK ((total_bytes >= 0))",
+      "page_view_digests.page_view_digests_total_lines_check": "c CHECK ((total_lines >= 0))",
+      "page_view_digests.page_view_digests_view_check": "c CHECK ((view = ANY (ARRAY['read'::text, 'markdown'::text])))",
       "page_write_guards.page_write_guards_pkey": "p PRIMARY KEY (source_incarnation, slug)",
       "page_write_guards.page_write_guards_source_incarnation_fkey": "f FOREIGN KEY (source_incarnation) REFERENCES sources(incarnation) ON DELETE CASCADE",
       "pages.pages_page_kind_check": "c CHECK ((page_kind = ANY (ARRAY['markdown'::text, 'code'::text, 'image'::text])))",
@@ -313,6 +321,14 @@
       "subagent_tool_executions.subagent_tool_executions_job_id_fkey": "f FOREIGN KEY (job_id) REFERENCES minion_jobs(id) ON DELETE CASCADE",
       "subagent_tool_executions.subagent_tool_executions_pkey": "p PRIMARY KEY (id)",
       "subagent_tool_executions.subagent_tool_executions_stable_id": "u UNIQUE (job_id, message_idx, ordinal)",
+      "sync_notifier_leases.sync_notifier_leases_pkey": "p PRIMARY KEY (host_id)",
+      "sync_notifier_sources.sync_notifier_sources_detection_mode_check": "c CHECK ((detection_mode = ANY (ARRAY['watch'::text, 'poll'::text])))",
+      "sync_notifier_sources.sync_notifier_sources_pkey": "p PRIMARY KEY (source_id)",
+      "sync_notifier_sources.sync_notifier_sources_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
+      "sync_notifier_sources.sync_notifier_sources_state_check": "c CHECK ((state = ANY (ARRAY['idle'::text, 'due'::text, 'running'::text, 'retry'::text, 'operator_blocked'::text])))",
+      "sync_wanted_markers.sync_wanted_markers_intent_check": "c CHECK ((intent = ANY (ARRAY['freshness'::text, 'pull'::text, 'full'::text])))",
+      "sync_wanted_markers.sync_wanted_markers_pkey": "p PRIMARY KEY (source_id, intent)",
+      "sync_wanted_markers.sync_wanted_markers_source_id_fkey": "f FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE",
       "tags.tags_page_id_fkey": "f FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE",
       "tags.tags_page_id_tag_key": "u UNIQUE (page_id, tag)",
       "tags.tags_pkey": "p PRIMARY KEY (id)",
@@ -544,6 +560,9 @@
       "page_body_staging_parts": [
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
+      "page_body_staging_texts": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
       "page_body_stagings": [
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
@@ -572,6 +591,9 @@
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
       "page_versions": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "page_view_digests": [
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
       "page_write_guards": [
@@ -686,6 +708,15 @@
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
       "subagent_tool_executions": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "sync_notifier_leases": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "sync_notifier_sources": [
+        "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
+      ],
+      "sync_wanted_markers": [
         "<current_role> -> <current_role> WITH GRANT OPTION: DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE"
       ],
       "tags": [
@@ -907,6 +938,8 @@
       "page_body_manifest_staging": "CREATE INDEX page_body_manifest_staging ON public.page_body_manifest USING btree (staging_id) WHERE (staging_id IS NOT NULL)",
       "page_body_manifest_text": "CREATE INDEX page_body_manifest_text ON public.page_body_manifest USING btree (source_id, sha256)",
       "page_body_staging_parts_pkey": "CREATE UNIQUE INDEX page_body_staging_parts_pkey ON public.page_body_staging_parts USING btree (staging_id, part_no)",
+      "page_body_staging_texts_pkey": "CREATE UNIQUE INDEX page_body_staging_texts_pkey ON public.page_body_staging_texts USING btree (staging_id, sha256)",
+      "page_body_staging_texts_text": "CREATE INDEX page_body_staging_texts_text ON public.page_body_staging_texts USING btree (source_id, sha256)",
       "page_body_stagings_expiry": "CREATE INDEX page_body_stagings_expiry ON public.page_body_stagings USING btree (hard_expires_at) WHERE (state = ANY (ARRAY['open'::text, 'sealed'::text, 'prepared'::text]))",
       "page_body_stagings_pkey": "CREATE UNIQUE INDEX page_body_stagings_pkey ON public.page_body_stagings USING btree (id)",
       "page_body_stagings_principal_kind_principal_id_client_reque_key": "CREATE UNIQUE INDEX page_body_stagings_principal_kind_principal_id_client_reque_key ON public.page_body_stagings USING btree (principal_kind, principal_id, client_request_id)",
@@ -920,6 +953,7 @@
       "page_retrievals_pkey": "CREATE UNIQUE INDEX page_retrievals_pkey ON public.page_retrievals USING btree (page_id)",
       "page_segment_texts_pkey": "CREATE UNIQUE INDEX page_segment_texts_pkey ON public.page_segment_texts USING btree (source_id, sha256)",
       "page_versions_pkey": "CREATE UNIQUE INDEX page_versions_pkey ON public.page_versions USING btree (id)",
+      "page_view_digests_pkey": "CREATE UNIQUE INDEX page_view_digests_pkey ON public.page_view_digests USING btree (page_id, revision, view, audience)",
       "page_write_guards_pkey": "CREATE UNIQUE INDEX page_write_guards_pkey ON public.page_write_guards USING btree (source_incarnation, slug)",
       "pages_coalesce_date_idx": "CREATE INDEX pages_coalesce_date_idx ON public.pages USING btree (COALESCE(effective_date, updated_at))",
       "pages_deleted_at_purge_idx": "CREATE INDEX pages_deleted_at_purge_idx ON public.pages USING btree (deleted_at) WHERE (deleted_at IS NOT NULL)",
@@ -941,6 +975,7 @@
       "persistence_requests_principal": "CREATE INDEX persistence_requests_principal ON public.persistence_requests USING btree (principal_kind, principal_id, sequence DESC)",
       "persistence_requests_principal_kind_principal_id_request_id_key": "CREATE UNIQUE INDEX persistence_requests_principal_kind_principal_id_request_id_key ON public.persistence_requests USING btree (principal_kind, principal_id, request_id)",
       "persistence_requests_recovery": "CREATE INDEX persistence_requests_recovery ON public.persistence_requests USING btree (worktree_id, sequence) WHERE (recovery IS NOT NULL)",
+      "persistence_requests_request_id": "CREATE INDEX persistence_requests_request_id ON public.persistence_requests USING btree (source_id, request_id)",
       "persistence_requests_sequence_key": "CREATE UNIQUE INDEX persistence_requests_sequence_key ON public.persistence_requests USING btree (sequence)",
       "persistence_requests_slug_intent": "CREATE INDEX persistence_requests_slug_intent ON public.persistence_requests USING btree (source_id, slug, sequence) WHERE ((intent IS NOT NULL) AND (NOT compacted))",
       "persistence_requests_sync_run_committed": "CREATE INDEX persistence_requests_sync_run_committed ON public.persistence_requests USING btree (source_id, ((intent ->> 'runId'::text)), ((intent ->> 'index'::text))) WHERE ((state = 'committed'::text) AND (intent ? 'runId'::text))",
@@ -1005,6 +1040,9 @@
       "subagent_rate_leases_pkey": "CREATE UNIQUE INDEX subagent_rate_leases_pkey ON public.subagent_rate_leases USING btree (id)",
       "subagent_tool_executions_pkey": "CREATE UNIQUE INDEX subagent_tool_executions_pkey ON public.subagent_tool_executions USING btree (id)",
       "subagent_tool_executions_stable_id": "CREATE UNIQUE INDEX subagent_tool_executions_stable_id ON public.subagent_tool_executions USING btree (job_id, message_idx, ordinal)",
+      "sync_notifier_leases_pkey": "CREATE UNIQUE INDEX sync_notifier_leases_pkey ON public.sync_notifier_leases USING btree (host_id)",
+      "sync_notifier_sources_pkey": "CREATE UNIQUE INDEX sync_notifier_sources_pkey ON public.sync_notifier_sources USING btree (source_id)",
+      "sync_wanted_markers_pkey": "CREATE UNIQUE INDEX sync_wanted_markers_pkey ON public.sync_wanted_markers USING btree (source_id, intent)",
       "tags_page_id_tag_key": "CREATE UNIQUE INDEX tags_page_id_tag_key ON public.tags USING btree (page_id, tag)",
       "tags_pkey": "CREATE UNIQUE INDEX tags_pkey ON public.tags USING btree (id)",
       "take_grade_cache_applied_idx": "CREATE INDEX take_grade_cache_applied_idx ON public.take_grade_cache USING btree (take_id, applied)",
@@ -1684,7 +1722,10 @@
           "4 source_ref text/text NOT NULL",
           "5 pages_updated jsonb/jsonb NOT NULL DEFAULT '[]'::jsonb",
           "6 summary text/text NOT NULL DEFAULT ''::text",
-          "7 created_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
+          "7 created_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()",
+          "8 writer_version text/text NULL",
+          "9 writer_host_id uuid/uuid NULL",
+          "10 writer_segment_reader boolean/bool NULL"
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },
@@ -2063,6 +2104,14 @@
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },
+      "page_body_staging_texts": {
+        "columns": [
+          "1 staging_id uuid/uuid NOT NULL",
+          "2 source_id text/text NOT NULL",
+          "3 sha256 bytea/bytea NOT NULL"
+        ],
+        "flags": "relkind=r rls=false force_rls=false"
+      },
       "page_body_stagings": {
         "columns": [
           "1 id uuid/uuid NOT NULL",
@@ -2180,6 +2229,19 @@
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },
+      "page_view_digests": {
+        "columns": [
+          "1 page_id integer/int4 NOT NULL",
+          "2 revision text/text NOT NULL",
+          "3 view text/text NOT NULL",
+          "4 audience text/text NOT NULL",
+          "5 total_bytes bigint/int8 NOT NULL",
+          "6 total_lines bigint/int8 NOT NULL",
+          "7 sha256 text/text NULL",
+          "8 created_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
+        ],
+        "flags": "relkind=r rls=false force_rls=false"
+      },
       "page_write_guards": {
         "columns": [
           "1 source_incarnation uuid/uuid NOT NULL",
@@ -2248,7 +2310,8 @@
           "14 minted_under jsonb/jsonb NULL",
           "15 version text/text NOT NULL",
           "16 boot_id text/text NULL",
-          "17 process_start text/text NULL"
+          "17 process_start text/text NULL",
+          "18 segment_reader boolean/bool NULL"
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },
@@ -2769,6 +2832,59 @@
           "13 gbrain_tool_use_id uuid/uuid NULL",
           "14 started_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()",
           "15 ended_at timestamp with time zone/timestamptz NULL"
+        ],
+        "flags": "relkind=r rls=false force_rls=false"
+      },
+      "sync_notifier_leases": {
+        "columns": [
+          "1 host_id text/text NOT NULL",
+          "2 owner_id text/text NOT NULL",
+          "3 fence bigint/int8 NOT NULL DEFAULT 1",
+          "4 resident_kind text/text NOT NULL",
+          "5 pid integer/int4 NULL",
+          "6 renewed_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()",
+          "7 expires_at timestamp with time zone/timestamptz NOT NULL"
+        ],
+        "flags": "relkind=r rls=false force_rls=false"
+      },
+      "sync_notifier_sources": {
+        "columns": [
+          "1 source_id text/text NOT NULL",
+          "2 source_incarnation text/text NULL",
+          "3 syncer_host_id text/text NULL",
+          "4 syncer_recorded_at timestamp with time zone/timestamptz NULL",
+          "5 state text/text NOT NULL DEFAULT 'idle'::text",
+          "6 reason text/text NULL",
+          "7 first_due_at timestamp with time zone/timestamptz NULL",
+          "8 attempts integer/int4 NOT NULL DEFAULT 0",
+          "9 next_retry_at timestamp with time zone/timestamptz NULL",
+          "10 last_progress_at timestamp with time zone/timestamptz NULL",
+          "11 last_error_code text/text NULL",
+          "12 last_error text/text NULL",
+          "13 last_error_at timestamp with time zone/timestamptz NULL",
+          "14 trace_path text/text NULL",
+          "15 observed_head text/text NULL",
+          "16 observed_at timestamp with time zone/timestamptz NULL",
+          "17 detection_mode text/text NULL",
+          "18 owner_host_id text/text NULL",
+          "19 owner_kind text/text NULL",
+          "20 owner_pid integer/int4 NULL",
+          "21 owner_seen_at timestamp with time zone/timestamptz NULL",
+          "22 updated_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()"
+        ],
+        "flags": "relkind=r rls=false force_rls=false"
+      },
+      "sync_wanted_markers": {
+        "columns": [
+          "1 source_id text/text NOT NULL",
+          "2 intent text/text NOT NULL",
+          "3 source_incarnation text/text NULL",
+          "4 wanted_head text/text NULL",
+          "5 generation bigint/int8 NOT NULL DEFAULT 1",
+          "6 first_due_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()",
+          "7 updated_at timestamp with time zone/timestamptz NOT NULL DEFAULT now()",
+          "8 requested_by text/text NOT NULL",
+          "9 job_id bigint/int8 NULL"
         ],
         "flags": "relkind=r rls=false force_rls=false"
       },

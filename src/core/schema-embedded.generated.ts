@@ -346,9 +346,12 @@ CREATE TABLE IF NOT EXISTS content_chunks (
   -- content_chunks columns, so fresh and upgraded brains share their ordinals.
   -- v244: projected_byte_start / projected_byte_end (a prose chunk's UTF-8
   -- span in its source's read projection) are added the same way.
-  -- v248: occurrence_id, local_ordinal, raw_byte_start/end, body_generation and
-  -- retired_generation (segmented-page chunks; NULL for inline pages) and
-  -- content_chunks_occurrence_idx are added the same way.
+  -- v248: occurrence_id, local_ordinal, raw_byte_start/end and body_generation
+  -- (segmented-page chunks; NULL for inline pages) and
+  -- content_chunks_occurrence_idx are added the same way, and so is v248's
+  -- retired_generation, which nothing writes or reads but released chunk readers
+  -- still select (v252 keeps it and adds content_chunks_generation_idx; v256
+  -- adds content_chunks_occurrence_generation_idx for chunk retirement).
   -- #4246 (v133): md5(chunk_text) at embed time. NULL = no embedding or
   -- pre-v133 row (grandfathered by invalidateContentDriftEmbeddings).
   embedded_text_hash    TEXT,
@@ -679,7 +682,11 @@ CREATE TABLE IF NOT EXISTS ingest_log (
   source_ref    TEXT    NOT NULL,
   pages_updated JSONB   NOT NULL DEFAULT '[]',
   summary       TEXT    NOT NULL DEFAULT '',
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Migration v254: the writing binary's version, host and segment-reader mark (NULL from a binary older than v254).
+  writer_version TEXT,
+  writer_host_id UUID,
+  writer_segment_reader BOOLEAN
 );
 
 CREATE INDEX IF NOT EXISTS idx_ingest_log_source_type_created
@@ -2010,6 +2017,19 @@ CREATE TABLE IF NOT EXISTS page_extraction_state (
 );
 CREATE INDEX IF NOT EXISTS page_extraction_state_truncated_idx
   ON page_extraction_state (pipeline, page_id) WHERE input_truncated IS NOT NULL;
+-- Wave B segmented pages (migration v253): get_page view sizes and digests per
+-- page revision and audience (src/core/page-window/segmented.ts).
+CREATE TABLE IF NOT EXISTS page_view_digests (
+  page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+  revision TEXT NOT NULL,
+  view TEXT NOT NULL CHECK (view IN ('read','markdown')),
+  audience TEXT NOT NULL CHECK (audience IN ('trusted','remote')),
+  total_bytes BIGINT NOT NULL CHECK (total_bytes >= 0),
+  total_lines BIGINT NOT NULL CHECK (total_lines >= 0),
+  sha256 TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (page_id, revision, view, audience)
+);
 -- Wave B segmented page storage (migration v248): segment texts, the
 -- generation-ranged body manifest and body stagings (src/core/page-body/).
 -- Before the persistence region so the managed-writer guard covers them.
@@ -2092,7 +2112,29 @@ CREATE TABLE IF NOT EXISTS page_body_staging_parts (
   body       BYTEA   NOT NULL,
   PRIMARY KEY (staging_id, part_no)
 );
+CREATE TABLE IF NOT EXISTS page_body_staging_texts (
+  staging_id UUID  NOT NULL REFERENCES page_body_stagings(id) ON DELETE CASCADE,
+  source_id  TEXT  NOT NULL,
+  sha256     BYTEA NOT NULL,
+  PRIMARY KEY (staging_id, sha256)
+);
+CREATE INDEX IF NOT EXISTS page_body_staging_texts_text ON page_body_staging_texts (source_id, sha256);
 -- END GENERATED from src/core/page-body/schema.ts (PAGE_BODY_SCHEMA_SQL)
+
+-- BEGIN GENERATED from src/core/page-body/schema.ts (PAGE_BODY_RLS_SQL). Edit that file, then run: bun run build:schema
+DO \$rls\$
+DECLARE target TEXT;
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'USAGE') AND (r.rolbypassrls OR r.rolsuper)) THEN
+    FOREACH target IN ARRAY ARRAY['page_segment_texts','page_body_manifest','page_body_stagings','page_body_staging_parts','page_view_digests','page_body_staging_texts'] LOOP
+      IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE n.nspname = current_schema() AND c.relname = target AND c.relkind = 'r' AND NOT c.relrowsecurity) THEN
+        EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', target);
+      END IF;
+    END LOOP;
+  END IF;
+END \$rls\$;
+-- END GENERATED from src/core/page-body/schema.ts (PAGE_BODY_RLS_SQL)
 
 -- Durable concurrent persistence (migration 151).
 -- BEGIN GENERATED from src/core/persistence/schema.ts (PERSISTENCE_SCHEMA_STATEMENTS). Edit that file, then run: bun run build:schema
@@ -2212,6 +2254,7 @@ CREATE TABLE IF NOT EXISTS persistence_consumers (
     version text NOT NULL,
     boot_id text,
     process_start text,
+    segment_reader boolean,
     PRIMARY KEY(host_id,pid,nonce)
   );
 
@@ -3286,4 +3329,53 @@ DO \$rls\$ BEGIN
   END IF;
 END \$rls\$;
 -- END GENERATED from src/core/belief/schema.ts (BELIEF_LEDGER_SCHEMA_SQL)
+
+-- GBRA-133 PR 2a (migration v262): commit notifier wanted markers, the
+-- per-host notifier lease and per-source notifier state + coverage record
+-- (src/core/notifier/store.ts).
+CREATE TABLE IF NOT EXISTS sync_wanted_markers (
+  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  intent TEXT NOT NULL CHECK (intent IN ('freshness','pull','full')),
+  source_incarnation TEXT,
+  wanted_head TEXT,
+  generation BIGINT NOT NULL DEFAULT 1,
+  first_due_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  requested_by TEXT NOT NULL,
+  job_id BIGINT,
+  PRIMARY KEY (source_id, intent)
+);
+CREATE TABLE IF NOT EXISTS sync_notifier_leases (
+  host_id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL,
+  fence BIGINT NOT NULL DEFAULT 1,
+  resident_kind TEXT NOT NULL,
+  pid INTEGER,
+  renewed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sync_notifier_sources (
+  source_id TEXT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+  source_incarnation TEXT,
+  syncer_host_id TEXT,
+  syncer_recorded_at TIMESTAMPTZ,
+  state TEXT NOT NULL DEFAULT 'idle' CHECK (state IN ('idle','due','running','retry','operator_blocked')),
+  reason TEXT,
+  first_due_at TIMESTAMPTZ,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_retry_at TIMESTAMPTZ,
+  last_progress_at TIMESTAMPTZ,
+  last_error_code TEXT,
+  last_error TEXT,
+  last_error_at TIMESTAMPTZ,
+  trace_path TEXT,
+  observed_head TEXT,
+  observed_at TIMESTAMPTZ,
+  detection_mode TEXT CHECK (detection_mode IN ('watch','poll')),
+  owner_host_id TEXT,
+  owner_kind TEXT,
+  owner_pid INTEGER,
+  owner_seen_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 `;

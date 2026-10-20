@@ -48,6 +48,7 @@ import { embedStaleForSource } from '../../embed-stale.ts';
 import { createEmbedStallWatchdog, resolveEmbedStallAbortSeconds } from '../../embed-stall.ts';
 import { currentEmbeddingSignature } from '../../embedding.ts';
 import { readEmbedBackfillBlockers } from '../../embed-backfill-stall.ts';
+import { budgetLimitedField, type BudgetLimitedReport } from '../../held-embedding.ts';
 import { UnrecoverableError } from '../errors.ts';
 import { type DbPacer, createDbPacer, createNoopPacer } from '../../db-pacer.ts';
 import { resolvePaceMode, loadPaceModeConfig, readPaceEnv } from '../../pace-mode.ts';
@@ -57,6 +58,8 @@ import { parseUsdLimit, usdLimitToCap, resolveSpendPosture } from '../../spend-p
 import { recordMinionJobSpend } from '../../minion-spend.ts';
 
 import { embedBackfillLockId, EMBED_BACKFILL_LOCK_TTL_MIN } from '../../embed-backfill-lock.ts';
+import { keylessEmbedBackfill, reportKeylessNotice } from '../../embed-backfill-submit.ts';
+import type { RenderedNotice } from '../../agent-output.ts';
 
 const DEFAULT_MAX_USD_PER_JOB = 10;
 
@@ -68,7 +71,12 @@ export interface EmbedBackfillJobData {
 }
 
 export interface EmbedBackfillResult {
-  status: 'success' | 'already_in_progress' | 'budget_exhausted' | 'aborted';
+  status: 'success' | 'already_in_progress' | 'budget_exhausted' | 'aborted' | 'skipped';
+  /** Set when status === 'skipped': the brain is keyless by choice, so nothing was read or embedded. */
+  outcome?: 'embed_backfill_skipped';
+  reason?: 'embedding_disabled';
+  /** The embed_backfill_skipped notice, on the first skip for this brain state only. */
+  notice?: RenderedNotice;
   sourceId: string;
   embedded: number;
   chunksProcessed: number;
@@ -85,6 +93,8 @@ export interface EmbedBackfillResult {
   spentUsd: number;
   /** Set when status === 'budget_exhausted'. */
   budgetCapUsd?: number;
+  /** #6803: large pages of this source waiting for embedding approval (informational; never a failure or a stall). */
+  budget_limited?: BudgetLimitedReport;
 }
 
 /**
@@ -225,6 +235,12 @@ export function makeEmbedBackfillHandler(
     job: MinionJobContext,
   ): Promise<EmbedBackfillResult> {
     const { sourceId, batchSize } = parseParams(job.data);
+
+    const keyless = await keylessEmbedBackfill(engine);
+    if (keyless) {
+      return { status: 'skipped', outcome: 'embed_backfill_skipped', reason: 'embedding_disabled', sourceId, embedded: 0, chunksProcessed: 0,
+        pagesProcessed: 0, invalidated: 0, spentUsd: 0, ...(keyless.notice ? { notice: reportKeylessNotice(keyless.notice) } : {}) };
+    }
 
     // D2: per-source lock at handler entry. The submit-side cooldown (D19)
     // prevents most contention but this is the run-side safety net.
@@ -389,6 +405,7 @@ export function makeEmbedBackfillHandler(
         invalidated: result.invalidated,
         ...(result.invalidationSkipped && { invalidationSkipped: result.invalidationSkipped }),
         spentUsd: tracker.totalSpent,
+        ...(await budgetLimitedField(engine, sourceId, currentEmbeddingSignature())),
       };
     } catch (err) {
       if (err instanceof BudgetExhausted) {

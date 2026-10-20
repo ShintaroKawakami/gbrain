@@ -31,39 +31,43 @@ export interface SyncFlagSpec {
   serve: SyncFlagRoute;
   /** The PGLite persistence owner lane (`writer_sync`). */
   owner: SyncFlagRoute;
+  /** #6712 PR 3 (L7): listed in the "Managed brains" section of `gbrain sync --help` (at most 10; the rest are classic or advanced). */
+  managed?: true;
 }
 
 const bool = (field: string, serve: SyncFlagRoute, owner: SyncFlagRoute): SyncFlagSpec => ({ arity: 'boolean', field, type: 'boolean', serve, owner });
 const local = (arity: SyncFlagSpec['arity'], serve: SyncFlagRoute = 'refuse', owner: SyncFlagRoute = 'refuse'): SyncFlagSpec => ({ arity, serve, owner });
+const managed = <T extends SyncFlagSpec>(spec: T): T & { managed: true } => ({ ...spec, managed: true });
 
 export const SYNC_FLAGS = {
-  '--source': { arity: 'value', field: 'sourceId', type: 'string', serve: 'client', owner: 'forward' },
+  '--source': managed({ arity: 'value', field: 'sourceId', type: 'string', serve: 'client', owner: 'forward' }),
   '--full': bool('full', 'forward', 'forward'),
-  '--dry-run': bool('dryRun', 'forward', 'forward'),
-  '--no-pull': bool('noPull', 'forward', 'forward'),
+  '--dry-run': managed(bool('dryRun', 'forward', 'forward')),
+  '--no-pull': managed(bool('noPull', 'forward', 'forward')),
   '--no-embed': bool('noEmbed', 'forward', 'forward'),
   '--no-extract': bool('noExtract', 'forward', 'forward'),
   '--no-schema-pack': bool('noSchemaPack', 'forward', 'forward'),
   '--skip-failed': bool('skipFailed', 'forward', 'forward'),
   '--retry-failed': bool('retryFailed', 'forward', 'forward'),
   '--include-gitignored': bool('includeGitignored', 'forward', 'forward'),
-  '--no-bulk': bool('noBulk', 'forward', 'forward'),
+  '--no-bulk': managed(bool('noBulk', 'forward', 'forward')),
   '--working-tree': bool('workingTree', 'refuse', 'forward'),
   '--reset-checkpoint': bool('resetCheckpoint', 'refuse', 'forward'),
   '--lanes': { arity: 'value', field: 'lanes', type: 'number', serve: 'forward', owner: 'client' },
-  '--no-lanes': { arity: 'boolean', field: 'lanes', type: 'number', sets: 1, serve: 'forward', owner: 'client' },
+  '--no-lanes': managed({ arity: 'boolean', field: 'lanes', type: 'number', sets: 1, serve: 'forward', owner: 'client' }),
   '--repo': { arity: 'value', field: 'repoPath', type: 'string', serve: 'refuse', owner: 'forward' },
   '--src-subpath': { arity: 'value', field: 'srcSubpath', type: 'string', serve: 'refuse', owner: 'forward' },
   '--strategy': { arity: 'value', field: 'strategy', type: 'string', serve: 'refuse', owner: 'forward' },
   '--exclude': { arity: 'repeat', field: 'exclude', type: 'string[]', serve: 'refuse', owner: 'forward' },
   '--include-hidden': { arity: 'repeat', field: 'includeHidden', type: 'string[]', serve: 'refuse', owner: 'forward' },
-  '--timeout': local('value', 'client', 'client'),
-  '--hard-deadline': local('value', 'client', 'client'),
+  '--timeout': managed(local('value', 'client', 'client')),
+  '--hard-deadline': managed(local('value', 'client', 'client')),
   '--no-hard-deadline': local('boolean', 'client', 'client'),
-  '--json': local('boolean', 'client', 'client'),
+  '--json': managed(local('boolean', 'client', 'client')),
+  '--redact-paths': local('boolean'),
   '--yes': local('boolean', 'client', 'client'),
   '--no-delegate': local('boolean', 'client', 'client'),
-  '--all': local('boolean'),
+  '--all': managed(local('boolean')),
   '--watch': local('boolean'),
   '--interval': local('value'),
   '--workers': local('value'),
@@ -74,13 +78,16 @@ export const SYNC_FLAGS = {
   '--no-auto-embed': local('boolean'),
   '--missing-path': local('value'),
   '--acknowledge-managed': local('boolean'),
-  '--break-lock': local('boolean'),
+  '--break-lock': managed(local('boolean')),
   '--force-break-lock': local('boolean'),
   '--max-age': local('value'),
 } as const satisfies Record<string, SyncFlagSpec>;
 
 export type SyncFlag = keyof typeof SYNC_FLAGS;
 type Lane = 'serve' | 'owner';
+
+/** #6712 PR 3 (L7): the flags `gbrain sync --help` lists under "Managed brains", in table order. */
+export const MANAGED_HELP_FLAGS: SyncFlag[] = (Object.keys(SYNC_FLAGS) as SyncFlag[]).filter(flag => (SYNC_FLAGS[flag] as SyncFlagSpec).managed);
 
 /** The flags a hand-off takes the given route for. */
 export function syncFlagsRouted(lane: Lane, route: SyncFlagRoute): SyncFlag[] {

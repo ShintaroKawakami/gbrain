@@ -31,6 +31,7 @@ import { COVERAGE_KEY, factKey, pageKey, slugRef } from './keys.ts';
 import { appendBeliefEvents, type BeliefEventDraft } from './append.ts';
 import { appendDerivedHidden, bumpPurgeEpoch, derivedBeliefTargets, pageLifetimesOf, pagePurgeClaims, redactCarryingFields, redactPurgedKeys, registerLiveCarriers } from './purge.ts';
 import { derivedRowsFrom, hideDerivedRows, type DerivationRef } from '../facts/derivation-inputs.ts';
+import { writeOriginDeletedMarker } from '../persistence/sync-markers.ts';
 
 export const PURGE_MIRROR_FILE = 'purge-events.jsonl';
 
@@ -126,11 +127,11 @@ async function replayOne(tx: BrainEngine, intent: PurgeMirrorIntent, ledger: boo
   let inputs: DerivationRef[] = [];
   let removeRows = async () => {};
   if (intent.scope === 'page' && intent.slug) {
-    const [page] = await tx.executeRaw<{ id: number; slug: string }>(`SELECT p.id, p.slug FROM pages p WHERE p.source_id = $1 AND (p.content_hash = ANY($2::text[])
+    const [page] = await tx.executeRaw<{ id: number; slug: string; source_path: string | null }>(`SELECT p.id, p.slug, p.source_path FROM pages p WHERE p.source_id = $1 AND (p.content_hash = ANY($2::text[])
         ${ledger ? 'OR p.id IN (SELECT l.page_id FROM belief_page_lifetimes l WHERE l.source_id = $1 AND l.page_lifetime = ANY($3::uuid[]))' : 'OR $3::uuid[] IS NULL'})
       ORDER BY (p.slug = $4) DESC, p.id LIMIT 1`, [src, intent.content_hashes ?? [], intent.lifetimes, intent.slug]);
     if (page) {
-      const restored = { id: Number(page.id), slug: page.slug };
+      const restored = { id: Number(page.id), slug: page.slug, source_path: page.source_path };
       if (ledger) lifetimes = [...new Set([...lifetimes, ...await pageLifetimesOf(tx, src, restored.slug, restored.id)])];
       claims = (await pagePurgeClaims(tx, { sourceId: src, slug: restored.slug, pageId: restored.id, lifetimes: ledger ? lifetimes : [] })).claims;
       const owned = await tx.executeRaw<{ t: string; id: number }>(`SELECT 'facts' AS t, id FROM facts WHERE source_id = $1 AND source_markdown_slug = $2
@@ -138,7 +139,9 @@ async function replayOne(tx: BrainEngine, intent: PurgeMirrorIntent, ledger: boo
       inputs = [{ table: 'pages', id: restored.id }, ...owned.map(r => ({ table: r.t, id: Number(r.id) }))];
       removeRows = async () => {
         await tx.executeRaw('DELETE FROM facts WHERE source_id = $1 AND source_markdown_slug = $2', [src, restored.slug]);
-        await tx.deletePage(restored.slug, { sourceId: src });
+        await writeOriginDeletedMarker(tx, { sourceId: src, page: restored });
+        const { deletePageWithSegments } = await import('../persistence/page-purge.ts');
+        await deletePageWithSegments(tx, src, restored.slug, restored.id);
       };
     }
   } else {
@@ -150,13 +153,22 @@ async function replayOne(tx: BrainEngine, intent: PurgeMirrorIntent, ledger: boo
     claims = [...new Set([...rows.map(r => r.fact), ...takes.map(t => t.claim)])];
     inputs = [...rows.map(r => ({ table: 'facts', id: Number(r.id) })), ...takes.map(t => ({ table: 'takes', id: Number(t.id) }))];
     if (claims.length) removeRows = async () => {
-      const { rewritePageBodies, redactPageVersions } = await import('../facts/purge.ts');
+      const { rewritePageBodies, redactPageVersions, purgeSegmentStorage, stagingsHoldingClaim } = await import('../facts/purge.ts');
       const pages = await tx.executeRaw<{ slug: string; page_id: number; revision: string }>(`SELECT slug, id AS page_id, knowledge_revision::text AS revision FROM pages
         WHERE source_id = $1 AND (slug = ANY($2::text[]) OR id = ANY($3::int[]))`, [src, rows.map(r => r.slug).filter(Boolean), takes.map(t => Number(t.page_id))]);
+      const staged = [];
+      for (const claim of claims) staged.push(await stagingsHoldingClaim(tx, src, claim));
       await tx.executeRaw('DELETE FROM takes WHERE id = ANY($1::bigint[])', [takes.map(t => Number(t.id))]);
       await tx.executeRaw('DELETE FROM facts WHERE id = ANY($1::bigint[])', [rows.map(r => Number(r.id))]);
-      await rewritePageBodies(tx, src, pages.map(p => ({ ...p, page_id: Number(p.page_id) })));
-      for (const claim of claims) await redactPageVersions(tx, src, claim, pages.map(p => Number(p.page_id)));
+      const bodies = await rewritePageBodies(tx, src, pages.map(p => ({ ...p, page_id: Number(p.page_id) })));
+      const segmented = new Set(bodies.segmented), replaced = [...bodies.replaced];
+      for (const claim of claims) {
+        const versions = await redactPageVersions(tx, src, claim, pages.map(p => Number(p.page_id)));
+        for (const id of versions.segmentedPages) segmented.add(id);
+        replaced.push(...versions.replaced);
+      }
+      // As purge_fact does (spec 11): segment texts that held the claim go now, not at GC, with the stagings holding them.
+      for (const [i, claim] of claims.entries()) await purgeSegmentStorage(tx, src, claim, staged[i]!, [...segmented], replaced, intent.request);
     };
   }
   const walkable = (await tx.executeRaw<{ present: boolean }>("SELECT to_regclass('derivation_inputs') IS NOT NULL AS present"))[0]?.present === true;

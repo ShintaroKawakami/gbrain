@@ -50,7 +50,7 @@ import type { Notice } from '../core/agent-output.ts';
 import { opError, opOwnsSource } from '../core/ops/contract.ts';
 import { PAGE_MAX_BYTES } from '../core/page-size-policy.ts';
 import { opParamValue } from './op-param-values.ts';
-import { formatGetPage, readWholePageMarkdown, remoteErrorCode, wantsWholePage } from './page-render.ts';
+import { SEGMENTED_STREAMED, formatGetPage, printPagedPage, remoteErrorCode, streamSegmentedGet, wantsWholePage } from './page-render.ts';
 import { parseGlobalFlags, setCliOptions, getCliOptions } from '../core/cli-options.ts';
 import { runCliPreflight } from '../core/cli-preflight.ts';
 import { isBooleanLiteral, isKnownOpFlag } from '../core/op-flag-tokens.ts';
@@ -529,9 +529,9 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
 
   // v0.31.1 (Issue #734, CDX-1): parse CLI args BEFORE engine connect so
   // the routing seam below can decide local-vs-remote without paying a
-  // PGLite migration replay on thin-client installs. The arg parser, image
-  // transform, and required-param check are all engine-free; refactoring
-  // them out of the engine try/catch is safe and unlocks routing.
+  // PGLite migration replay on thin-client installs. The arg parser, image transform and required-param
+  // check are engine-free, so they run outside the engine try/catch. Wave B: put --file runs first (cli/commands/append.ts).
+  if (op.name === 'put_page' && subArgs.some(a => /^--file(=|$)/.test(a)) && await (await import('./commands/append.ts')).runPutFile(op, subArgs, { parse: parseOpArgs, connect: () => connectEngine(), format: formatResult })) return;
   const params = parseOpArgs(op, subArgs);
 
   // #3513: stdin fill moved out of parseOpArgs so a non-TTY stdin with no
@@ -677,7 +677,10 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
     if (op.scope === 'read') {
       try {
         rawResult = await withTimeout(
-          op.handler(ctx, params),
+          op.handler(ctx, params).catch(async (e: unknown) => { // large pages: a segmented page streams to stdout
+            if (op.name === 'get_page' && await streamSegmentedGet(engine, params, e, writeStdoutFinal)) return SEGMENTED_STREAMED;
+            throw e;
+          }),
           wallclockMs,
           `gbrain ${command}`,
         );
@@ -692,6 +695,7 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
       rawResult = await op.handler(ctx, params);
       if (op.mutating) await captureCapacityNotices(engine); // #6696 (A4)
     }
+    if (rawResult === SEGMENTED_STREAMED) return;
     // ENG-2 (renderer parity by data shape): JSON-round-trip the local-engine
     // path's return value so renderers see the same shape they'd see on the
     // routed path. Date → ISO string; bigint → string (postgres.js shape);
@@ -798,8 +802,7 @@ async function runThinClientRouted(
       ...(op.mutating ? { writeWaitMs: currentCliWriteWait().waitMs } : {}),
     }).catch(async (e: unknown) => { // large pages: a page too big for one response is paged to its end, verified, then printed
       if (op.name !== 'get_page' || remoteErrorCode(e) !== 'page_too_large_for_inline' || !wantsWholePage(params)) throw e;
-      const paged = await readWholePageMarkdown(async p => unpackToolResult(await callRemoteTool(cfg, 'get_page', p, { timeoutMs, signal: sigintController.signal })), params);
-      await writeStdoutFinal(params.json === true ? JSON.stringify({ slug: params.slug, revision: paged.revision, content: paged.markdown, windows: paged.windows }) + '\n' : paged.markdown);
+      await printPagedPage(async p => unpackToolResult(await callRemoteTool(cfg, 'get_page', p, { timeoutMs, signal: sigintController.signal })), params, writeStdoutFinal);
       return null;
     });
     if (raw === null) return;
@@ -1217,8 +1220,8 @@ export async function readStdinBounded(): Promise<string | null> {
 const NON_SCOPE_SOURCE_ID_OPS = new Set(['get_skill']);
 
 /**
- * Returns the ambient binding (GBRAIN_SOURCE / .gbrain-source) that was mapped
- * onto `source_id`, so an empty result can say what narrowed it; null when the
+ * Returns the ambient binding (GBRAIN_SOURCE / .gbrain-source) mapped onto `source_id`
+ * (`prefer_source_id` on ops that declare it: it orders a lookup, never narrows it); null when the
  * scope came from a flag or nothing was mapped.
  */
 export function applyThinClientSourceScope(
@@ -1247,7 +1250,7 @@ export function applyThinClientSourceScope(
     }
     return null; // ambient env/dotfile scope with nowhere to send it
   }
-  params.source_id = resolved;
+  params[!explicit && 'prefer_source_id' in op.params ? 'prefer_source_id' : 'source_id'] = resolved;
   if (explicit) return null;
   const env = process.env.GBRAIN_SOURCE;
   return { sourceId: resolved, via: env && env.length > 0 ? 'GBRAIN_SOURCE' : '.gbrain-source' };
@@ -1302,7 +1305,7 @@ export function validateCommandFlags(command: string, subArgs: string[]): string
     return findUnknownFlag(subArgs, new Set(legal));
   }
   const op = cliOps.get(command) ?? cliAliases.get(command);
-  if (op) return findUnknownOpFlag(op, subArgs);
+  if (op) return findUnknownOpFlag(op, op.name === 'put_page' ? subArgs.filter((a, i) => !/^--file(=|$)/.test(a) && subArgs[i - 1] !== '--file') : subArgs); // put --file: cli/commands/append.ts
   return null; // unknown command — the dispatcher's own error handles it
 }
 
@@ -2436,8 +2439,9 @@ async function prepareConnectedDispatch(command: string, args: string[]): Promis
   // the only thing that stops the cron orphan-pileup. Disposed in the finally.
   let syncWatchdog: { dispose(): void } | null = null;
   // #6340: `sync status` / `sync unblock` read and schedule on the brain's own engine: no watchdog, no serve delegation (a delegate would refuse the subcommand).
-  const syncOperator = command === 'sync' && (args[0] === 'status' || args[0] === 'unblock');
+  const syncOperator = command === 'sync' && (await import('../commands/sync/operator.ts')).syncOperatorVerb(args) !== null;
   if (command === 'sync' && !syncOperator) {
+    (await import('../commands/sync/args.ts')).noteRetryFailedDeprecated(args);
     try {
       const { resolveSyncHardDeadline } = await import('../commands/sync.ts');
       const res = resolveSyncHardDeadline(args, {
@@ -2463,7 +2467,8 @@ async function prepareConnectedDispatch(command: string, args: string[]): Promis
   // LiveServeLockError — instead the sync runs INSIDE the serve over its IPC
   // socket (commands/sync-delegate.ts). Handled === delegated or politely
   // refused (exit verdict set inside); false falls through unchanged.
-  if (command === 'sync' && !syncOperator) {
+  if (command === 'sync' && args[0] === 'trigger' && await (await import('../commands/sync-delegate.ts')).maybeTriggerThroughServe(loadConfig(), args.slice(1))) return null;
+  if (command === 'sync' && !syncOperator && args[0] !== 'trigger') {
     const cfgSync = loadConfig();
     if (await (await import('../commands/sync-persistence-delegate.ts')).maybeDelegateSyncToPersistence(cfgSync, args)) return null;
     if (cfgSync?.engine === 'pglite' && cfgSync.database_path && !cfgSync.database_url) {
@@ -2929,6 +2934,7 @@ const OP_HELP_EXAMPLES: Record<string, string[]> = {
     'gbrain links people/alice-example                    # resolved source (every federated source when unpinned)',
     'gbrain links people/alice-example --source business  # one source',
     'gbrain links people/alice-example --all-sources      # every source',
+    'gbrain links people/alice-example --limit 100        # 500 rows per call by default; --cursor <next_cursor> continues, --all reads every row',
   ],
   get_backlinks: [
     'gbrain backlinks companies/acme-example',
