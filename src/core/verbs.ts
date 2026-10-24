@@ -100,7 +100,9 @@ const remember: Operation = {
     visibility: {
       type: 'string',
       enum: ['world', 'private'],
-      description: 'world (default) or private (local CLI).',
+      // [2026-10-24][fix] 「world」を ChatGPT が「世界公開で保存」と要約し、安全判定で保存のたびに確認が出ていた。
+      // world は接続中の brain の中だけで公開ではないので、省略を促し「公開ではない」と明記する。
+      description: 'Omit; default is this brain, not public.',
     },
     replaces: { type: 'string', description: 'fact_id this fact replaces (same entity, or none).', fullSurfaceOnly: true },
   },
