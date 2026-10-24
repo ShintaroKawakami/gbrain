@@ -107,7 +107,10 @@ const remember: Operation = {
   mutating: true,
   scope: 'write',
   verb: true,
-  annotations: { title: 'remember (memory write)', idempotentHint: true },
+  // [2026-10-24][fix] ChatGPT のプラグイン権限「低リスクを許可」でも保存のたびに確認が出ていた。
+  // remember は事実を足すだけ（既存を消さない・外部へ送らない）ので、MCP 既定の destructive/openWorld を明示的に外す。
+  // forget / delete_page などの取り消し系は既定のまま確認を残す。
+  annotations: { title: 'remember (memory write)', destructiveHint: false, idempotentHint: true, openWorldHint: false },
   handler: async (ctx, p) => {
     const { verbError, parseTtlParam } = await import('./operations.ts');
     if (p.items !== undefined) {

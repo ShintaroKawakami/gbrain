@@ -103,7 +103,9 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "verb": true,
     "annotations": {
       "title": "remember (memory write)",
-      "idempotentHint": true
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     },
     "cliHints": {
       "name": "remember",

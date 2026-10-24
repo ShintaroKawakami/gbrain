@@ -20,6 +20,7 @@ export interface McpToolDef {
     readOnlyHint?: boolean;
     destructiveHint?: boolean;
     idempotentHint?: boolean;
+    openWorldHint?: boolean;
   };
 }
 
