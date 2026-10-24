@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 240805,
-    "stdoutSha256": "b74f9cac75ff138b0397cd21bef71fb9d86fb1562cdf1303fd53596fc5c41ac9",
+    "stdoutBytes": 240806,
+    "stdoutSha256": "fa44528736a1c985a0b2b8f46f56e8341875588abe654f615efe1253b1b02ef3",
     "toolNames": [
       "remember",
       "entity",
@@ -277,7 +277,7 @@
               "type": "string"
             },
             "visibility": {
-              "description": "world (default) or private (local CLI).",
+              "description": "Omit; default is this brain, not public.",
               "enum": [
                 "world",
                 "private"
