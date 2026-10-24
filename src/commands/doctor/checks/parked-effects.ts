@@ -64,12 +64,17 @@ export async function checkParkedEffects(engine: BrainEngine, sourceIds?: string
     const reclaims = recentIndexLockReclaims();
     // #7010: per source, Git effects whose commit did not reach the remote, with the one command that moves them.
     const pushHolds = await (await import('../../../core/persistence/git-push-holds.ts')).readGitPushHolds(engine, sourceIds);
-    const details = { parked_effects: count, exact: true, inspected: rows.length, truncated: count > rows.length, effects, git_push_holds: pushHolds, ...(reclaims ? { index_lock_reclaims: reclaims } : {}) };
+    // GBRA-133: per source, effects that have waited on a busy worktree for over 10 minutes (a catch-up that does not move).
+    const stalled = await (await import('../../../core/persistence/effect-catchup.ts')).readStalledCatchups(engine, sourceIds);
+    const details = { parked_effects: count, exact: true, inspected: rows.length, truncated: count > rows.length, effects, git_push_holds: pushHolds,
+      ...(stalled.length ? { stalled_catchups: stalled } : {}), ...(reclaims ? { index_lock_reclaims: reclaims } : {}) };
     const conflicts = pushHolds.filter(hold => hold.conflict);
     const pushNote = pushHolds.length ? ' Git backups not pushed: ' + pushHolds.map(hold => `${hold.source_id} ${hold.retrying} retrying, ${hold.parked} parked (${hold.codes.join(', ')})${hold.conflict
       ? `, CONFLICT in ${hold.conflict.paths.join(', ')}: ask the user which version wins (${hold.fix.argv?.join(' ')})` : hold.parked ? `: ${hold.fix.argv?.join(' ')}` : ''}`).join(' | ') + '.' : '';
-    if (!count && conflicts.length) return { name: 'parked_effects', status: 'warn', details,
-      message: `No effect is parked yet, but Git backups are held by a conflict between this machine and the remote.${pushNote}` };
+    const stalledNote = stalled.length ? ' Catch-up not progressing: ' + stalled.map(item => `${item.source_id} ${item.stalled_effects} effect(s) have waited on a busy canonical worktree since ${item.busy_since} `
+      + `(${item.busy_effects} waiting now, up to ${item.busy_retries} busy retries); see who holds it: ${item.fix.argv?.join(' ')}`).join(' | ') + '.' : '';
+    if (!count && (conflicts.length || stalled.length)) return { name: 'parked_effects', status: 'warn', details,
+      message: `No effect is parked yet, but ${conflicts.length ? 'Git backups are held by a conflict between this machine and the remote' : 'a backlog of effects is not moving'}.${pushNote}${stalledNote}` };
     if (!count) return { name: 'parked_effects', status: 'ok', message: `No Git or withdrawal effect is parked.${pushNote}${reclaims ? reclaimNote(reclaims) : ''}`, details };
     const listed = effects.map(effect => `${effect.kind} ${effect.source_id}: ${effect.parked.map(target =>
       `${target.slug ?? '(whole effect)'} (${target.error_code})`).join(', ')}; ${'exit' in effect ? effect.exit : effect.command}`);
@@ -79,7 +84,7 @@ export async function checkParkedEffects(engine: BrainEngine, sourceIds?: string
         (count > rows.length ? ` (first ${rows.length} of ${count} shown)` : '') +
         (effects.some(effect => effect.parked.some(target => target.error_code === 'git_target_pending'))
           ? '. git_target_pending: Git still lists a removed page file in the index; on Windows close the program holding it open (a sync watcher, indexer or antivirus), check with `git -c core.fscache=false status` on the brain host, then run the retry command.' : '') +
-        pushNote + (reclaims ? reclaimNote(reclaims) : '') };
+        pushNote + stalledNote + (reclaims ? reclaimNote(reclaims) : '') };
   } catch (error) {
     return { name: 'parked_effects', status: 'warn',
       message: `Parked effects could not be read: ${error instanceof Error ? error.message : String(error)}. Health is unknown.`,

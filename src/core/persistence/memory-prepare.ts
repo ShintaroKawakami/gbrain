@@ -10,6 +10,7 @@ import { serializePageToMarkdown } from '../markdown.ts';
 import { pageBodyOverCeilingError } from '../page-body/page-shape.ts';
 import { materializedPage, segmentedOverCeiling } from './segmented-apply.ts';
 import { assertFactNotWithdrawn, decideReplacement, decideSingleFact, prepareFactEmbedding, type SingleFactIntent } from '../facts/single-prepare.ts';
+import { supersededValidUntil } from '../facts/supersede-interval.ts';
 import { factEmbeddingDisabled } from '../embedding-disabled.ts';
 import { engineMutationPrecondition, parseMutationPrecondition } from './preconditions.ts';
 import { preparePageMutation } from './page-prepare.ts';
@@ -29,6 +30,7 @@ import { pageFencesNormalized } from '../fence-repair/report.ts';
 import { fenceAppendPendingTier, withPendingFenceRows } from '../eligibility/fence-overlay.ts';
 import { withPageTierKept } from '../trust/fence-append.ts';
 import { privateProvenanceFilterFragment, resolveExcludePrivatePages } from '../search/private-visibility.ts';
+import { tightenToPage } from '../facts/visibility.ts';
 import { noteBelief } from '../belief/ledger.ts';
 
 function receiptFix(row: WriteRequest): Action {
@@ -84,6 +86,8 @@ export async function prepareMemoryMutation(engine: BrainEngine, row: WriteReque
     visibility: (p.visibility ?? 'world') as SingleFactIntent['visibility'], entity_slug: p.entity_slug as string | null };
   const snapshot = await engine.readPageSnapshot(row.slug, { sourceId: row.source_id, includeDeleted: true });
   if ((snapshot?.page.id ?? null) !== row.page_id) throw pageIdentityError(snapshot != null || row.page_id === null, 'The accepted entity was deleted or recreated.');
+  // A defaulted visibility never lands broader than the target page as it stands at publication.
+  if (p.visibility_defaulted === true && snapshot) input.visibility = tightenToPage(input.visibility, snapshot.page);
   if (p.expected_revision !== undefined) assertPageRevision(snapshot, engineMutationPrecondition(parseMutationPrecondition(p)));
   const observedRevision = snapshot?.revision ?? null;
   const excludePrivate = await resolveExcludePrivatePages(engine, row.authority.remote === true);
@@ -143,6 +147,7 @@ export async function prepareMemoryMutation(engine: BrainEngine, row: WriteReque
     input: gateInput(requestChannelTrust(row) ?? { tier: 'unknown', origin: null }, row.id), cfg: await loadWriteGateConfig(engine) });
   if (gate.action === 'reject') throw writeGateRejectedError(gate.assessment);
   if (gate.action === 'hold') return { observedRevision, validate, apply: async tx => heldOutcome(gate.assessment, (await recordWriteGateHold(tx, gate.hold!)).holdId) };
+  const retiredUntil = status === 'superseded' ? supersededValidUntil(decision.candidate!, validFrom) : null;
   let page: PreparedMutation | undefined;
   let rowNum: number | undefined;
   let fencesNormalized: Record<string, unknown> = {};
@@ -167,7 +172,9 @@ export async function prepareMemoryMutation(engine: BrainEngine, row: WriteReque
     rowNum = appended.rowNum;
     let next = { ...fenced, [section]: appended.body };
     const old = decision.candidate;
-    if (status === 'superseded' && old?.source_markdown_slug === row.slug && old.row_num != null) next = strikeFactRowInPage(next, Number(old.row_num), rowNum);
+    if (status === 'superseded' && old?.source_markdown_slug === row.slug && old.row_num != null) {
+      next = strikeFactRowInPage(next, Number(old.row_num), rowNum, retiredUntil ? formatFenceDate(retiredUntil) : undefined);
+    }
     const content = serializePageToMarkdown({ ...base, ...next }, snapshot.tags);
     // Reuse the canonical parser/chunker and durable filesystem publication.
     // The original caller revision was checked above; this CAS binds this render.
@@ -198,8 +205,8 @@ export async function prepareMemoryMutation(engine: BrainEngine, row: WriteReque
       id = inserted.id;
     }
     if (status === 'superseded') {
-      await tx.executeRaw(`UPDATE facts SET expired_at=now(),superseded_by=$3
-      WHERE id=$1 AND source_id=$2 AND expired_at IS NULL`, [decision.candidate!.id, row.source_id, id]);
+      await tx.executeRaw(`UPDATE facts SET expired_at=now(),superseded_by=$3,valid_until=COALESCE($4::timestamptz,valid_until)
+      WHERE id=$1 AND source_id=$2 AND expired_at IS NULL`, [decision.candidate!.id, row.source_id, id, retiredUntil]);
       noteBelief({ kind: 'superseded', oldId: Number(decision.candidate!.id), newId: id });
     }
     const contestedBy = contestedOld ? await recordContestedFact(tx, { sourceId: row.source_id, oldId: contestedOld.id,

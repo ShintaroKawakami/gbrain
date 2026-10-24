@@ -316,7 +316,7 @@ export async function gitRootAhead(root: string, signal?: AbortSignal): Promise<
 }
 
 /** Git's refusal of a push because the remote branch moved (LC_ALL=C keeps it untranslated). */
-const NON_FAST_FORWARD = /\[rejected\][^\n]*\((?:non-fast-forward|fetch first)\)/;
+export const NON_FAST_FORWARD = /\[rejected\][^\n]*\((?:non-fast-forward|fetch first)\)/;
 
 /**
  * Push the current branch to its tracking remote. A plain push is tried first (idempotent, cannot import remote

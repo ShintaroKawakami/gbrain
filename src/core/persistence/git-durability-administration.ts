@@ -21,6 +21,7 @@ import { execFileBounded } from '../bounded-child-exec.ts';
 import { classifyGitCheckout } from '../git-checkout.ts';
 import { durableSsrfFlags, GIT_ENV, GIT_ENV_AUTH, GIT_SSRF_SUBCOMMAND_FLAGS } from '../git-remote.ts';
 import { gitChildEnv } from '../git-env.ts';
+import { NON_FAST_FORWARD } from './effect-git.ts';
 import { ensureGbrainHome, resolveGbrainHome } from '../gbrain-home.ts';
 import { OperationError, opError } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
@@ -100,14 +101,22 @@ export async function inspectDurabilityCheckout(root: string): Promise<{ branch:
   return { branch, remote: tracked ? remote.stdout.trim() : null, merge: tracked ? merge.stdout.trim() : null };
 }
 
-export type PushProbe = { ok: true; skipped?: 'no_tracking_remote' } | { ok: false; reason: 'auth' | 'protected' | 'unreachable' | 'other'; detail: string };
+export type PushProbe = { ok: true; skipped?: 'no_tracking_remote'; remote_moved?: true; detail?: string }
+  | { ok: false; reason: 'auth' | 'protected' | 'unreachable' | 'other'; detail: string };
 
-/** `git push --dry-run` to the branch's tracking remote: proves push authority without a commit; the same refspec the Git effect pushes. */
+/**
+ * `git push --dry-run` to the branch's tracking remote: proves push authority without a commit; the same refspec the Git effect pushes.
+ * GBRA-133: a rejection only because the remote moved (`fetch first`, `non-fast-forward`) comes after the remote accepted
+ * the push connection, and the Git effect publishes that case itself (it merges the remote commits in memory and pushes,
+ * #7010, `pushGitRoot`), so the probe passes it with `remote_moved`. Auth, protected-branch and unreachable refusals still fail.
+ */
 export async function probeDurabilityPush(root: string, checkout: { remote: string | null; merge: string | null }, redact: (s: string) => string): Promise<PushProbe> {
   if (!checkout.remote || !checkout.merge) return { ok: true, skipped: 'no_tracking_remote' };
   const push = await git(root, ['push', ...GIT_SSRF_SUBCOMMAND_FLAGS, '--dry-run', '--', checkout.remote, `HEAD:${checkout.merge}`], true);
   if (push.code === 0) return { ok: true };
   const detail = redact(`${push.stderr}\n${push.stdout}`).replace(/\s+/g, ' ').trim().slice(0, 200);
+  if (NON_FAST_FORWARD.test(push.stderr)) return { ok: true, remote_moved: true,
+    detail: 'the remote branch has commits this checkout lacks; the Git effect merges them in memory and pushes the merge (#7010) without pulling into the checkout, and holds a same-file conflict as integrate_conflict for the user to choose' };
   const low = detail.toLowerCase();
   const reason = low.includes('authentication') || low.includes('403') || low.includes('permission') || low.includes('could not read') ? 'auth'
     : low.includes('protected') || low.includes('pre-receive') || low.includes('hook declined') ? 'protected'

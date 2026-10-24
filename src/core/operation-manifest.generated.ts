@@ -142,6 +142,11 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         "type": "string",
         "description": "Source to try first (thin clients send .gbrain-source here); never narrows.",
         "fullSurfaceOnly": true
+      },
+      "variants": {
+        "type": "boolean",
+        "description": "false: exact names only. Default true: with no exact match, one unambiguous name variant (card.match says which).",
+        "fullSurfaceOnly": true
       }
     },
     "scope": "read",
@@ -234,7 +239,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "outputRedaction": {
       "exempt": "explicit page read by slug/id; governed by page visibility, not output redaction (CEO-17 raw-read exception)"
     },
-    "description": "Read a page by slug. To edit: include_content:true, send `content` to put_page; or edit_page. >256 KB: outline+window, then `next`.",
+    "description": "Read a page; `section` or `grep` reads one part. Edit: include_content:true, `content` to put_page, or edit_page. >256 KB: outline+window, then `next`.",
     "params": {
       "slug": {
         "type": "string",
@@ -243,15 +248,15 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "fuzzy": {
         "type": "boolean",
-        "description": "Fuzzy slug match."
+        "description": "Fuzzy match."
       },
       "include_content": {
         "type": "boolean",
-        "description": "Markdown + revision, to edit."
+        "description": "Markdown + revision."
       },
       "content_only": {
         "type": "boolean",
-        "description": "Round-trip fields only."
+        "description": "Round-trip fields."
       },
       "body": {
         "type": "string",
@@ -267,6 +272,10 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "lines": {
         "type": "object",
+        "cliRange": [
+          "from",
+          "count"
+        ],
         "description": "Window: 1-based lines.",
         "properties": {
           "from": {
@@ -282,6 +291,10 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "bytes": {
         "type": "object",
+        "cliRange": [
+          "offset",
+          "length"
+        ],
         "description": "Window: UTF-8 bytes of size.total_bytes, not body_bytes (snapped to a line start).",
         "properties": {
           "offset": {
@@ -329,13 +342,28 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         "description": "Outline next_from_index.",
         "fullSurfaceOnly": true
       },
+      "section": {
+        "type": "string",
+        "description": "Only the section under this heading (case-insensitive, first match), with its heading_path.",
+        "fullSurfaceOnly": true
+      },
+      "grep": {
+        "type": "string",
+        "description": "Only the paragraphs containing this text (case-insensitive substring, not a regex), with line numbers and total_matches.",
+        "fullSurfaceOnly": true
+      },
+      "context": {
+        "type": "number",
+        "description": "With grep: paragraphs of context either side (default 1, max 5).",
+        "fullSurfaceOnly": true
+      },
       "include_deleted": {
         "type": "boolean",
         "description": "Soft-deleted too."
       },
       "include_timeline_entries": {
         "type": "boolean",
-        "description": "Timeline rows too."
+        "description": "Timeline rows."
       },
       "grammar_diagnostics": {
         "type": "boolean",
@@ -514,7 +542,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "name": "list_pages",
     "idempotent": true,
     "outputRedaction": "retrieval",
-    "description": "List pages with filters. For 'what's recent / what did I touch this week' use sort=updated_desc. Default 50 rows; truncated: continue with updated_after + updated_after_slug from the last row.",
+    "description": "List pages by type, slug_prefix, frontmatter where; what did I touch this week: sort=updated_desc. Default 50; truncated: continue with updated_after + updated_after_slug from the last row.",
     "params": {
       "type": {
         "type": "string",
@@ -553,6 +581,17 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "include_deleted": {
         "type": "boolean",
         "description": "Include soft-deleted pages."
+      },
+      "slug_prefix": {
+        "type": "string",
+        "description": "Literal slug prefix, e.g. 'deals/'.",
+        "fullSurfaceOnly": true
+      },
+      "where": {
+        "type": "object",
+        "cliKeyValue": true,
+        "fullSurfaceOnly": true,
+        "description": "Frontmatter equality, e.g. {status: \"active\"}; a list matches any."
       },
       "source_id": {
         "type": "string",
@@ -1135,6 +1174,11 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         "type": "string",
         "required": true,
         "description": "The id you sent, or the receipt's."
+      },
+      "applied": {
+        "type": "boolean",
+        "fullSurfaceOnly": true,
+        "description": "Also return applied: searchable yet, the gap, the write watermark."
       }
     },
     "scope": "write",
@@ -1269,6 +1313,12 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         },
         "description": "Page types, e.g. ['person']."
       },
+      "where": {
+        "type": "object",
+        "cliKeyValue": true,
+        "fullSurfaceOnly": true,
+        "description": "Frontmatter equality, e.g. {status: \"active\"}; a list matches any."
+      },
       "snippet_chars": {
         "type": "number",
         "description": "Chars per row (0 = full)."
@@ -1346,7 +1396,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "name": "query",
     "idempotent": true,
     "outputRedaction": "retrieval",
-    "description": "Hybrid search for concept/landscape questions and people/companies/projects by topic; expand adds multi-query expansion (expansion recovers synonyms). Still top-K; return_unit: sections or conversations. Lists: list_pages. Exact tokens: `search` is cheaper (no LLM call). Personal: get_recent_salience, find_anomalies; transcripts: `gbrain transcripts recent`. Do NOT assume 'crazy' means impressive (often difficult or emotionally charged). Needs an embedding key (else keyword-only); expansion needs a chat key. Fact rows: use follow_up. fields: \"full\" adds diagnostics.",
+    "description": "Hybrid search for concept/landscape questions and people/companies/projects by topic; adds fact rows. expand: one LLM call (expansion recovers synonyms; rarely helps). Still top-K; return_unit: sections or conversations. Lists: list_pages. Exact tokens: `search` is cheaper. Personal: get_recent_salience, find_anomalies; transcripts: `gbrain transcripts recent`. Do NOT assume 'crazy' means impressive (often difficult or emotionally charged). Needs an embedding key (else keyword-only); expansion needs a chat key. Fact rows: use follow_up. fields: \"full\" adds diagnostics.",
     "params": {
       "query": {
         "type": "string",
@@ -1376,6 +1426,12 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         },
         "description": "Page types, e.g. ['person']."
       },
+      "where": {
+        "type": "object",
+        "cliKeyValue": true,
+        "fullSurfaceOnly": true,
+        "description": "Frontmatter equality, e.g. {status: \"active\"}; a list matches any."
+      },
       "snippet_chars": {
         "type": "number",
         "description": "Chars per row (0 = full)."
@@ -1401,7 +1457,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "expand": {
         "type": "boolean",
-        "description": "Default off; search.expansion overrides."
+        "description": "Default off; one LLM call, rarely helps."
       },
       "detail": {
         "type": "string",
@@ -1633,6 +1689,72 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "description": "Semantic query-cache introspection: resolved knobs (enabled, similarity threshold, TTL) plus row counts and total hits. Read-only; clearing/pruning the cache stays on the CLI.",
     "params": {},
     "scope": "admin",
+    "area": "search"
+  },
+  {
+    "name": "search_exact",
+    "mutating": false,
+    "idempotent": true,
+    "outputRedaction": "retrieval",
+    "scope": "read",
+    "description": "Find every page containing a literal phrase or identifier, exhaustively: use instead of grep. Unranked; returns every match in page order with snippets, and complete: true only when every page you can read was scanned. Literal: words in order with any whitespace between them, case-insensitive unless case_sensitive; no stemming, punctuation literal (ranked search treats quotes as a stemmed phrase). When complete is false, incomplete_reasons says why: deadline or limit (call again with after: resume_after), or unreadable_pages (pages whose text is not indexed yet, listed under unreadable).",
+    "params": {
+      "phrase": {
+        "type": "string",
+        "required": true,
+        "description": "The literal text, e.g. 'INV-2024-0042' or 'quarterly board pack'."
+      },
+      "case_sensitive": {
+        "type": "boolean",
+        "description": "Match case exactly (default false)."
+      },
+      "source_id": {
+        "type": "string",
+        "description": "Only this source; '__all__' spans every source you can read."
+      },
+      "types": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Only these page types, e.g. ['meeting']."
+      },
+      "slug_prefix": {
+        "type": "string",
+        "description": "Only slugs starting with this, e.g. 'meetings/'."
+      },
+      "limit": {
+        "type": "number",
+        "description": "Matching pages to return (default 100, max 1000)."
+      },
+      "after": {
+        "type": "number",
+        "description": "Resume a bounded scan: the resume_after of the previous call."
+      },
+      "max_seconds": {
+        "type": "number",
+        "description": "Scan budget in seconds (default 30, max 120)."
+      },
+      "min_trust": {
+        "type": "string",
+        "enum": [
+          "user_confirmed",
+          "operator_curated",
+          "tool_observed",
+          "agent_written",
+          "unknown",
+          "external_untrusted"
+        ],
+        "description": "Lowest trust tier to return (the connection floor still applies).",
+        "fullSurfaceOnly": true
+      }
+    },
+    "cliHints": {
+      "name": "search-exact",
+      "positional": [
+        "phrase"
+      ]
+    },
     "area": "search"
   },
   {
@@ -3475,6 +3597,29 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "area": "jobs"
   },
   {
+    "name": "wait_job",
+    "mutating": false,
+    "idempotent": true,
+    "outputRedaction": {
+      "exempt": "admin-scoped job introspection: job params and results are operator data, not retrieved brain text"
+    },
+    "description": "Wait until a job is completed, failed, dead or cancelled (at most 55 s per call), then return it like get_job plus terminal. terminal: false means it is still running: call again. Agent-scoped tokens (no admin) wait only on jobs they own.",
+    "params": {
+      "id": {
+        "type": "number",
+        "required": true,
+        "description": "Job ID"
+      },
+      "timeout_s": {
+        "type": "number",
+        "description": "Seconds to wait (default 30, at most 55)."
+      }
+    },
+    "scope": "admin",
+    "agentCallable": true,
+    "area": "jobs"
+  },
+  {
     "name": "list_jobs",
     "mutating": false,
     "idempotent": true,
@@ -3497,7 +3642,11 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "limit": {
         "type": "number",
-        "description": "Max results (default: 50)"
+        "description": "Max results (default 50); MCP callers are capped at 500 per call."
+      },
+      "cursor": {
+        "type": "string",
+        "description": "next_cursor from the last job of the previous page (it carries truncated: true): returns the next older jobs."
       },
       "fields": {
         "type": "array",
@@ -3505,6 +3654,10 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
           "type": "string"
         },
         "description": "Return only these job fields (e.g. [\"id\",\"name\",\"status\"]) to save tokens; omit for every field."
+      },
+      "finished_since": {
+        "type": "string",
+        "description": "Terminal-event cursor: an ISO time or the next_cursor of the previous call. Returns {jobs, next_cursor}: jobs that finished after it, oldest first."
       }
     },
     "scope": "admin",
@@ -3719,7 +3872,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "mutating": false,
     "idempotent": true,
     "outputRedaction": "no_stored_text",
-    "description": "Job queue statistics. PER-BLOCK scoping: by_status and queue_health are GLOBAL (unfiltered); by_type is windowed by since_hours; only the wedge block is scoped to the queue param. wedged: true is the silent-halt signal (a worker is alive but claiming nothing while work waits) — suggest restarting the jobs supervisor on the brain host. no_worker: true means work is waiting and NO worker is running for the queue (always on PGLite unless a gbrain jobs work drain is live); wedged is then false and the no_worker notice names the fix. private_queue: true means the queue is a parent-owned dream-inline queue: wedged is NEVER true for it and a worker restart cannot help — recovery runs automatically at worker spawn / dream-cycle start; suggest gbrain doctor for the per-queue verdict. Host-process diagnostics (renice, backpressure hints) stay on the gbrain jobs stats CLI.",
+    "description": "Job queue statistics. PER-BLOCK scoping: by_status and queue_health are GLOBAL (unfiltered); by_type is windowed by since_hours; only the wedge block is scoped to the queue param. wedged: true is the silent-halt signal (a worker is alive but claiming nothing while work waits) — suggest restarting the jobs supervisor on the brain host. no_worker: true means work is waiting and NO worker is running for the queue (always on PGLite unless a gbrain jobs work drain is live); wedged is then false and the no_worker notice names the fix. private_queue: true means the queue is a parent-owned dream-inline queue: wedged is NEVER true for it and a worker restart cannot help — recovery runs automatically at worker spawn / dream-cycle start; suggest gbrain doctor for the per-queue verdict. by_queue has one row per queue (every dream-inline-* queue folded into one dream-inline row). Host-process diagnostics (renice, backpressure hints) stay on the gbrain jobs stats CLI.",
     "params": {
       "queue": {
         "type": "string",
@@ -3756,11 +3909,15 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "limit": {
         "type": "number",
-        "description": "Rows per page (default 100, max 1000); total_orphans counts every orphan and next_offset names the next page."
+        "description": "Rows per page (default 100, max 1000); total_orphans counts every orphan, complete says whether this page holds the rest, and next_cursor (or next_offset) names the next page."
       },
       "offset": {
         "type": "number",
         "description": "Skip the first N orphans (ordered by source_id, then slug)."
+      },
+      "cursor": {
+        "type": "string",
+        "description": "next_cursor from the previous page, with the same filters (instead of offset)."
       },
       "count_only": {
         "type": "boolean",
@@ -3771,6 +3928,52 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "cliHints": {
       "name": "orphans",
       "hidden": true
+    },
+    "area": "links"
+  },
+  {
+    "name": "rank_entities",
+    "mutating": false,
+    "idempotent": true,
+    "outputRedaction": "retrieval",
+    "scope": "read",
+    "description": "Rank pages by graph connections: the most-linked people, companies or other entities. Use instead of counting link rows yourself. An edge is a distinct (from page, to page, link_type) between live pages in scope: self-links, links to deleted pages, non-ranking types (amends) and, unless include_mentions, mention rows do not count; several provenance rows for one edge count once. inbound/outbound count edges, neighbors counts distinct linked pages. A redirect stub (canonical: false, superseded_by, merged_into) is folded into its live target in the same source (listed under folded) and its edges count once; title-prefixed person duplicates are listed under possible_duplicates, never merged. Ties order by slug, then source_id. coverage.state is behind when link extraction lags, so counts cover only extracted pages.",
+    "params": {
+      "direction": {
+        "type": "string",
+        "enum": [
+          "in",
+          "out",
+          "both"
+        ],
+        "description": "Rank by 'in' (inbound edges, default), 'out' (outbound edges) or 'both' (inbound + outbound)."
+      },
+      "types": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Page types to rank, e.g. ['person']. Default: the schema pack's entity types."
+      },
+      "source_id": {
+        "type": "string",
+        "description": "Only this source (it must be inside your source grant); '__all__' spans every source you can read. Both ends of a counted edge stay in scope."
+      },
+      "link_type": {
+        "type": "string",
+        "description": "Count only edges of this link type, e.g. works_at."
+      },
+      "include_mentions": {
+        "type": "boolean",
+        "description": "Also count mention links (link_source mentions); default false."
+      },
+      "limit": {
+        "type": "number",
+        "description": "Rows to return (default 20, max 100)."
+      }
+    },
+    "cliHints": {
+      "name": "rank-entities"
     },
     "area": "links"
   },
@@ -4507,6 +4710,34 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "name": "sources_inspect",
       "hidden": true
     }
+  },
+  {
+    "name": "sources_resolve_path",
+    "mutating": false,
+    "idempotent": true,
+    "outputRedaction": "no_stored_text",
+    "description": "Read-only: what gbrain did with each file path of a source, by its own rules. Per path: the slug sync gives it, whether sync skips it (metafile, excluded, pruned) and why, its sync hold, its page with chunk and embedding counts, whether search finds it now, and the command that moves it on. A deleted path is checked by the page that records it as its origin, never by slug. Use it in landing checks instead of re-implementing slugging. Confined to the caller's source scope.",
+    "params": {
+      "id": {
+        "type": "string",
+        "required": true,
+        "description": "Source id, as listed by sources_list (e.g. 'default')."
+      },
+      "paths": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "required": true,
+        "description": "File paths relative to the source root (or to the Git top level), at most 200, e.g. the paths a commit changed."
+      }
+    },
+    "scope": "read",
+    "cliHints": {
+      "name": "sources_resolve_path",
+      "hidden": true
+    },
+    "area": "sources"
   },
   {
     "name": "request_tools",

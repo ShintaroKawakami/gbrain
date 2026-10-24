@@ -104,7 +104,7 @@ import { writeReceipt, shortRunId } from '../core/extract/receipt-writer.ts';
 import { upsertExtractRollup, classifyRunStop } from '../core/extract/rollup-writer.ts';
 import { ALLOWED_TYPES, ALLOWED_TYPE_ALIASES, isConversationFactsEligiblePage, pageTypesForAllowed, requireParseableConversationFlag, type AllowedType } from '../core/facts/conversation-types.ts';
 import { TERMINAL_AUDIT_SOURCE, NON_EXTRACTABLE_AUDIT_SOURCE, stampExtractorVersion } from '../core/facts/audit-sources.ts';
-import { resolveDefaultVisibility, type FactVisibility } from '../core/facts/visibility.ts';
+import { resolveDefaultVisibility, tightenToPage, type FactVisibility } from '../core/facts/visibility.ts';
 import {
   emptySaveTimeResolutionCounts,
   formatSaveTimeResolutionCounts,
@@ -641,7 +641,7 @@ function logLockBusyRateLimited(sourceId: string, slug: string): void {
  * active batch and the facts inserted.
  */
 function publishPageFacts(state: ExtractCoreState, slug: string, rows: Array<NewFact & { row_num: number; source_markdown_slug: string }>,
-  scope: ConversationScope): Promise<{ deleted: number; facts_inserted: number }> {
+  scope: ConversationScope): Promise<{ deleted: number; facts_inserted: number; duplicates_skipped: number }> {
   return writeDerivedFacts(state.engine, state.sourceId, slug, db => publishConversationFacts(db, state.sourceId, slug, rows, { scope }));
 }
 
@@ -1014,7 +1014,8 @@ async function processPage(
   let segmentsThisPage = 0;
   const pageRows: Array<NewFact & { row_num: number; source_markdown_slug: string }> = [];
   const pageResolution = emptySaveTimeResolutionCounts();
-  const entityHints = await conversationEntityHints(state.engine, state.sourceId, page.slug, state.factVisibility); // #6731
+  const factVisibility = tightenToPage(state.factVisibility, page);
+  const entityHints = await conversationEntityHints(state.engine, state.sourceId, page.slug, factVisibility); // #6731
 
   for (const seg of segments) {
     if (state.segmentLimit > 0 && segmentsThisPage >= state.segmentLimit) break;
@@ -1076,8 +1077,8 @@ async function processPage(
       // (above) ran every fact through the shipped resolver cascade (#3729/#4052),
       // so master's per-row resolveEntitySlug mapper (#4567's independent fix for
       // the same issue) is superseded rather than layered on top.
-      const rows = await inferConversationSubjects(state.engine, state.sourceId, state.factVisibility, extracted.map((fact, i) => ({ // #6764
-        ...fact, visibility: state.factVisibility,
+      const rows = await inferConversationSubjects(state.engine, state.sourceId, factVisibility, extracted.map((fact, i) => ({ // #6764
+        ...fact, visibility: factVisibility,
         row_num: rowNum + i,
         source_markdown_slug: page.slug,
         source: PER_SEGMENT_SOURCE_PREFIX,
@@ -1134,7 +1135,8 @@ async function processPage(
   const published = await publishPageFacts(state, page.slug, pageRows, scope);
   state.result.facts_inserted += published.facts_inserted;
   state.result.orphan_facts_cleaned += published.deleted;
-  if (published.facts_inserted < pageRows.filter(row => row.source !== TERMINAL_AUDIT_SOURCE).length) {
+  if (published.duplicates_skipped) process.stderr.write(`[extract-conversation-facts] ${page.slug}: skipped ${published.duplicates_skipped} fact(s) an active fact of the source already states (#7043)\n`);
+  if (published.facts_inserted + published.duplicates_skipped < pageRows.filter(row => row.source !== TERMINAL_AUDIT_SOURCE).length) {
     process.stderr.write(`[extract-conversation-facts] ${page.slug}: kept its prior facts; this ${scope} run's facts were not published over them (#7013)\n`);
   }
 

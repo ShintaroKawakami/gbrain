@@ -26,7 +26,7 @@ import { embedBatchWithBackoff, restampIfDemotedToTitleTier } from './embed-retr
 import { wrapChunkTextsForStoredMode } from './embedding-context.ts';
 import { healOversizedPageChunks, healedChunksToStaleRows } from './embed-oversize-heal.ts';
 import { healAndReportOverLength } from './embed-overlength-heal.ts';
-import { invalidateStaleSignatureEmbeddingsGuarded, splitEmbeddingSignature, currentSpaceChunkPredicate } from './embedding-invalidation.ts';
+import { hasSignatureDrift, invalidateStaleSignatureEmbeddingsGuarded, splitEmbeddingSignature, currentSpaceChunkPredicate } from './embedding-invalidation.ts';
 import {
   resolveActiveEmbeddingColumnFromEngine,
   quoteIdentifier,
@@ -34,6 +34,7 @@ import {
 import { type DbPacer, createNoopPacer, observed } from './db-pacer.ts';
 import { resolveStaleEmbedConcurrency } from './embed-concurrency.ts';
 import { AbortError } from './abort-check.ts';
+import { contentDriftSweepLine, runContentDriftSweep, type ContentDriftSweepStatus } from './content-drift-sweep.ts';
 import { meterPageBatch, spendGrant } from './page-embedding-budget.ts';
 import { chunkGenerationFilter, chunkVisibleFilter } from './search/safe-chunks.ts';
 import { embedSegmentedPage, embedSegmentedRows, readSegmentedEmbedPage, type SegmentedEmbedOpts } from './page-body/segmented-embedding.ts';
@@ -144,6 +145,8 @@ export interface EmbedStaleResult {
    * NULL-embedding-only staleness instead of destroying working vectors.
    */
   invalidationSkipped?: 'embedder_probe_failed';
+  /** #7117: this run's content-drift sweep (core/content-drift-sweep.ts); its invalidations are in `invalidated`. */
+  contentDrift?: ContentDriftSweepStatus;
   /** Last cursor reached. null iff zero stale chunks existed at start. */
   lastCursor: StaleCursor | null;
   /** True iff the loop exited because every stale chunk was processed. */
@@ -439,16 +442,15 @@ export async function embedStaleForSource(
   // the NULL cursor below re-embeds them. GRANDFATHER: NULL signature
   // untouched. Best-effort — a failure here must not abort the backfill.
   //
-  // #4283: NULLing is conditional on a WORKING embedder. The drift pre-count
-  // (two cheap COUNTs; probe only fires when drift exists) keeps the probe's
+  // #4283: NULLing is conditional on a WORKING embedder. The drift pre-check
+  // (one page-first EXISTS; probe only fires when drift exists) keeps the probe's
   // one embed call off the no-drift common path; a failed probe skips the
   // invalidation entirely so a misresolved worker can't strip a corpus it
   // can never re-embed.
   if (signature) {
     try {
-      const wide = await engine.countStaleChunks({ sourceId, signature });
-      const nullOnly = await engine.countStaleChunks({ sourceId });
-      if (wide - nullOnly > 0) {
+      // One page-first EXISTS: no chunk count before the probe, so a large drifted corpus cannot time the pre-check out (#7117 follow-up).
+      if (await hasSignatureDrift(engine, { signature, sourceId })) {
         await opts.assertOwned?.();
         if (stopped()) return { ...result, aborted: true };
         const probeOk = await probeEmbedder(embedFn, signature, signal);
@@ -468,7 +470,7 @@ export async function embedStaleForSource(
         } else {
           result.invalidationSkipped = 'embedder_probe_failed';
           process.stderr.write(
-            `\n  [embed-stale] ${wide - nullOnly} chunk(s) drifted from signature ${signature} but the embedder probe failed — ` +
+            `\n  [embed-stale] embedded chunk(s) drifted from signature ${signature} but the embedder probe failed — ` +
             `SKIPPING invalidation (existing vectors preserved). Check embedding provider config/credentials.\n`,
           );
         }
@@ -486,21 +488,18 @@ export async function embedStaleForSource(
   // bounded by real content edits (config-independent, unlike signature
   // drift) and those vectors point at stale text either way. NULL hash
   // (pre-v133 rows) is grandfathered.
-  try {
-    if (stopped()) return { ...result, aborted: true };
-    result.invalidated += opts.assertOwned ? await engine.transaction(async tx => {
-      await opts.assertOwned!(tx);
-      if (stopped()) throw new AbortError();
-      const invalidated = await tx.invalidateContentDriftEmbeddings({ sourceId });
-      await opts.assertOwned!(tx);
-      if (stopped()) throw new AbortError();
-      return invalidated;
-    }) : await engine.invalidateContentDriftEmbeddings({ sourceId });
-  } catch {
-    if (stopped()) return { ...result, aborted: true };
-    await opts.assertOwned?.();
-    // Non-fatal: fall through to the NULL-only stale loop.
-  }
+  // #7117: bounded batches with a saved cursor (core/content-drift-sweep.ts).
+  // A failed batch is reported in the result and on stderr, not thrown, and
+  // the NULL-only loop still runs; a lost lease propagates.
+  if (stopped()) return { ...result, aborted: true };
+  const sweep = await runContentDriftSweep(engine, {
+    sourceId, signal, deadline: opts.deadline, stopped,
+    assertOwned: opts.assertOwned,
+  });
+  result.contentDrift = sweep;
+  result.invalidated += sweep.drifted;
+  if (sweep.state === 'failed') process.stderr.write(`\n  [embed-stale] ${contentDriftSweepLine(sweep, true)}\n`);
+  if (stopped()) return { ...result, aborted: true };
 
   for (;;) {
     if (stopped()) {

@@ -72,7 +72,10 @@ operation so the machine stays awake. After any interrupted run, check
 destroys your own VMs older than HOURS). A gate VM nobody reaps still dies
 once its expiry passes and the operator reaper next runs with `--apply`.
 
-`ubi-runner.sh list --mine` lists your VMs. `ubi-runner.sh usage` prints VMs
+`ubi-runner.sh list --mine` lists your VMs: those tagged with your owner tag
+and every VM this machine created under any tag (its local state stays until
+`down` confirms it gone), so a run started with a different `UBI_OWNER` is still
+listed; stderr names the tags it covered. `ubi-runner.sh usage` prints VMs
 and vCPUs per owner across the project, which shows who holds the shared quota.
 
 Each VM runs `scripts/ubicloud/setup-ci-vm.sh`: the pinned Bun from
@@ -143,7 +146,7 @@ runs every file in `test/postgres-unit-arms.txt` the way persistence-validation'
 `unit-postgres-arms` step does (`bun --no-env-file test --timeout=120000`,
 `GBRAIN_TEST_ALLOW_DATABASE_URL=1`, no timeout multiplier) against the slot's
 own empty `gbrain_arms_test` database. The summary takes the two-worker makespan of its
-measured durations over that job's `ARM_SHARDS` partition (11 shards, `ARM_WORKERS` = 2
+measured durations over that job's `ARM_SHARDS` partition (12 shards, `ARM_WORKERS` = 2
 files at a time), and a shard over the step's 20-minute timeout
 fails the run, since GitHub would cut that shard off mid-list. The committed
 weights must also fit each shard twice over with a minute to spare

@@ -72,11 +72,16 @@ export interface ManagedSyncPassValue {
     converged?: PassConverged;
     mismatch: Record<string, { level: string | null; streak: number }>;
     not_converged_streak: number;
+    /** #7355: at this pass's pin, how many passes in a row before it never ended (their row was left `open`: a pass the drain's governor abandoned, or a killed process). Status counts it only while this pass's row is open. */
+    abandoned_streak?: number;
     /** When the current run of unhealthy endings (`blocked`, `not_converged`) began; kept across them, cleared at `synced`/`up_to_date`. The §3.7 readers age a stuck source from it. */
     stuck_since?: string | null;
     faults: Record<string, { level: string | null; class: string; attempts: number }>;
-    /** #6712 PR 4b (design §2.7): when the incarnation's first full round swept every `legacy_unverified` page; later passes sweep at most 500. */
-    legacy_sweep?: { first_full_at: string };
+    /**
+     * #6712 PR 4b (design §2.7): when the incarnation's first full sweep reached every `legacy_unverified` page. Each pass sweeps
+     * at most 500, from `cursor` (#7189: the last path a committed slice screened), so a stopped pass's next one resumes.
+     */
+    legacy_sweep?: { first_full_at?: string; cursor?: string };
     /** #6712 PR 4b (design §2.7 (b1)): when the incarnation's legacy markers were written; until then each pass's first round writes them (idempotent). */
     legacy_markers_at?: string;
     /** #6712 PR 4b (design §2.6): the set hash of a withheld mass delete; with the env valve set the next tick runs a full round to apply it. */
@@ -129,6 +134,10 @@ export const OPEN_AT_STAMP_CAP = 256;
 export const SETTLE_MISMATCH_STREAK = 3;
 /** Consecutive `not_converged` passes after which `fix.next` becomes `report` (design §3.1, DX R9). */
 export const NOT_CONVERGED_REPORT_STREAK = 3;
+/** #7355: passes in a row that never ended (the newest counted once its row has been quiet for ABANDONED_QUIET_MS) before status stops sending the plain sync. */
+export const ABANDONED_REPORT_STREAK = 2;
+/** The drain's in-pass no-progress window: an open row quiet this long belongs to no live pass. */
+export const ABANDONED_QUIET_MS = 5 * 60_000;
 
 export const passFingerprint = (sourceId: string, incarnation: string) => `${sourceId}:${incarnation}`;
 

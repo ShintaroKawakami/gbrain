@@ -142,14 +142,16 @@ async function dump(e: BrainEngine, root: string): Promise<Record<string, string
     takes: await rows('SELECT to_jsonb(k) - \'superseded_by\' AS r FROM takes k JOIN pages p ON p.id=k.page_id WHERE p.source_id=$1'),
     versions: await rows('SELECT to_jsonb(v) AS r FROM page_versions v JOIN pages p ON p.id=v.page_id WHERE p.source_id=$1'),
     chronicle: await rows('SELECT to_jsonb(c) AS r FROM chronicle_page_state c WHERE source_id=$1'),
-    effects: await rows(`SELECT to_jsonb(e) - ARRAY['state','attempts','error_code','outcome','recovery','recovery_bytes'] AS r FROM persistence_effects e WHERE source_id=$1`),
+    // An effect may still be running when a round ends, so its lifecycle columns (and its claim's owner stamp, GBRA-133) are not compared.
+    effects: await rows(`SELECT to_jsonb(e) - ARRAY['state','attempts','error_code','outcome','recovery','recovery_bytes','claim_owner'] AS r FROM persistence_effects e WHERE source_id=$1`),
     receipts: await rows(`SELECT jsonb_build_object('intent',r.intent,'state',r.state,'error_code',r.error_code,'error_message',r.error_message,
         'outcome',r.outcome,'slug',r.slug,'page_id',r.page_id,'publication_started',r.publication_started,'compacted',r.compacted) AS r
       FROM persistence_requests r WHERE r.source_id=$1`),
     sources: await rows('SELECT to_jsonb(s) - ARRAY[\'last_sync_at\',\'newest_content_at\'] AS r FROM sources s WHERE id=$1'),
-    // A provenance record is keyed by page id, which Postgres bulk groups may assign in another order.
-    checkpoints: await rows(`SELECT jsonb_build_object('op',op,'fingerprint',regexp_replace(regexp_replace(fingerprint,'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}','<uuid>','g'),'[0-9a-f]{32,}','<key>','g'),
-        'page_id',CASE WHEN op='sync-import-provenance' THEN substring(fingerprint from ':([0-9]+)$')::integer END,'record',completed_keys) AS r
+    // A provenance record (and a #7130 sync deletion record, keyed by the bare page id) is keyed by page id, which Postgres
+    // bulk groups may assign in another order.
+    checkpoints: await rows(`SELECT jsonb_build_object('op',op,'fingerprint',regexp_replace(regexp_replace(CASE WHEN op='sync-delete-tombstone' THEN 'page:' || fingerprint ELSE fingerprint END,'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}','<uuid>','g'),'[0-9a-f]{32,}','<key>','g'),
+        'page_id',CASE WHEN op='sync-import-provenance' THEN substring(fingerprint from ':([0-9]+)$')::integer WHEN op='sync-delete-tombstone' THEN fingerprint::integer END,'record',completed_keys) AS r
       FROM op_checkpoints WHERE completed_keys::text LIKE '%' || $1 || '%' OR fingerprint LIKE '%' || $1 || '%'`)
       .then(list => list.map(row => row.replace(/("fingerprint":"[^"]*):\d+"(.*"page_id":"(page\([^)]*\))")/, '$1:$3"$2'))),
   };

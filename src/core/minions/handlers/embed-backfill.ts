@@ -45,10 +45,11 @@ import {
 import { pricingSetCommand } from '../../budget/no-pricing.ts';
 import { getEmbeddingModel, withBudgetTracker } from '../../ai/gateway.ts';
 import { embedStaleForSource } from '../../embed-stale.ts';
+import type { ContentDriftSweepStatus } from '../../content-drift-sweep.ts';
 import { createEmbedStallWatchdog, resolveEmbedStallAbortSeconds } from '../../embed-stall.ts';
 import { currentEmbeddingSignature } from '../../embedding.ts';
 import { readEmbedBackfillBlockers } from '../../embed-backfill-stall.ts';
-import { budgetLimitedField, type BudgetLimitedReport } from '../../held-embedding.ts';
+import { budgetLimitedField, readBudgetLimited, type BudgetLimitedReport } from '../../held-embedding.ts';
 import { UnrecoverableError } from '../errors.ts';
 import { type DbPacer, createDbPacer, createNoopPacer } from '../../db-pacer.ts';
 import { resolvePaceMode, loadPaceModeConfig, readPaceEnv } from '../../pace-mode.ts';
@@ -89,6 +90,8 @@ export interface EmbedBackfillResult {
   invalidated: number;
   /** #4283: set when drifted chunks existed but the embedder probe failed. */
   invalidationSkipped?: 'embedder_probe_failed';
+  /** #7117: this run's content-drift sweep: counts, cursor, pass state, error. */
+  contentDrift?: ContentDriftSweepStatus;
   /** $USD spent inside this job (from BudgetTracker.totalSpent). */
   spentUsd: number;
   /** Set when status === 'budget_exhausted'. */
@@ -356,6 +359,7 @@ export function makeEmbedBackfillHandler(
           pagesProcessed: result.pagesProcessed,
           invalidated: result.invalidated,
           ...(result.invalidationSkipped && { invalidationSkipped: result.invalidationSkipped }),
+          ...(result.contentDrift && { contentDrift: result.contentDrift }),
           spentUsd: tracker.totalSpent,
         };
       }
@@ -366,7 +370,11 @@ export function makeEmbedBackfillHandler(
       // in a row while an entire corpus sat stripped. NULLed chunks stay NULL
       // for the next (fixed-config) run to pick up.
       if ((result.remaining ?? 0) > 0 || (result.blocked ?? 0) > 0) {
-        const message = `embed-backfill: incomplete; ${result.remaining ?? 0} chunks remain and ${result.blocked ?? 0} projections are blocked. Durable progress is retained; inspect provider and projection readiness before retrying.`;
+        // #7193: the stale count leaves out large pages held for approval or at their cap; the remainder names them too.
+        const held = await readBudgetLimited(engine, { sourceId, signature: currentEmbeddingSignature() }).catch(() => null);
+        const heldNote = held && held.pending_chunks > 0
+          ? ` (${held.pending_chunks} of them on ${held.held + held.capped} large page(s) held for approval or at their spend cap; gbrain embed --held --dry-run --source ${sourceId} lists them)` : '';
+        const message = `embed-backfill: incomplete; ${(result.remaining ?? 0) + (held?.pending_chunks ?? 0)} chunks remain${heldNote} and ${result.blocked ?? 0} projections are blocked. Durable progress is retained; inspect provider and projection readiness before retrying.`;
         // #6803: a run that embedded nothing records its blocker fingerprint, so
         // automatic submission backs off and stops after identical failures
         // (embed-backfill-stall.ts); a retry of this job that finds the same
@@ -404,6 +412,7 @@ export function makeEmbedBackfillHandler(
         pagesProcessed: result.pagesProcessed,
         invalidated: result.invalidated,
         ...(result.invalidationSkipped && { invalidationSkipped: result.invalidationSkipped }),
+        ...(result.contentDrift && { contentDrift: result.contentDrift }),
         spentUsd: tracker.totalSpent,
         ...(await budgetLimitedField(engine, sourceId, currentEmbeddingSignature())),
       };

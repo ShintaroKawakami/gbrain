@@ -30,7 +30,7 @@ import { mayReprepare } from './semantic.ts';
 import { tryAcquirePublicationCapacity } from './pool-capacity.ts';
 import { queuePublicationEffects } from './effect-journal.ts';
 import { timePublicationStep } from './publication-timing.ts';
-import type { GitCommitNote } from './effect-model.ts';
+import type { AppendedRange, GitCommitNote } from './effect-model.ts';
 import { authorizePageVisibility } from './page-visibility.ts';
 import { withNoRepoWriteThroughWarning } from '../write-through.ts';
 import { assertUnboundPublication, classifyUnboundPage, unboundWriteWarning } from './unbound-source.ts';
@@ -38,13 +38,13 @@ import { assertRecoveryStagingAbsent, cleanupRecoveryStaging, recoveryStagingFil
 import { assertManagedFilesystemWrite } from './filesystem-guard.ts';
 import { beforeStagePath, fileContentBytes, fileContentHash, hashDescriptor, hashFile, isStreamedContent, LARGE_FILE_MIN_BYTES, stageBeforeCopy, stageStreamedContent, type StreamedFileContent } from './large-file.ts';
 import { declarePublication, publicationTransaction } from './publication-deadline.ts';
-import { assertMutationProtocol, assertSharedSkillPersistence, declareDurablePersistence, PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
+import { assertMutationProtocol, assertSharedSkillPersistence, declareDurablePersistence, isPersistenceDeclaration, PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
 import { assertBundleRecoveryBinding, bundleFileHash, prepareBundleRecovery, publishStagedBundleFile, stageBundleFile, type MutationFile } from './bundle-files.ts';
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
 import { classifyMirrorPage, sourceMirrorReadOnly } from './mirror-read-only.ts';
 import { PENDING_IMPORT, SYNC_HELD } from './pending-import.ts';
 import { CANONICAL_FILE_MISSING, databaseRefusal, ownerExceptionFailure, withAttempt, type PublicationFailure, type PublicationFailureDetail, type PublicationStage } from './publication-failure.ts';
-import { SYNC_CURSOR_REPLACED } from './sync-checkpoint-replaced.ts';
+import { SYNC_CURSOR_REPLACED, SYNC_PASS_SUPERSEDED } from './sync-checkpoint-replaced.ts';
 import { fenceFailureDetail } from '../fence-repair/refusal.ts';
 import { withdrawalFailureDetail } from '../facts/withdrawal.ts';
 import { faultPoint, withFaultPoints } from './fault-points.ts';
@@ -52,6 +52,7 @@ import { recordPublicationFenceTrend } from '../fence-repair/census-store.ts';
 import { segmentWriteScope } from '../page-body/ingest.ts';
 import { publicationBeliefOptions, withBeliefBatch } from '../belief/ledger.ts';
 import { markBeliefCommits } from '../belief/append.ts';
+import { classifyPgAccessError } from '../pg-access-classify.ts';
 
 interface PreparedMutationBase {
   sourceExclusive?: boolean;
@@ -64,7 +65,7 @@ interface PreparedMutationBase {
   contentUnchanged?: boolean;
   deferEmbedding?: boolean;
   /** Why a page write bound to a worktree publishes no file (receipt `write_through.skipped`). */
-  databaseOnlyReason?: 'db_only' | 'unbound_source' | 'mirror_read_only' | 'sync_excluded' | 'shared_origin' | 'origin_twin';
+  databaseOnlyReason?: 'db_only' | 'unbound_source' | 'mirror_read_only' | 'sync_excluded' | 'shared_origin' | 'origin_twin' | 'detached';
   /** #6517: the receipt's `write_through.warning` for a database-only publication, set by `validate` under the publication guards. */
   databaseOnlyWarning?: string;
   /**
@@ -92,6 +93,8 @@ interface PreparedMutationBase {
    * deferred projection and segment GC). Best effort: the projection queue and GC converge after a failure.
    */
   afterCommit?(engine: BrainEngine): Promise<void>;
+  /** #7122: the truth bytes an append_page added; a remote append's `links` effect reads only these. Absent for every other write. */
+  mentionRange?: AppendedRange;
 }
 /**
  * A page file target; `publishMode` (Google pages) is the exact mode it publishes with, and its created directories get 0700.
@@ -108,6 +111,13 @@ export interface PublicationHooks {
   stagingFlushed?(request: WriteRequest): void;
   fileBoundary?(name: 'before_file' | 'staging_flushed' | 'file_replaced' | 'directory_flushed' | 'after_file'
     | 'before_restore' | 'restoration_staging_flushed' | 'restoration_file_replaced' | 'restoration_directory_flushed' | 'after_restore', request: WriteRequest, index: number): void;
+  /**
+   * #7106: a committed write that created its page and whose outcome says the projection is built after commit
+   * (`projection: 'pending'`): the caller settles its waiter with `done` now and runs `afterCommit` (that build, which
+   * never rejects) itself, so the reply and the source's next write do not wait for it. Every other write, and every
+   * write without this hook, awaits afterCommit before the publication returns.
+   */
+  projectionPending?(done: WriteRequest, afterCommit: () => Promise<void>): void;
 }
 /** SHA-256 of the file at `path` read in pieces (large-file.ts), null when absent. */
 const fileHash = hashFile;
@@ -204,12 +214,19 @@ function requestError(error: unknown): PublicationFailure {
   if (code === 'revision_backfill_pending' && error instanceof Error) return { code, message: error.message };
   return ownerExceptionFailure(error);
 }
-function conflictCode(code: string): boolean { return ['revision_required','revision_conflict','revision_backfill_pending','source_changed','page_identity_changed',SYNC_CURSOR_REPLACED].includes(code); }
+function conflictCode(code: string): boolean { return ['revision_required','revision_conflict','revision_backfill_pending','source_changed','page_identity_changed',SYNC_CURSOR_REPLACED,SYNC_PASS_SUPERSEDED].includes(code); }
 /** The terminal state of an unpublished failure: `admission_paused` (#6712 PR 4b, a destructive write `sync.admission` paused at publication) is `cancelled`. */
 function failureState(code: string): 'conflict' | 'failed' | 'cancelled' { return code === 'admission_paused' ? 'cancelled' : conflictCode(code) ? 'conflict' : 'failed'; }
 export function transientDatabaseFailure(error: unknown): boolean {
   return ['40001','40P01','55P03','57014','53300','57P01','57P02','57P03','08000','08003','08006','08001','08004',
-    'ECONNRESET','ECONNREFUSED','ETIMEDOUT','CONNECTION_CLOSED','CONNECTION_ENDED'].includes(String((error as {code?:string})?.code));
+    'ECONNRESET','ECONNREFUSED','ETIMEDOUT','CONNECTION_CLOSED','CONNECTION_ENDED'].includes(String((error as {code?:string})?.code)) || connectionCapFailure(error);
+}
+/**
+ * GBRA-133: a pooler's client cap (Supavisor `EMAXCONNSESSION`, "too many clients already") is the same contention as
+ * SQLSTATE 53300 whatever code the pooler sends with it, so a write that meets it is released, never failed terminally.
+ */
+export function connectionCapFailure(error: unknown): boolean {
+  return classifyPgAccessError(error).reason === 'pool_exhausted';
 }
 /**
  * Flip lane C: the shared-read failures (`sharedReadFailure`) already charged. A group's memoized read the database cancelled
@@ -439,7 +456,8 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
   let recovery: RecoveryRecord | null = null;
   let published = false;
   let transactionBodyCompleted = false;
-  let afterCommitDue = false;
+  let afterCommitDue: WriteRequest | null = null;
+  let createdPage = false;
   const skill = prepared.target === 'skill_bundle';
   const files = skill ? prepared.files ?? [] : prepared.file ? [prepared.file] : [];
   const beliefReport = { appended: 0 };
@@ -548,6 +566,8 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
         await assertKnowledgePublicationAllowed(tx, row, prepared.file);
         await tx.lockPageKeys([{ sourceId: row.source_id, slug: row.slug },...(prepared.additionalPageKeys??[])]);
         snapshot = await tx.readPageSnapshot(row.slug, { sourceId: row.source_id, includeDeleted: true });
+        // A rename moves an existing page (its old slug is an additional key): not a new page.
+        createdPage = snapshot === null && !prepared.additionalPageKeys?.length;
         await authorizePageVisibility(tx, row.authority, row.slug);
         if ((snapshot?.page.id ?? null) !== row.page_id) throw pageIdentityError(snapshot != null || row.page_id === null, 'The accepted page was deleted or recreated.');
         await assertUnboundPublication(tx, row, snapshot?.page.source_path);
@@ -598,7 +618,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       const committed = await completeWrite(tx, current, 'committed', outcome, undefined, current);
       transactionBodyCompleted = true;
       return committed;
-    });
+    }, { pipelineFirst: isPersistenceDeclaration });
     await hooks.boundary?.('after_commit', done);
     if (beliefReport.appended && done.state === 'committed') await markBeliefCommits(engine, [row.id]).catch(() => undefined);
     if (recovery) {
@@ -607,7 +627,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       if (staged.version === 1 && staged.staging?.before) await withFilesystemPublication([staged.root], async () => cleanupRecoveryStaging(staged));
       await clearResolvedRecovery(engine, row.id, done);
     }
-    afterCommitDue = done.state === 'committed';
+    if (done.state === 'committed') afterCommitDue = done;
     return done;
   } catch (error) {
     if (recovery) {
@@ -638,7 +658,11 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
   } finally {
     releaseCapacity?.();
     await lock?.release();
-    if (afterCommitDue) await prepared.afterCommit?.(engine).catch(() => undefined);
+    if (afterCommitDue) {
+      const work = () => (prepared.afterCommit?.(engine) ?? Promise.resolve()).catch(() => undefined);
+      if (callerHooks.projectionPending && createdPage && afterCommitDue.outcome?.projection === 'pending') callerHooks.projectionPending(afterCommitDue, work);
+      else await work();
+    }
   }
 }
 

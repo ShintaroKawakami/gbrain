@@ -302,6 +302,10 @@
         "name": "partial_embedding"
       },
       {
+        "category": "brain",
+        "name": "sync_landing_gaps"
+      },
+      {
         "category": "ops",
         "name": "pgvector"
       },
@@ -340,6 +344,10 @@
       {
         "category": "ops",
         "name": "pglite_scale"
+      },
+      {
+        "category": "brain",
+        "name": "derived_visibility"
       },
       {
         "category": "ops",
@@ -439,10 +447,6 @@
       },
       {
         "category": "brain",
-        "name": "derived_visibility"
-      },
-      {
-        "category": "brain",
         "name": "safe_index_pending"
       },
       {
@@ -534,8 +538,24 @@
         "name": "google_calendar_readable"
       },
       {
+        "category": "ops",
+        "name": "google_api_access"
+      },
+      {
         "category": "brain",
         "name": "atom_retirements_restorable"
+      },
+      {
+        "category": "brain",
+        "name": "generation_retirements"
+      },
+      {
+        "category": "brain",
+        "name": "generation_held"
+      },
+      {
+        "category": "brain",
+        "name": "generation_pending"
       },
       {
         "category": "brain",
@@ -552,6 +572,14 @@
       {
         "category": "brain",
         "name": "captured_facts_active"
+      },
+      {
+        "category": "brain",
+        "name": "facts_redaction_marker"
+      },
+      {
+        "category": "brain",
+        "name": "fact_bulk_dates"
       },
       {
         "category": "brain",
@@ -691,6 +719,10 @@
       },
       {
         "category": "ops",
+        "name": "content_drift_sweep"
+      },
+      {
+        "category": "ops",
         "name": "connector_account_mismatch"
       },
       {
@@ -786,6 +818,22 @@
         "name": "tracked_ownership_marker"
       },
       {
+        "category": "brain",
+        "name": "checkout_lagging"
+      },
+      {
+        "category": "brain",
+        "name": "dirty_age"
+      },
+      {
+        "category": "brain",
+        "name": "commits_outside_source_root"
+      },
+      {
+        "category": "brain",
+        "name": "quarantined_changes"
+      },
+      {
         "category": "ops",
         "name": "decide_health"
       },
@@ -866,6 +914,14 @@
         "name": "host_identity_mismatch"
       },
       {
+        "category": "ops",
+        "name": "runtime_build_skew"
+      },
+      {
+        "category": "ops",
+        "name": "cli_socket_refusals"
+      },
+      {
         "category": "brain",
         "name": "extract_atoms_held_failed"
       },
@@ -883,6 +939,10 @@
       },
       {
         "category": "brain",
+        "name": "slug_path_mismatch"
+      },
+      {
+        "category": "brain",
         "name": "rename_identity_downgrades"
       },
       {
@@ -892,6 +952,10 @@
       {
         "category": "brain",
         "name": "missing_recorded_files"
+      },
+      {
+        "category": "brain",
+        "name": "uncommitted_sync_deletions"
       },
       {
         "category": "brain",
@@ -908,6 +972,10 @@
       {
         "category": "ops",
         "name": "managed_sync_convergence"
+      },
+      {
+        "category": "brain",
+        "name": "person_title_duplicates"
       },
       {
         "category": "brain",

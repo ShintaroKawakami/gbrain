@@ -16,8 +16,10 @@
  * Import-cycle note: operations.ts spreads these into its `operations` array
  * at MODULE-EVAL time, so this file must be a RUNTIME LEAF — it may import
  * operations.ts types (erased) but never its values statically. Handlers load
- * verbError/parseTtlParam/sourceScopeOpts via dynamic import (the file's
- * existing style), which resolves after both modules finish evaluating.
+ * verbError/parseTtlParam/sourceScopeOpts via dynamic import from the ops
+ * modules that define them (never the whole operations.ts registry, which a
+ * one-shot CLI call would otherwise evaluate in full, #7147); the import
+ * resolves after both modules finish evaluating.
  * MEMORY_VERBS_VERSION lives HERE (operations.ts imports it from us) for the
  * same reason. Violating this reintroduces the TDZ crash on whichever module
  * evaluates second.
@@ -114,7 +116,7 @@ const remember: Operation = {
   // forget / delete_page などの取り消し系は既定のまま確認を残す。
   annotations: { title: 'remember (memory write)', destructiveHint: false, idempotentHint: true, openWorldHint: false },
   handler: async (ctx, p) => {
-    const { verbError, parseTtlParam } = await import('./operations.ts');
+    const [{ verbError }, { parseTtlParam }] = await Promise.all([import('./ops/contract.ts'), import('./ops/facts.ts')]);
     if (p.items !== undefined) {
       const { runRememberBatch } = await import('./remember-batch.ts');
       return runRememberBatch(ctx, p, remember.handler, (code, message, suggestion) => verbError(code as never, message, suggestion));
@@ -199,7 +201,8 @@ const remember: Operation = {
 
     const { submitRememberMutation } = await import('./persistence/memory-mutations.ts');
     const { runMemoryWrite } = await import('./persistence/verb-errors.ts');
-    const result = await runMemoryWrite(() => submitRememberMutation(ctx, { ...p, fact, provenance, kind, visibility, ...(replaces !== undefined ? { replaces } : {}) }));
+    const result = await runMemoryWrite(() => submitRememberMutation(ctx, { ...p, fact, provenance, kind, visibility, ...(replaces !== undefined ? { replaces } : {}) },
+      undefined, { visibilityDefaulted: typeof p.visibility !== 'string' }));
     // F8: the explanation the CLI formatter prints, as a model-visible notice.
     if ((result as { degraded_dedup?: boolean } | null)?.degraded_dedup) {
       const { degradedDedupNotice } = await import('./interop-notices.ts');
@@ -228,12 +231,13 @@ const entity: Operation = {
     names: { type: 'array', items: { type: 'string' }, description: 'Or up to 50 names/codes at once: compact rows.' },
     source_id: { type: 'string', description: 'Read only this source. Default: your source first, then every source you can read.', fullSurfaceOnly: true },
     prefer_source_id: { type: 'string', description: 'Source to try first (thin clients send .gbrain-source here); never narrows.', fullSurfaceOnly: true },
+    variants: { type: 'boolean', description: 'false: exact names only. Default true: with no exact match, one unambiguous name variant (card.match says which).', fullSurfaceOnly: true },
   },
   scope: 'read',
   verb: true,
   annotations: { title: 'entity (card lookup, zero LLM)', readOnlyHint: true },
   handler: async (ctx, p) => {
-    const { verbError } = await import('./operations.ts');
+    const { verbError } = await import('./ops/contract.ts');
     // #6723: resolve across the caller's readable sources (home first) unless source_id pins one.
     const { ambientMissNotice, entitySources } = await import('./verbs/entity-source.ts');
     const walk = await entitySources(ctx, p, 'entity');
@@ -249,7 +253,7 @@ const entity: Operation = {
           `Pass either name: "Alice Example" for one full card, or names: ["Alice Example", "WGCO"] (up to ${ENTITY_NAMES_MAX}) for compact rows.`);
       }
       const t0 = Date.now();
-      const out = await lookupEntityNames(ctx.engine, walk.home, names, { remote: ctx.remote !== false, sources: walk.sources, surfaceCeiling: ctx.surfaceCeiling,
+      const out = await lookupEntityNames(ctx.engine, walk.home, names, { remote: ctx.remote !== false, sources: walk.sources, surfaceCeiling: ctx.surfaceCeiling, variants: p.variants !== false,
         emitNotice: n => ctx.emitNotice?.(n) });
       ambientMiss(out.results.map(r => ({ name: r.name, ...(r.found ? { foundIn: r.source_id } : {}) })));
       return { protocol_version: 1, latency_ms: Date.now() - t0, ...out };
@@ -265,7 +269,7 @@ const entity: Operation = {
     const t0 = Date.now();
     const { buildEntityCard } = await import('./verbs/entity-card.ts');
     const result = await buildEntityCard(ctx.engine, walk.home, name, {
-      remote: ctx.remote !== false, includeReferences: true, surfaceCeiling: ctx.surfaceCeiling, sources: walk.sources,
+      remote: ctx.remote !== false, includeReferences: true, surfaceCeiling: ctx.surfaceCeiling, sources: walk.sources, variants: p.variants !== false,
       omitQuarantined: ctx.remote !== false, // #5575: like get_page, a remote reader never gets a quarantined page's card
       emitNotice: n => ctx.emitNotice?.(n),
     });
@@ -287,6 +291,8 @@ const entity: Operation = {
       ...(result.card ? { card: result.card } : {}),
       ...(result.suggestions !== undefined ? { suggestions: result.suggestions } : {}),
       ...(!result.card && result.coverage ? { coverage: result.coverage } : {}),
+      ...(result.text_mentions ? { text_mentions: result.text_mentions } : {}),
+      ...(result.ambiguous ? { ambiguous: true } : {}),
     };
   },
   cliHints: { name: 'entity', positional: ['name'] },
@@ -321,7 +327,7 @@ const synthesize: Operation = {
   verb: true,
   annotations: { title: 'synthesize (slow, costly — LLM-backed)', readOnlyHint: true },
   handler: async (ctx, p) => {
-    const { verbError, sourceScopeOpts } = await import('./operations.ts');
+    const [{ verbError }, { sourceScopeOpts }] = await Promise.all([import('./ops/contract.ts'), import('./ops/context.ts')]);
     const question = typeof p.question === 'string' ? p.question.trim() : '';
     if (!question) {
       throw verbError(
@@ -458,7 +464,7 @@ const forget: Operation = {
   verb: true,
   annotations: { title: 'forget (expire a fact)', destructiveHint: true, idempotentHint: true },
   handler: async (ctx, p) => {
-    const { verbError } = await import('./operations.ts');
+    const { verbError } = await import('./ops/contract.ts');
     const rawId = typeof p.id === 'string' ? p.id.trim() : typeof p.id === 'number' ? String(p.id) : '';
     const numericId = Number(rawId);
     if (!rawId || !Number.isInteger(numericId) || numericId <= 0) {

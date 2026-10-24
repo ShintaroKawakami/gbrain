@@ -61,7 +61,7 @@ import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-gu
 import { isStreamedContent } from './large-file.ts';
 import { sharedReadFailure } from './bounded-reads.ts';
 import { chargedInterruption, decoratePublicationOutcome, finishPreparationStalled, finishUnpublishedFailure, pageRecoveryRecord, persistenceFileHash, preparationAbortReason,
-  publicationPostimage, publishMutation, publishPersistenceFile, recoverPublication, releaseChargedInterruption, type PreparedMutation } from './coordinator.ts';
+  publicationPostimage, publishMutation, publishPersistenceFile, recoverPublication, releaseChargedInterruption, type PreparedMutation, type PublicationHooks } from './coordinator.ts';
 import { withAttempt } from './publication-failure.ts';
 import { transientInterruption, type TransientInterruption } from './transient-retry.ts';
 import { pipelined } from '../page-state/transactions.ts';
@@ -206,12 +206,16 @@ export interface GroupHooks {
   rolledBack?(rows: WriteRequest[]): Promise<void>;
   /** Right after the commit, before the recovery records are cleared: the committed rows, for waiters. */
   committed?(rows: WriteRequest[]): void;
+  /** A single write that falls back to publishMutation: its PublicationHooks.projectionPending. */
+  projectionPending?: PublicationHooks['projectionPending'];
 }
 
 /**
  * Publishes the whole group or nothing. `done` null means the transaction did
  * not commit; `requeued` lists members whose claims the file restoration
- * released, which the caller may claim again while it holds the worktree.
+ * released, which the caller may claim again while it holds the worktree. A
+ * member charged a transient interruption is never listed: its next claim
+ * waits for its backoff and prepares again, however long the restoration took.
  */
 /** Runs one transaction: `engine.transaction`, or a reserved connection's (Phase 4.4). */
 export type TransactionRunner = <T>(fn: (tx: BrainEngine) => Promise<T>) => Promise<T>;
@@ -390,7 +394,6 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
     // One post-commit observation for every member (docs/designs/BELIEF_LEDGER.md 5.3).
     if (beliefReport.appended) await markBeliefCommits(engine, done.map(row => row.id)).catch(() => undefined);
     for (const row of done) await seam('after_commit', row);
-    hooks.committed?.(done);
     if (recorded.size) {
       try { await clearResolvedRecoveries(engine, done, transaction); }
       catch {
@@ -400,6 +403,7 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
         }
       }
     }
+    hooks.committed?.(done);
     return { done, requeued: [] };
   } catch (error) {
     if (committed || !recorded.size) {
@@ -418,7 +422,7 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
         const failure = charged?.failure ? withAttempt(charged.failure, 'publication') : undefined;
         await markRecovering(engine, row, failure ? 'publication_failed' : 'publication_not_started', failure);
         const recovered = await recoverPublication(engine, row.id, hostId, true, failure, true);
-        if (recovered.state === 'queued' && !recovered.recovery) requeued.push(row.id);
+        if (!charged && recovered.state === 'queued' && !recovered.recovery) requeued.push(row.id);
       } catch { /* the recovery record stays; the worktree waits for the recovery scan */ }
     }
     await hooks.rolledBack?.(rows);
@@ -428,6 +432,8 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
     releaseCapacity?.();
     publishingBeside.delete(head.id);
     await lock.release();
+    // As publishMutation does: each committed member's post-commit work (#7172: a deferred chunk replacement) runs after the lock.
+    if (committed) for (const member of prepared) await member.afterCommit?.(engine).catch(() => undefined);
   }
 }
 
@@ -446,10 +452,11 @@ function seam(name: PublicationBoundary, row: WriteRequest): Promise<void> {
  */
 export async function publishSingleWrite(engine: BrainEngine, row: WriteRequest, prepared: PreparedMutation, hostId = localHostId(), hooks: GroupHooks = {},
   transaction?: TransactionRunner): Promise<WriteRequest> {
+  const single: PublicationHooks = hooks.projectionPending ? { projectionPending: hooks.projectionPending } : {};
   if (engine.kind !== 'postgres' || !singleWrite(row) || !groupable(row, prepared) || !await writeSwitchOn(engine, 'single_write_group').catch(() => true)) {
-    return publishMutation(engine, row, prepared, hostId);
+    return publishMutation(engine, row, prepared, hostId, single);
   }
-  try { assertMutationProtocol(row); } catch { return publishMutation(engine, row, prepared, hostId); }
+  try { assertMutationProtocol(row); } catch { return publishMutation(engine, row, prepared, hostId, single); }
   const result = await publishGroup(engine, [row], [prepared], hostId, hooks, null, transaction);
   if (result.done) return result.done[0]!;
   let current = await getWriteRequestById(engine, row.id);
@@ -459,7 +466,7 @@ export async function publishSingleWrite(engine: BrainEngine, row: WriteRequest,
     current = reclaimed;
   } else if (!current || current.execution_token !== row.execution_token) return current ?? row;
   if (current.state !== 'running' || current.recovery) return current;
-  return publishMutation(engine, current, prepared, hostId);
+  return publishMutation(engine, current, prepared, hostId, single);
 }
 
 /** A group publication: its committed receipts, or why it did not commit and, for a member's own refusal, which member. */

@@ -280,6 +280,8 @@ export async function runPersistenceAdministration(engine: BrainEngine, operatio
       local_markers: await cleanupRetiredManagedMarkers(engine),
       host_id: existingLocalHostId(), local_host_id: existingLocalHostId(), bindings, admin_state: adminState,
       admin_lock: { locked: adminLock.locked, set_at: adminLock.set_at, host_id: adminLock.host_id }, blocking_effects: blockingEffects,
+      // GBRA-133: effects that have waited on a busy canonical worktree for over 10 minutes.
+      stalled_catchups: await (await import('./effect-catchup.ts')).readStalledCatchups(engine, params.source_id ? [params.source_id as string] : undefined),
       writer_versions: writerVersions, onboarding, shared_skills: sharedSkills, ...(native ? { native_lock: native } : {}),
       // #6317 (B3): every process holding a consumer on this host, from the heartbeat rows (kind, pid, nonce, mode, age, wedge report).
       host: { host_id: existingLocalHostId(), ...await (await import('./consumer-diagnostics.ts')).hostConsumersReport(engine, existingLocalHostId()) },

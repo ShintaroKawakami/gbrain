@@ -28,6 +28,7 @@ import type { LegacyUnscopedRead } from './brands.ts';
 import { sqlFragment, trustedSql } from './fragment.ts';
 import { compileRowNormalizer } from './normalize.ts';
 import { projectionEligibleSql } from '../eligibility/sql.ts';
+import { FACT_WITHDRAWAL_STAMP_DEFERRED_SETTING } from '../facts/insert-guard-schema.ts';
 import { privateProvenanceFilterFragment } from '../search/private-visibility.ts';
 import { storedTrustTier } from '../trust/tier.ts';
 import { ensureWellFormed } from '../text-safe.ts';
@@ -138,7 +139,8 @@ export async function insertFact(
           ) RETURNING id
         `)).rows;
         const id = Number(ins[0].id);
-        (await tx.run(sqlFragment`UPDATE facts SET expired_at = now(), superseded_by = ${id}
+        (await tx.run(sqlFragment`UPDATE facts SET expired_at = now(), superseded_by = ${id},
+                   valid_until = CASE WHEN valid_from < ${validFrom}::timestamptz AND (valid_until IS NULL OR valid_until > ${validFrom}::timestamptz) THEN ${validFrom}::timestamptz ELSE valid_until END
                  WHERE id = ${supersedeId} AND expired_at IS NULL`)).rows;
         return id;
       });
@@ -195,11 +197,15 @@ const wellFormed = <T extends string | null | undefined>(s: T): T => (typeof s =
  * #6574: inserts fact rows in chunks of FACT_INSERT_CHUNK with one statement
  * each. Returns each input's new id, aligned to `rows`, or null when the v51
  * ON CONFLICT DO NOTHING skipped it; within a chunk the first input for a
- * (slug, row_num) wins, as the per-row loop's order did.
+ * (slug, row_num) wins, as the per-row loop's order did. The inserts run
+ * under FACT_WITHDRAWAL_STAMP_DEFERRED_SETTING, so a withdrawn row is stamped
+ * once per statement by facts_guard_inserted instead of by a per-row trigger
+ * call (#7105); the RETURNING below reads no stamped column.
  */
 async function insertFactRows(tx: SqlExecutor, castSuffix: EmbeddingCast,
   rows: ReadonlyArray<NewFact & { row_num: number; source_markdown_slug: string }>, sourceId: string): Promise<Array<number | null>> {
   const rowIds: Array<number | null> = [];
+  (await tx.run(sqlFragment`SELECT set_config(${FACT_WITHDRAWAL_STAMP_DEFERRED_SETTING}, 'on', true)`)).rows;
   for (let at = 0; at < rows.length; at += FACT_INSERT_CHUNK) {
     const chunk = rows.slice(at, at + FACT_INSERT_CHUNK).map((input, ord) => {
       const embedding = input.embedding ?? null;
@@ -251,6 +257,7 @@ async function insertFactRows(tx: SqlExecutor, castSuffix: EmbeddingCast,
     }
     for (const input of chunk) rowIds.push(byKey.get(factRowKey(input.source_markdown_slug, input.row_num ?? null))?.shift() ?? null);
   }
+  (await tx.run(sqlFragment`SELECT set_config(${FACT_WITHDRAWAL_STAMP_DEFERRED_SETTING}, '', true)`)).rows;
   return rowIds;
 }
 

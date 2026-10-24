@@ -14,6 +14,7 @@ import { startFactsDrainScheduler, type FactsDrainScheduler, type FactsDrainSche
 import { startMovementWatch, type MovementWatch } from '../core/persistence/sync-movement.ts';
 import { startServeHeadWatcher } from '../core/serve-head-watcher.ts';
 import { onForwardProgress } from '../core/forward-progress.ts';
+import { foregroundWindow } from '../core/foreground-activity.ts';
 import { graduationHandoffRequested, writeServeGraduationEnvelope } from '../core/persistence/graduation-serve-guard.ts';
 import {
   installLoopStallWatchdog,
@@ -69,6 +70,18 @@ const PARENT_WATCHDOG_INTERVAL_MS = 5_000;
 // sweep fires after 10–20 min of true inactivity — the armIdle re-arm
 // semantics expressed through the injectable deps.setInterval seam.
 const IDLE_SWEEP_INTERVAL_MS = 10 * 60_000;
+/** GBRA-156: GBRAIN_SWEEP_IDLE_INTERVAL_MS shortens the cadence for benchmarks that force a sweep beside searches (scripts/bench/production-soak/socket-probe.ts); at least 1 s. */
+function idleSweepIntervalMs(): number {
+  const n = Number(process.env.GBRAIN_SWEEP_IDLE_INTERVAL_MS);
+  return Number.isFinite(n) && n >= 1_000 ? Math.floor(n) : IDLE_SWEEP_INTERVAL_MS;
+}
+
+/** GBRA-156: each idle sweep names its start and its duration on stderr, so slow requests can be lined up with it. */
+async function loggedIdleSweep(log: (line: string) => void, run: () => Promise<unknown>): Promise<void> {
+  const startedAt = Date.now();
+  log('[gbrain serve] idle sweep: started');
+  try { await run(); } finally { log(`[gbrain serve] idle sweep: finished in ${Date.now() - startedAt} ms`); }
+}
 
 // Small per-run budget for idle sweeps: the serve must snap back to
 // serving tool calls the moment the client wakes up.
@@ -238,7 +251,7 @@ export async function runServe(
   // 'verbs' exposes exactly the seven protocol verbs (the quickstart surface);
   // 'starter' the ~20-op daily-driver set; 'full' keeps every operation.
   const { parseSurfaceFlag, resolveSurfaceWithSource, resolveStdioSurface, parseAccessFlag, SURFACE_SOURCE_LABEL } = await import('../mcp/surface.ts');
-  const { loadConfig } = await import('../core/config.ts');
+  const { loadConfig, MERGED_CONFIG_BY_ENGINE } = await import('../core/config.ts');
   const surfaceFlag = parseSurfaceFlag(args);
   const resolved = isHttp ? resolveSurfaceWithSource(surfaceFlag, loadConfig()) : resolveStdioSurface(surfaceFlag, loadConfig());
   const surface = resolved.surface;
@@ -278,6 +291,8 @@ export async function runServe(
   // binding is deliberate or unambiguous — sole-source brains are a pure
   // no-op. Stdio-only: the OAuth HTTP path scopes writes per token instead.
   const sourceGuard = args.includes('--source-guard');
+  // Opt-in warm CLI socket (core/cli-socket/server.ts): off, the serve loads nothing and reads nothing for it.
+  const cliSocketOn = args.includes('--cli-socket') || MERGED_CONFIG_BY_ENGINE.get(engine)?.serve_cli_socket === true;
   if (sourceGuard && isHttp) {
     // Loud posture warning (the --log-full-params precedent): the guard is a
     // stdio-lane mechanism; HTTP writes are scoped per token instead. An
@@ -368,11 +383,13 @@ export async function runServe(
     const { armCorpusDrain } = await import('../core/sweep.ts');
     const corpusDrain = (opts.armCorpusDrain ?? armCorpusDrain)(engine, { sourceId: process.env.GBRAIN_SOURCE || undefined });
 
+    const cliSocket = cliSocketOn ? await (await import('../core/cli-socket/server.ts')).startCliSocket(engine, httpLog) : null;
     try {
       await runHttp(engine, { port, tokenTtl, enableDcr, enableDcrInsecure, publicUrl, logFullParams, bind, suppressBootstrapToken, printAdminToken, surface, adoptServer: opts.adoptServer });
     } finally {
       stallWatchdog?.dispose();
       corpusDrain?.cancel();
+      cliSocket?.close();
     }
 
     await finishHttpServe(engine, opts);
@@ -453,6 +470,8 @@ export async function runServe(
     // earlier flips stdin into flowing mode and can consume a fast client's
     // initialize frame before the SDK sees it.
     activateStdioIdleActivityTracking();
+    // Opt-in warm CLI socket; bound after the stdout redirect so a request's captured console output keeps its stream.
+    if (cliSocketOn) void import('../core/cli-socket/server.ts').then(m => m.startCliSocket(engine, opts.log ?? ((msg: string) => console.error(msg))));
   } finally {
     if (bootDeadline) clearTimeout(bootDeadline);
     stopProgressWatch();
@@ -858,6 +877,7 @@ function installStdioLifecycle(
     });
     let stdinSawData = false;
     let sweepInFlight = false;
+    const sawForeground = foregroundWindow();
     let dataListenerAttached = false;
     idleSweepTimer = deps.setInterval(() => {
       if (shuttingDown) return;
@@ -873,17 +893,16 @@ function installStdioLifecycle(
         dataListenerAttached = true;
         return;
       }
-      if (stdinSawData) { stdinSawData = false; return; } // active — re-arm
-      if (sweepInFlight) return; // never overlap sweeps
-      // Degraded mode (db-availability 4c): background sweeps must not burn
+      if (sawForeground() || stdinSawData) { stdinSawData = false; return; } // active (stdin, or a warm CLI socket request: GBRA-156) — re-arm
+      // Never overlap sweeps. Degraded mode (db-availability 4c): background sweeps must not burn
       // the min-interval reconnect budget — tool calls own recovery.
-      if (isEngineDegradedForServe(engine)) return;
+      if (sweepInFlight || isEngineDegradedForServe(engine)) return;
       sweepInFlight = true;
       Promise.resolve()
-        .then(() => runIdleSweep(engine))
+        .then(() => loggedIdleSweep(deps.log, () => runIdleSweep(engine)))
         .catch(() => { /* idle sweep is best-effort; never kill serve */ })
         .finally(() => { sweepInFlight = false; });
-    }, IDLE_SWEEP_INTERVAL_MS);
+    }, idleSweepIntervalMs());
     (idleSweepTimer as { unref?: () => void } | null)?.unref?.();
   }
 

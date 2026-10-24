@@ -21,6 +21,9 @@
  *    discarded connection does (`PublicationDeadlineError`, CONNECTION_CLOSED). PGLite cannot cancel a running
  *    transaction (its signal is checked only before BEGIN), so the parked body's own rejection stands in for the
  *    discard there; on Postgres the signal also discards the connection. The charged hook brings each backoff forward.
+ *    The 300 ms ceiling applies only to publications the test parks: once it parks the last one it means to, the
+ *    publications after it run under the configured ceiling, so a retry slower than 350 ms on a loaded host (a worktree
+ *    publication writes and renames the page file inside its transaction) is not cancelled a second time.
  *    A guard stops the overruns far above the cap, so an unbounded loop ends committed. PGLite always; Postgres with DATABASE_URL.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
@@ -48,6 +51,7 @@ import { pathologicalArms } from './harness.ts';
 const op = (name: string) => operations.find(o => o.name === name)!;
 const page = (title: string) => `---\ntitle: ${title}\ntype: note\n---\n# ${title}\n\nBody of ${title}.\n`;
 const CEILING_MS = 300, GRACE_MS = 50;
+const INJECTED = { ceilingMs: CEILING_MS, graceMs: GRACE_MS };
 /** Parked past the ceiling and its grace, when the owner has cancelled the publication. */
 const PARK_MS = CEILING_MS + GRACE_MS + 200;
 const GUARD = 14;
@@ -92,6 +96,8 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
       }
       if (point === 'publication:before_commit' && seen.claims <= GUARD && overruns(seen.claims)) {
         seen.publications++;
+        // The next claim reads its ceiling before it prepares: only a publication this hook will park keeps the injected one.
+        setTiming(overruns(seen.claims + 1) ? INJECTED : undefined);
         await new Promise(resolve => setTimeout(resolve, PARK_MS));
         throw discarded();
       }
@@ -102,7 +108,7 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
   beforeAll(async () => {
     if (backend === 'pglite') { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }
     else { const pg = await isolatedPersistencePostgres(databaseUrl!); engine = pg.engine; closePostgres = pg.close; }
-    setTiming({ ceilingMs: CEILING_MS, graceMs: GRACE_MS });
+    setTiming(INJECTED);
   }, 120_000);
   afterAll(async () => {
     setTiming(undefined);
@@ -113,6 +119,7 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
   afterEach(async () => {
     installFaultHook(undefined);
     await disposePersistenceConsumer(engine);
+    setTiming(INJECTED);
     await engine.executeRaw("DELETE FROM config WHERE key IN ('persistence.max_transient_retries')");
     resetWriteSwitches();
   });
@@ -239,6 +246,8 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
         if (together < 2 || grouped.length >= GUARD) return;
         grouped.push([...unpublished, detail.requestId!]);
         unpublished.clear();
+        // The one parked publication: each member's own publication after it runs under the configured ceiling.
+        setTiming(undefined);
         await new Promise(resolve => setTimeout(resolve, PARK_MS));
         throw discarded();
       });
@@ -258,6 +267,49 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
       for (const { sourcePath } of files) expect(await engine.readPageSnapshot(sourcePath.replace(/\.md$/, ''), { sourceId })).not.toBeNull();
     }, 180_000);
 
+    test('a member a group interruption charged is claimed and prepared again even when its backoff elapses before the pass ends', async () => {
+      await engine.setConfig('persistence.max_transient_retries', '2');
+      resetWriteSwitches();
+      const dir = `grp-slow-${++n}`;
+      mkdirSync(join(brainDir, dir), { recursive: true });
+      const files = ['a', 'b'].map(name => {
+        const sourcePath = `${dir}/${name}.md`;
+        writeFileSync(join(brainDir, sourcePath), page(`Slow ${name} ${n}`));
+        return { filePath: join(brainDir, sourcePath), sourcePath };
+      });
+      // As above, and each member's charge is followed by a pause longer than the first backoff (1 s), as on a loaded host:
+      // the first member's backoff has elapsed before the pass is done with the group, so only the charge itself keeps the
+      // pass from taking that claim back and publishing its old preparation under it.
+      const unpublished = new Set<string>(), claims = new Map<string, number>(), grouped: string[][] = [];
+      installFaultHook(async (point, detail) => {
+        if (detail.sourceId !== sourceId) return;
+        if (point === 'consumer:preparing') { unpublished.add(detail.requestId!); claims.set(detail.requestId!, (claims.get(detail.requestId!) ?? 0) + 1); return; }
+        if (point === 'persistence:recovery_interruption_charged') { await new Promise(resolve => setTimeout(resolve, 1_200)); return; }
+        if (point !== 'publication:before_commit') return;
+        const together = unpublished.size;
+        unpublished.delete(detail.requestId!);
+        if (together < 2 || grouped.length >= GUARD) return;
+        grouped.push([...unpublished, detail.requestId!]);
+        unpublished.clear();
+        // The one parked publication: each member's own publication after it runs under the configured ceiling.
+        setTiming(undefined);
+        await new Promise(resolve => setTimeout(resolve, PARK_MS));
+        throw discarded();
+      });
+      const results = await withEnv({ GBRAIN_HOME: home }, () => importManagedFiles(engine, files, { sourceId, noEmbed: true }));
+      installFaultHook(undefined);
+      expect(results.map(result => result.status === 'rejected' ? (result.reason as { code?: string }).code : result.status)).toEqual(['fulfilled', 'fulfilled']);
+      expect(grouped.length).toBe(1);
+      const rows = await engine.executeRaw<{ request_id: string; state: string; transient_interruptions: number }>(
+        "SELECT request_id::text AS request_id,state,transient_interruptions FROM persistence_requests WHERE source_id=$1 AND intent->>'import_batch' IS NOT NULL AND slug LIKE $2 ORDER BY sequence",
+        [sourceId, `${dir}/%`]);
+      expect(rows.length).toBe(2);
+      for (const member of rows) {
+        expect(member).toMatchObject({ state: 'committed', transient_interruptions: 1 });
+        expect(claims.get(member.request_id)).toBe(2);
+      }
+    }, 180_000);
+
     test('a single overrun is retried, never a terminal storage_error (on Postgres the retried publish surfaces as a bare AbortError), and commits', async () => {
       const slug = `wt/overrun-once-${++n}`;
       expect(await call({ slug, content: page(`Prior ${n}`), request_id: randomUUID() }, sourceId)).toMatchObject({ state: 'committed' });
@@ -275,8 +327,10 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
    * #5984 lanes (Postgres only): a lane group the ceiling cancels while its predecessor group still publishes releases
    * its claims (laneFallback) instead of taking the single path, and charges each member there. Eight pages in bulk
    * groups on two lanes: the first group parks at `lane:applied` until the second's release is seen; the second overruns once at
-   * `lane:applied` (inside its transaction, before its turn) and rejects as the discarded connection does. Without the
-   * charge on release, a lane group the ceiling cancels every time would be released and claimed again without bound.
+   * `lane:applied` (inside its transaction, before its turn) and rejects as the discarded connection does. Its ceiling runs
+   * from the start of its publication, so a stall or a late first BEGIN can cancel it before it reaches `lane:applied`: its
+   * release charge then names it, and it is not overrun again. Without the charge on release, a lane group the ceiling
+   * cancels every time would be released and claimed again without bound.
    */
   (backend === 'postgres' ? describe : describe.skip)('lane group (laneFallback)', () => {
     let lanes: BrainEngine;
@@ -312,6 +366,9 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
           const [charged] = await lanes.executeRaw<{ grp: string | null; blocked: string | null }>(
             "SELECT intent->>'group' AS grp,blocked_reason AS blocked FROM persistence_requests WHERE request_id=$1::uuid", [detail.requestId]);
           charges.push(charged!);
+          if (second === null && charged!.grp && charged!.blocked === 'group_member_waiting' && charged!.grp !== (await groupOf(detail.requestId!)).first) {
+            overrun.add(charged!.grp); second = charged!.grp;
+          }
           if (charged!.grp === second) releaseFirst();
           return;
         }
@@ -332,9 +389,11 @@ for (const { backend, databaseUrl } of pathologicalArms()) describe(`[${backend}
       });
       try {
         await performSync(lanes, { sourceId: id, noPull: true, noEmbed: true, noExtract: true, drain: true, lanes: 2 });
-        await waitFor(async () => (await lanes.executeRaw<{ n: number }>(
-          "SELECT count(*)::int AS n FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_import' AND state<>'committed'", [id]))[0]!.n === 0,
-        { timeoutMs: 120_000, label: 'every lane page commits' });
+        await waitFor(async () => {
+          const [imports] = await lanes.executeRaw<{ pending: number; committed: number }>(`SELECT count(*) FILTER (WHERE state<>'committed')::int AS pending,
+            count(DISTINCT slug) FILTER (WHERE state='committed')::int AS committed FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_import'`, [id]);
+          return imports!.pending === 0 && imports!.committed === 8;
+        }, { timeoutMs: 120_000, label: 'all eight lane pages commit' });
       } finally { installFaultHook(undefined); }
       expect(overrun.size).toBe(1);
       const members = await lanes.executeRaw<{ slug: string; transient_interruptions: number }>(

@@ -20,7 +20,7 @@ export const WRITE_ERROR_CODES = [
   'core_budget_exceeded', 'core_mark_owner_only', 'core_remote_edit_refused', 'core_delete_owner_only',
   'timeline_rows_would_be_removed', 'purged_content', 'preparation_stalled',
   'fence_unrenderable', 'page_body_segmented', 'revision_changed', 'tail_changed',
-  'write_outcome_unknown', 'write_interrupted',
+  'write_outcome_unknown', 'write_interrupted', 'connection_inherited_read_only',
 ] as const;
 
 export type WriteErrorCode = typeof WRITE_ERROR_CODES[number];
@@ -56,6 +56,8 @@ export interface WriteReceipt {
   created_at?: string;
   updated_at?: string;
   diagnostic?: WriteDiagnostic;
+  /** #7248: a remember's target page and the entity slug its fact is keyed under (set on its own replies, never read back from the journal). */
+  target?: { slug: string | null; entity_slug: string | null };
 }
 
 /** Wire names stay separate from the engine's camelCase precondition. */
@@ -149,6 +151,7 @@ export function publicWriteReceipt(receipt: WriteReceipt): WriteReceipt {
     } } : {}),
     ...(receipt.created_at !== undefined ? { created_at: receipt.created_at } : {}),
     ...(receipt.updated_at !== undefined ? { updated_at: receipt.updated_at } : {}),
+    ...(receipt.target !== undefined ? { target: receipt.target } : {}),
     ...(!isTerminalWriteState(receipt.state) && isWriteDiagnostic(receipt.diagnostic) ? { diagnostic: {
       age_ms: receipt.diagnostic.age_ms, assessment: receipt.diagnostic.assessment,
       reason: receipt.diagnostic.reason, next_action: receipt.diagnostic.next_action,
