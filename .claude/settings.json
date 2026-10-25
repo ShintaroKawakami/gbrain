@@ -1,0 +1,8 @@
+{
+  "claudeMdExcludes": [
+    "/Users/*/.claude/rules/general/constructive-dissent.md",
+    "/Users/*/business/AGENT-HUB/.claude/rules/general/constructive-dissent.md",
+    "/Users/*/.claude/rules/general/mandate-registry.md",
+    "/Users/*/business/AGENT-HUB/.claude/rules/general/mandate-registry.md"
+  ]
+}
