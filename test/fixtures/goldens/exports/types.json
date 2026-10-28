@@ -5015,6 +5015,7 @@
         "kind": "interface",
         "members": [
           "dir: string",
+          "exactPath?: boolean | undefined",
           "index?: number | undefined",
           "name: string",
           "needsResolution?: boolean | undefined",
@@ -6417,7 +6418,7 @@
         "kind": "interface",
         "members": [
           "agentCallable?: true | undefined",
-          "annotations?: { title?: string; readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; } | undefined",
+          "annotations?: { title?: string; readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean; } | undefined",
           "area?: string | undefined",
           "cliHints?: { name?: string; aliases?: string[]; positional?: string[]; stdin?: string; hidden?: boolean; } | undefined",
           "cliOnly?: { argv: readonly string[]; } | undefined",

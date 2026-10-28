@@ -186,7 +186,7 @@ export async function produceEntitylessFactProposals(
         clusters += 1;
         const best = [...evidenceGroup].sort((a, b) => b.confidence - a.confidence || a.id - b.id)[0]!;
         const weight = clamp01(evidenceGroup.reduce((sum, fact) => sum + fact.confidence, 0) / evidenceGroup.length);
-        const since = new Date(Math.min(...evidenceGroup.map(fact => fact.valid_from.getTime()))).toISOString().slice(0, 10);
+        const since = new Date(Math.min(...evidenceGroup.map(fact => fact.valid_from.getTime()))).toISOString().split('T')[0]!;
         const evidence: EntitylessProposalEvidenceV1 = {
           version: 1,
           reason: 'subject_unknown',
