@@ -38,7 +38,7 @@ import { cliSocketRefusalsEntry } from '../src/commands/doctor/checks/cli-socket
 import { loadOperation } from '../src/core/operation-load.ts';
 import { isResultFrame, reviveOperationError, serializeOperationError, type CliSocketRequest, type ResultFrame } from '../src/core/cli-socket/protocol.ts';
 import { queueFirstFallbackHop, takeChatFallbackHopNotices, __resetChatFallbackHopNoticeForTests } from '../src/core/ai/fallback-hop-queue.ts';
-import { installOutputCapture, OutputCapture, withOutputCapture } from '../src/core/cli-socket/output-capture.ts';
+import { _uninstallOutputCaptureForTests, installOutputCapture, OutputCapture, withOutputCapture } from '../src/core/cli-socket/output-capture.ts';
 import { opError, OperationError } from '../src/core/ops/contract.ts';
 import { loadConfigWithEngine, type GBrainConfig } from '../src/core/config.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -56,7 +56,7 @@ function runDir(): string {
 let root: string;
 
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'gbrain-cli-sock-')); });
-afterEach(() => { rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { rmSync(root, { recursive: true, force: true }); _uninstallOutputCaptureForTests(); });
 
 function homeWithConfig(name: string, body = '{"engine":"postgres"}'): { dir: string; file: string } {
   const dir = join(root, name, '.gbrain');
@@ -348,6 +348,17 @@ describe('serve listener', () => {
     return { binding, lines, path: cliSocketPath(home) };
   }
 
+  test('closing a serve drops its exit listener and the test undo puts console and stderr back', async () => {
+    const before = { exits: process.listenerCount('exit'), log: console.log, error: console.error, write: process.stderr.write };
+    const { binding } = await start();
+    expect(process.listenerCount('exit')).toBe(before.exits + 1);
+    expect(console.log).not.toBe(before.log);
+    binding!.close();
+    expect(process.listenerCount('exit')).toBe(before.exits);
+    _uninstallOutputCaptureForTests();
+    expect([console.log, console.error, process.stderr.write]).toEqual([before.log, before.error, before.write]);
+  });
+
   test('this platform reads peer credentials (otherwise the serve would refuse to start)', () => {
     if (process.platform === 'linux' || process.platform === 'darwin') expect(peerCredSupport().ok).toBe(true);
   });
@@ -368,6 +379,22 @@ describe('serve listener', () => {
     ]);
     await exchangeCliSocket(path, request({ ...serveIdentity(), version: '1.0.1' }), 5_000);
     expect(started.lines.filter(line => line.includes('identity_mismatch')).length).toBe(2);
+  });
+
+  test('GBRA-175: a probe gets the handshake alone, runs nothing, and names a version mismatch', async () => {
+    let executed = 0;
+    const { path } = await start({ execute: async () => { executed++; return { frame: okFrame, settled: Promise.resolve() }; } });
+    const probe = (identity: CliSocketIdentity) => new Promise<unknown[]>((resolveFrames, reject) => {
+      const socket = net.createConnection(path);
+      let text = '';
+      socket.on('data', data => { text += data.toString(); });
+      socket.once('error', reject);
+      socket.once('close', () => resolveFrames(text.trim().split('\n').filter(Boolean).map(line => JSON.parse(line))));
+      socket.once('connect', () => socket.write(JSON.stringify({ v: 1, kind: 'probe', identity }) + '\n'));
+    });
+    expect(await probe(serveIdentity())).toEqual([{ v: 1, accepted: true }]);
+    expect(await probe({ ...serveIdentity(), version: '1.0.1' })).toEqual([{ v: 1, accepted: false, reason: 'identity_mismatch', mismatch: 'version' }]);
+    expect(executed).toBe(0);
   });
 
   test('a refusal is counted by part (never its value) for doctor cli_socket_refusals, and the CLI prints a degraded notice whatever GBRAIN_DEBUG says', async () => {

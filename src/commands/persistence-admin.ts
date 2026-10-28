@@ -17,10 +17,11 @@ import { bigintToStringReplacer } from '../core/utils.ts';
 export const WRITER_HELP = `Usage:
   gbrain sources writer status [<source>] [--probe] [--json]
   gbrain sources writer failures <source> [--state all] [--group-by category] [--since 7d] [--limit 20] [--before <cursor>]
-    [--category <c>] [--code <c>] [--origin <o>|none] [--json]
+    [--category <c>] [--code <c>] [--origin <o>|none] [--operation <op>] [--json]
   gbrain sources writer movement [<source>] [--wait <dur>] [--warn-only] [--json]
   gbrain sources writer retry-effects <source> --request-id <uuid> [--admin-intent writer_retry_effects --expected-state <admin_state>] [--dry-run] [--json]
   gbrain sources writer retry-effects <source> --parked-pushes [--dry-run] [--json]
+  gbrain sources writer retry-effects <source> --parked-code <code> [--dry-run] [--json]
   gbrain sources writer git-durability <source> --enable|--disable [--pat-file <path>] [administration options] [--dry-run] [--json]
   gbrain sources writer claim <source> --path <directory> [administration options] [--dry-run] [--json]
   gbrain sources writer activate --confirm-quiesced [--cleanup-dead-local-locks] [--shared-skills] [administration options] [--dry-run] [--json]
@@ -35,7 +36,8 @@ failures (read-only) lists the source's write receipts that ended without commit
 (failed, conflict, cancelled) plus any still holding a recovery record, newest first, each
 with its class, safe actions, whether a person decides, its disposition (superseded,
 already_written, duplicate or unknown), an inspect command and its fix. --group-by category
-groups them on code, origin and category, each group with its exact drill-down filter.
+groups them on code, origin and category (a sync_fault group also on its operation), each
+group with its exact drill-down filter; --operation <op> keeps one write operation.
 A full page prints truncated with the next command (--before <cursor>). Unresolved rows by
 default; --state all adds resolved and historical ones. Human table by default, JSON with --json.
 Inspect status first. movement proves that managed sync data moves over a window
@@ -98,6 +100,10 @@ retry-effects <source> --parked-pushes does the same without a credential change
 attempt per Git effect of the source's worktree parked on a push (git_push_unavailable,
 push_unconfirmed, integrate_conflict); a push the remote rejected because it moved publishes
 over the remote without moving the checkout (gbrain sources refresh brings remote files in).
+retry-effects <source> --parked-code <code> gives one more attempt to every Git effect of the
+source's worktree with a target parked on that code; doctor parked_effects and writer status list
+each parked code with its command. A target a .gitignore rule excludes parks at once as
+git_target_ignored, naming the rule: change the rule first, or the retry parks it again.
 lock sets an opt-in, brain-level writer admin lock (config key persistence.writer_admin_lock)
 and unlock clears it; both are local-only, idempotent and print the resulting state.
 While locked, writer claim, activate and transfer (prepare, accept and cancel) are refused with
@@ -156,8 +162,8 @@ export function parsePersistenceAdminArgs(group: Group, args: string[]): {
     '--path': 'path', '--source': 'source_id', '--expected-epoch': 'expected_epoch', '--manifest': 'manifest',
     '--source-ids': 'source_ids', '--scopes': 'scopes', '--allowed-operations': 'allowed_operations',
     '--slug-prefixes': 'slug_prefixes', '--limit': 'limit', '--before': 'before',
-    '--admin-intent': 'admin_intent', '--expected-state': 'expected_state', '--request-id': 'request_id', '--pat-file': 'pat_file',
-    '--state': 'state', '--group-by': 'group_by', '--since': 'since', '--code': 'code', '--origin': 'origin', '--category': 'category',
+    '--admin-intent': 'admin_intent', '--expected-state': 'expected_state', '--request-id': 'request_id', '--pat-file': 'pat_file', '--parked-code': 'parked_code',
+    '--state': 'state', '--group-by': 'group_by', '--since': 'since', '--code': 'code', '--origin': 'origin', '--category': 'category', '--operation': 'operation',
   };
   const arrays = new Set(['source_ids', 'scopes', 'allowed_operations', 'slug_prefixes']);
   const seen = new Set<string>();

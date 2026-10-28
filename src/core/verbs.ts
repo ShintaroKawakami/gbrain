@@ -65,7 +65,7 @@ const remember: Operation = {
   name: 'remember',
   idempotent: true,
   outputRedaction: 'no_stored_text',
-  description: 'MEMORY VERB (v1): save facts with provenance. Set `entity` (the subject) or recall misses it. Branch on `status` (inserted|duplicate|superseded); write_pending: poll get_write_request.',
+  description: 'Save facts with provenance; set `entity` (the subject) or recall misses it. Branch on `status`; write_pending: poll get_write_request.',
   params: {
     ...AGENT_CONTENT_PARAMS,
     fact: { type: 'string', description: 'One claim.' },
@@ -86,6 +86,7 @@ const remember: Operation = {
     valid_from: {
       type: 'string',
       description: 'When true (ISO).',
+      fullSurfaceOnly: true,
     },
     entity: {
       type: 'string',
@@ -94,6 +95,7 @@ const remember: Operation = {
     infer_entity: {
       type: 'boolean',
       description: 'Default true.',
+      fullSurfaceOnly: true,
     },
     kind: {
       type: 'string', description: 'Default fact.',
@@ -105,6 +107,7 @@ const remember: Operation = {
       // [2026-10-24][fix] 「world」を ChatGPT が「世界公開で保存」と要約し、安全判定で保存のたびに確認が出ていた。
       // world は接続中の brain の中だけで公開ではないので、省略を促し「公開ではない」と明記する。
       description: 'Omit; default is this brain, not public.',
+      fullSurfaceOnly: true,
     },
     replaces: { type: 'string', description: 'fact_id this fact replaces (same entity, or none).', fullSurfaceOnly: true },
   },
@@ -225,7 +228,7 @@ const entity: Operation = {
   mutating: false,
   idempotent: true,
   outputRedaction: 'retrieval',
-  description: 'MEMORY VERB (v1): person/company/account card, zero LLM. Previews are not evidence: fetch the page before stating status or dates. Miss: found:false with near matches (create_safety). Facts: recall.',
+  description: 'Person/company/account card, zero LLM. Previews are not evidence: fetch the page before stating status or dates. Miss: found:false with near matches (create_safety). Facts: recall.',
   params: {
     name: { type: 'string', description: 'Name, alias or slug.' },
     names: { type: 'array', items: { type: 'string' }, description: 'Or up to 50 names/codes at once: compact rows.' },
@@ -317,7 +320,7 @@ const synthesize: Operation = {
   mutating: false,
   idempotent: true,
   outputRedaction: 'retrieval',
-  description: '[EXPENSIVE / SLOW: LLM calls, costs money] MEMORY VERB (v1): answer a broad question across pages with citations. For lookups use recall or entity.',
+  description: '[EXPENSIVE / SLOW: LLM calls] Cited answer to a broad question across pages. Lookups: recall or entity.',
   params: {
     question: { type: 'string', description: 'The question.', required: true },
     since: { type: 'string', description: 'Window start (ISO 8601).' },
@@ -452,7 +455,7 @@ const forget: Operation = {
   name: 'forget',
   idempotent: true,
   outputRedaction: 'no_stored_text',
-  description: 'MEMORY VERB (v1): expire a remembered fact by its fact_id (never a page slug). Idempotent; the audit trail is kept.',
+  description: 'Expire a remembered fact by its fact_id (never a page slug). Idempotent; the audit trail is kept.',
   params: {
     request_id: WRITE_REQUEST_PARAM,
     id: { type: 'string', required: true, description: 'fact_id from remember or recall.' },

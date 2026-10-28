@@ -13,6 +13,7 @@ import { redirectStdoutLoggingToStderr } from '../core/console-prefix.ts';
 import { startFactsDrainScheduler, type FactsDrainScheduler, type FactsDrainSchedulerOpts } from '../core/facts/drain-scheduler.ts';
 import { startMovementWatch, type MovementWatch } from '../core/persistence/sync-movement.ts';
 import { startServeHeadWatcher } from '../core/serve-head-watcher.ts';
+import { isReadOnlyServeArgs, readOnlyServeSkipsResidentDuties } from '../core/direct-pool-profile.ts';
 import { onForwardProgress } from '../core/forward-progress.ts';
 import { foregroundWindow } from '../core/foreground-activity.ts';
 import { graduationHandoffRequested, writeServeGraduationEnvelope } from '../core/persistence/graduation-serve-guard.ts';
@@ -293,6 +294,10 @@ export async function runServe(
   const sourceGuard = args.includes('--source-guard');
   // Opt-in warm CLI socket (core/cli-socket/server.ts): off, the serve loads nothing and reads nothing for it.
   const cliSocketOn = args.includes('--cli-socket') || MERGED_CONFIG_BY_ENGINE.get(engine)?.serve_cli_socket === true;
+  // Opt-in vector index prewarm (core/vector-prewarm.ts): off, the serve loads nothing and reads nothing for it.
+  if (MERGED_CONFIG_BY_ENGINE.get(engine)?.serve_vector_prewarm === true) {
+    void import('../core/vector-prewarm.ts').then(m => m.prewarmAtServeStart(engine, opts.log ?? ((msg: string) => console.error(msg))));
+  }
   if (sourceGuard && isHttp) {
     // Loud posture warning (the --log-full-params precedent): the guard is a
     // stdio-lane mechanism; HTTP writes are scoped per token instead. An
@@ -847,9 +852,9 @@ function installStdioLifecycle(
   // budget). SEPARATE timer from the parent watchdog, through the same
   // injectable deps.setInterval seam, unref'd per the serve convention so
   // it can never hold the process open. Cleared in beginShutdown. Kill
-  // switch: GBRAIN_SWEEP=0 (seam: opts.sweepEnabled). Chunk-level stdin
-  // 'data' granularity is sufficient — same rationale as armIdle below.
-  const sweepEnabled = opts.sweepEnabled ?? (process.env.GBRAIN_SWEEP !== '0');
+  // switch: GBRAIN_SWEEP=0 (seam: opts.sweepEnabled). Chunk-level stdin 'data' granularity is sufficient (see armIdle).
+  const lean = readOnlyServeSkipsResidentDuties(isReadOnlyServeArgs(args), engine.kind); // #7599: a read-only Postgres serve
+  const sweepEnabled = !lean && (opts.sweepEnabled ?? (process.env.GBRAIN_SWEEP !== '0')); // runs no sweep
   if (sweepEnabled) {
     const runIdleSweep = opts.sweep ?? (async (e: BrainEngine) => {
       // #4409: the runner loads lazily here too — the sweep fires after
@@ -907,7 +912,7 @@ function installStdioLifecycle(
   }
 
   // Automatic facts drain (Lane D) and the #6317 movement watch: see installResidentTickers.
-  factsDrain = installResidentTickers(engine, opts, deps, () => shuttingDown);
+  factsDrain = lean ? null : installResidentTickers(engine, opts, deps, () => shuttingDown); // #7599: nor its resident tickers
 
   // Optional idle-timeout safety net. Default OFF; opt-in via
   // `--stdio-idle-timeout <seconds>`. The flag is for the rare case where

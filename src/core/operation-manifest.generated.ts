@@ -14,7 +14,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "name": "remember",
     "idempotent": true,
     "outputRedaction": "no_stored_text",
-    "description": "MEMORY VERB (v1): save facts with provenance. Set `entity` (the subject) or recall misses it. Branch on `status` (inserted|duplicate|superseded); write_pending: poll get_write_request.",
+    "description": "Save facts with provenance; set `entity` (the subject) or recall misses it. Branch on `status`; write_pending: poll get_write_request.",
     "params": {
       "source_id": {
         "type": "string",
@@ -63,7 +63,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "valid_from": {
         "type": "string",
-        "description": "When true (ISO)."
+        "description": "When true (ISO).",
+        "fullSurfaceOnly": true
       },
       "entity": {
         "type": "string",
@@ -71,7 +72,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "infer_entity": {
         "type": "boolean",
-        "description": "Default true."
+        "description": "Default true.",
+        "fullSurfaceOnly": true
       },
       "kind": {
         "type": "string",
@@ -90,7 +92,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
           "world",
           "private"
         ],
-        "description": "Omit; default is this brain, not public."
+        "description": "Omit; default is this brain, not public.",
+        "fullSurfaceOnly": true
       },
       "replaces": {
         "type": "string",
@@ -120,7 +123,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "mutating": false,
     "idempotent": true,
     "outputRedaction": "retrieval",
-    "description": "MEMORY VERB (v1): person/company/account card, zero LLM. Previews are not evidence: fetch the page before stating status or dates. Miss: found:false with near matches (create_safety). Facts: recall.",
+    "description": "Person/company/account card, zero LLM. Previews are not evidence: fetch the page before stating status or dates. Miss: found:false with near matches (create_safety). Facts: recall.",
     "params": {
       "name": {
         "type": "string",
@@ -168,7 +171,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "mutating": false,
     "idempotent": true,
     "outputRedaction": "retrieval",
-    "description": "[EXPENSIVE / SLOW: LLM calls, costs money] MEMORY VERB (v1): answer a broad question across pages with citations. For lookups use recall or entity.",
+    "description": "[EXPENSIVE / SLOW: LLM calls] Cited answer to a broad question across pages. Lookups: recall or entity.",
     "params": {
       "question": {
         "type": "string",
@@ -202,7 +205,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "name": "forget",
     "idempotent": true,
     "outputRedaction": "no_stored_text",
-    "description": "MEMORY VERB (v1): expire a remembered fact by its fact_id (never a page slug). Idempotent; the audit trail is kept.",
+    "description": "Expire a remembered fact by its fact_id (never a page slug). Idempotent; the audit trail is kept.",
     "params": {
       "request_id": {
         "type": "string",
@@ -248,7 +251,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "fuzzy": {
         "type": "boolean",
-        "description": "Fuzzy match."
+        "description": "Fuzzy match.",
+        "fullSurfaceOnly": true
       },
       "include_content": {
         "type": "boolean",
@@ -256,7 +260,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "content_only": {
         "type": "boolean",
-        "description": "Round-trip fields."
+        "description": "Round-trip fields.",
+        "fullSurfaceOnly": true
       },
       "body": {
         "type": "string",
@@ -359,11 +364,13 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "include_deleted": {
         "type": "boolean",
-        "description": "Soft-deleted too."
+        "description": "Soft-deleted too.",
+        "fullSurfaceOnly": true
       },
       "include_timeline_entries": {
         "type": "boolean",
-        "description": "Timeline rows."
+        "description": "Timeline rows.",
+        "fullSurfaceOnly": true
       },
       "grammar_diagnostics": {
         "type": "boolean",
@@ -376,7 +383,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "include_quarantined": {
         "type": "boolean",
-        "description": "Admin: quarantined body."
+        "description": "Admin: quarantined body.",
+        "fullSurfaceOnly": true
       },
       "min_trust": {
         "type": "string",
@@ -452,7 +460,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "allow_empty": {
         "type": "boolean",
         "required": false,
-        "description": "Allow an empty page."
+        "description": "Allow an empty page.",
+        "fullSurfaceOnly": true
       },
       "allow_shrink": {
         "type": "boolean",
@@ -463,7 +472,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "drop_timeline": {
         "type": "boolean",
         "required": false,
-        "description": "No Timeline in content: delete its entries."
+        "description": "No Timeline in content: delete its entries.",
+        "fullSurfaceOnly": true
       },
       "wait_ms": {
         "type": "number",
@@ -472,17 +482,20 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "source_kind": {
         "type": "string",
         "description": "Server-set remotely.",
-        "required": false
+        "required": false,
+        "fullSurfaceOnly": true
       },
       "source_uri": {
         "type": "string",
         "description": "Server-set remotely.",
-        "required": false
+        "required": false,
+        "fullSurfaceOnly": true
       },
       "ingested_via": {
         "type": "string",
         "description": "Server-set remotely.",
-        "required": false
+        "required": false,
+        "fullSurfaceOnly": true
       }
     },
     "mutating": true,
@@ -554,15 +567,16 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "limit": {
         "type": "number",
-        "description": "Max rows (default 50; remote max 100)."
+        "description": "Remote max 100."
       },
       "offset": {
         "type": "number",
-        "description": "Rows to skip."
+        "description": "Rows to skip.",
+        "fullSurfaceOnly": true
       },
       "updated_after": {
         "type": "string",
-        "description": "Pages updated after this ISO time."
+        "description": "ISO time."
       },
       "updated_after_slug": {
         "type": "string",
@@ -580,7 +594,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "include_deleted": {
         "type": "boolean",
-        "description": "Include soft-deleted pages."
+        "description": "Include soft-deleted pages.",
+        "fullSurfaceOnly": true
       },
       "slug_prefix": {
         "type": "string",
@@ -692,11 +707,13 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "expected_revision": {
         "type": "string",
-        "description": "Revision read; omit to create."
+        "description": "Revision read; omit to create.",
+        "fullSurfaceOnly": true
       },
       "force": {
         "type": "boolean",
-        "description": "Ignore the revision."
+        "description": "Ignore the revision.",
+        "fullSurfaceOnly": true
       },
       "request_id": {
         "type": "string",
@@ -714,23 +731,28 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "who": {
         "type": "string",
-        "description": "Event: comma-separated entity slugs."
+        "description": "Event: comma-separated entity slugs.",
+        "fullSurfaceOnly": true
       },
       "what": {
         "type": "string",
-        "description": "Event."
+        "description": "Event.",
+        "fullSurfaceOnly": true
       },
       "where": {
         "type": "string",
-        "description": "Event place."
+        "description": "Event place.",
+        "fullSurfaceOnly": true
       },
       "kind": {
         "type": "string",
-        "description": "Event kind."
+        "description": "Event kind.",
+        "fullSurfaceOnly": true
       },
       "depth": {
         "type": "string",
-        "description": "Event depth page to link."
+        "description": "Event depth page to link.",
+        "fullSurfaceOnly": true
       },
       "source_kind": {
         "type": "string",
@@ -758,7 +780,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "local_file": {
         "type": "string",
         "description": "Local CLI only.",
-        "required": false
+        "required": false,
+        "fullSurfaceOnly": true
       },
       "slug": {
         "type": "string",
@@ -841,7 +864,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "edits": {
         "type": "array",
         "required": true,
-        "description": "1 to 50 {old_text, new_text} replacements.",
+        "description": "1-50 replacements.",
         "items": {
           "type": "object",
           "properties": {
@@ -1204,7 +1227,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "limit": {
         "type": "number",
         "default": 25,
-        "description": "1-100 (default 25)."
+        "description": "1-100 (default 25).",
+        "fullSurfaceOnly": true
       },
       "before": {
         "type": "string",
@@ -1300,11 +1324,19 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "mode": {
         "type": "string",
-        "description": "Local callers only."
+        "description": "Local callers only.",
+        "fullSurfaceOnly": true
       },
       "source_id": {
         "type": "string",
         "description": "One source, or '__all__'."
+      },
+      "source_ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Narrow to these sources (omit or [] for all you can read)."
       },
       "types": {
         "type": "array",
@@ -1321,7 +1353,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "snippet_chars": {
         "type": "number",
-        "description": "Chars per row (0 = full)."
+        "description": "Chars per row (0 = full).",
+        "fullSurfaceOnly": true
       },
       "return_unit": {
         "type": "string",
@@ -1336,11 +1369,13 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "return_window": {
         "type": "number",
-        "description": "Window radius 1-3."
+        "description": "Window radius 1-3.",
+        "fullSurfaceOnly": true
       },
       "token_budget": {
         "type": "number",
-        "description": "Default 6000."
+        "description": "Default 6000.",
+        "fullSurfaceOnly": true
       },
       "salience": {
         "type": "string",
@@ -1349,7 +1384,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
           "on",
           "strong"
         ],
-        "description": "Boost emotional pages."
+        "description": "Boost emotional pages.",
+        "fullSurfaceOnly": true
       },
       "recency": {
         "type": "string",
@@ -1358,7 +1394,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
           "on",
           "strong"
         ],
-        "description": "Boost recent pages."
+        "description": "Boost recent pages.",
+        "fullSurfaceOnly": true
       },
       "fields": {
         "type": "string",
@@ -1366,7 +1403,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
           "lean",
           "full"
         ],
-        "description": "lean (remote default) or full."
+        "description": "lean (remote default) or full.",
+        "fullSurfaceOnly": true
       },
       "min_trust": {
         "type": "string",
@@ -1405,11 +1443,13 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "image": {
         "type": "string",
-        "description": "Base64 image."
+        "description": "Base64 image.",
+        "fullSurfaceOnly": true
       },
       "image_mime": {
         "type": "string",
-        "description": "MIME type of image."
+        "description": "MIME type of image.",
+        "fullSurfaceOnly": true
       },
       "limit": {
         "type": "number",
@@ -1434,7 +1474,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "snippet_chars": {
         "type": "number",
-        "description": "Chars per row (0 = full)."
+        "description": "Chars per row (0 = full).",
+        "fullSurfaceOnly": true
       },
       "return_unit": {
         "type": "string",
@@ -1449,11 +1490,13 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "return_window": {
         "type": "number",
-        "description": "Window radius 1-3."
+        "description": "Window radius 1-3.",
+        "fullSurfaceOnly": true
       },
       "token_budget": {
         "type": "number",
-        "description": "Evidence token cap."
+        "description": "Evidence token cap.",
+        "fullSurfaceOnly": true
       },
       "expand": {
         "type": "boolean",
@@ -1461,7 +1504,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "detail": {
         "type": "string",
-        "description": "low (compiled truth), medium (default) or high (all chunks)."
+        "description": "low (compiled truth), medium (default) or high (all chunks).",
+        "fullSurfaceOnly": true
       },
       "fields": {
         "type": "string",
@@ -1469,27 +1513,33 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
           "lean",
           "full"
         ],
-        "description": "lean (remote default) or full."
+        "description": "lean (remote default) or full.",
+        "fullSurfaceOnly": true
       },
       "mode": {
         "type": "string",
-        "description": "Local callers only."
+        "description": "Local callers only.",
+        "fullSurfaceOnly": true
       },
       "lang": {
         "type": "string",
-        "description": "Code language."
+        "description": "Code language.",
+        "fullSurfaceOnly": true
       },
       "symbol_kind": {
         "type": "string",
-        "description": "Code symbol type."
+        "description": "Code symbol type.",
+        "fullSurfaceOnly": true
       },
       "near_symbol": {
         "type": "string",
-        "description": "Anchor code symbol."
+        "description": "Anchor code symbol.",
+        "fullSurfaceOnly": true
       },
       "walk_depth": {
         "type": "number",
-        "description": "Code walk depth 1-2."
+        "description": "Code walk depth 1-2.",
+        "fullSurfaceOnly": true
       },
       "salience": {
         "type": "string",
@@ -1498,7 +1548,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
           "on",
           "strong"
         ],
-        "description": "Boost emotional pages."
+        "description": "Boost emotional pages.",
+        "fullSurfaceOnly": true
       },
       "recency": {
         "type": "string",
@@ -1507,7 +1558,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
           "on",
           "strong"
         ],
-        "description": "Boost recent pages."
+        "description": "Boost recent pages.",
+        "fullSurfaceOnly": true
       },
       "since": {
         "type": "string",
@@ -1521,6 +1573,13 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         "type": "string",
         "description": "One source, or '__all__'."
       },
+      "source_ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Narrow to these sources (omit or [] for all you can read)."
+      },
       "cross_modal": {
         "type": "string",
         "enum": [
@@ -1533,19 +1592,23 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "embedding_column": {
         "type": "string",
-        "description": "Registered embedding column."
+        "description": "Registered embedding column.",
+        "fullSurfaceOnly": true
       },
       "adaptive_return": {
         "type": "boolean",
-        "description": "true for one answer (fewer rows, never empty); omit for breadth."
+        "description": "true for one answer (fewer rows, never empty); omit for breadth.",
+        "fullSurfaceOnly": true
       },
       "autocut": {
         "type": "boolean",
-        "description": "Default on (never empty); false: full top-K for breadth."
+        "description": "Default on (never empty); false: full top-K for breadth.",
+        "fullSurfaceOnly": true
       },
       "relational": {
         "type": "boolean",
-        "description": "Relationship-graph arm (default on)."
+        "description": "Relationship-graph arm (default on).",
+        "fullSurfaceOnly": true
       },
       "min_trust": {
         "type": "string",
@@ -1608,7 +1671,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "return_window": {
         "type": "number",
-        "description": "Window radius 1-3."
+        "description": "Window radius 1-3.",
+        "fullSurfaceOnly": true
       },
       "token_budget": {
         "type": "number",
@@ -1946,10 +2010,14 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
   },
   {
     "name": "add_link",
-    "idempotent": false,
+    "idempotent": true,
     "outputRedaction": "no_stored_text",
     "description": "Create a typed link (edge) from one page to another in the same source. Use when recording a relationship (works_at, invested_in, mentions); remote page writes already link [[wikilinks]] to existing pages as mentions (receipt auto_links), so add only typed links or ones the text lacks. Needs write scope; an explicit link_type must be declared by the active schema pack. On page_not_found: resolve both slugs with resolve_slugs.",
     "params": {
+      "request_id": {
+        "type": "string",
+        "description": "Reuse only to retry."
+      },
       "from": {
         "type": "string",
         "required": true,
@@ -1997,10 +2065,14 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
   },
   {
     "name": "remove_link",
-    "idempotent": false,
+    "idempotent": true,
     "outputRedaction": "no_stored_text",
     "description": "Remove a link between two pages (optionally only one link_type or link_source). Use when a relationship was recorded wrongly. Needs write scope. On page_not_found: resolve both slugs with resolve_slugs.",
     "params": {
+      "request_id": {
+        "type": "string",
+        "description": "Reuse only to retry."
+      },
       "from": {
         "type": "string",
         "required": true,
@@ -2073,7 +2145,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "all_sources": {
         "type": "boolean",
-        "description": "Same as source_id __all__."
+        "description": "Same as source_id __all__.",
+        "fullSurfaceOnly": true
       },
       "limit": {
         "type": "number",
@@ -2131,7 +2204,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "all_sources": {
         "type": "boolean",
-        "description": "Same as source_id __all__."
+        "description": "Same as source_id __all__.",
+        "fullSurfaceOnly": true
       },
       "type": {
         "type": "string",
@@ -2231,7 +2305,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "all_sources": {
         "type": "boolean",
-        "description": "Same as source_id __all__."
+        "description": "Same as source_id __all__.",
+        "fullSurfaceOnly": true
       }
     },
     "scope": "read",
@@ -2640,7 +2715,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "params": {
       "schema_version": {
         "type": "number",
-        "description": "2 for the source-qualified catalog."
+        "description": "2 for the source-qualified catalog.",
+        "fullSurfaceOnly": true
       },
       "limit": {
         "type": "number",
@@ -2648,15 +2724,18 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "cursor": {
         "type": "string",
-        "description": "Version 2 cursor."
+        "description": "Version 2 cursor.",
+        "fullSurfaceOnly": true
       },
       "source_id": {
         "type": "string",
-        "description": "Version 2: one source."
+        "description": "Version 2: one source.",
+        "fullSurfaceOnly": true
       },
       "section": {
         "type": "string",
-        "description": "Only this routing section."
+        "description": "Only this routing section.",
+        "fullSurfaceOnly": true
       },
       "query": {
         "type": "string",
@@ -2683,27 +2762,33 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "params": {
       "schema_version": {
         "type": "number",
-        "description": "2 for an exact canonical revision."
+        "description": "2 for an exact canonical revision.",
+        "fullSurfaceOnly": true
       },
       "qualified_id": {
         "type": "string",
-        "description": "Version 2 skill id."
+        "description": "Version 2 skill id.",
+        "fullSurfaceOnly": true
       },
       "expected_brain_id": {
         "type": "string",
-        "description": "Brain id to assert."
+        "description": "Brain id to assert.",
+        "fullSurfaceOnly": true
       },
       "source_incarnation": {
         "type": "string",
-        "description": "From discovery."
+        "description": "From discovery.",
+        "fullSurfaceOnly": true
       },
       "pack_id": {
         "type": "string",
-        "description": "Pack id."
+        "description": "Pack id.",
+        "fullSurfaceOnly": true
       },
       "revision": {
         "type": "string",
-        "description": "Exact revision (default: head)."
+        "description": "Exact revision (default: head).",
+        "fullSurfaceOnly": true
       },
       "name": {
         "type": "string",
@@ -2787,7 +2872,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "source_incarnation": {
         "type": "string",
-        "description": "From the qualified catalog."
+        "description": "From the qualified catalog.",
+        "fullSurfaceOnly": true
       },
       "name": {
         "type": "string",
@@ -2795,15 +2881,18 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "pack_id": {
         "type": "string",
-        "description": "Pack id."
+        "description": "Pack id.",
+        "fullSurfaceOnly": true
       },
       "qualified_id": {
         "type": "string",
-        "description": "Version 2 skill id."
+        "description": "Version 2 skill id.",
+        "fullSurfaceOnly": true
       },
       "expected_brain_id": {
         "type": "string",
-        "description": "Brain id to assert."
+        "description": "Brain id to assert.",
+        "fullSurfaceOnly": true
       },
       "revision": {
         "type": "string",
@@ -3415,6 +3504,39 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "area": "pages"
   },
   {
+    "name": "whois",
+    "mutating": false,
+    "idempotent": true,
+    "outputRedaction": "retrieval",
+    "scope": "read",
+    "description": "Exact identity lookup: entity pages whose email, title or declared alias equals an email address or name, ignoring case, accents and quotes. Never fuzzy: empty matches means no exact match; ambiguous means several.",
+    "params": {
+      "query": {
+        "type": "string",
+        "required": true,
+        "description": "Email address or name, e.g. 'alice@acme-example.com'."
+      },
+      "types": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Page types; default: the schema pack's entity types."
+      },
+      "source_id": {
+        "type": "string",
+        "description": "One source; '__all__' spans your sources."
+      }
+    },
+    "cliHints": {
+      "name": "whois",
+      "positional": [
+        "query"
+      ]
+    },
+    "area": "pages"
+  },
+  {
     "name": "log_ingest",
     "idempotent": false,
     "outputRedaction": "no_stored_text",
@@ -3822,7 +3944,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "model": {
         "type": "string",
-        "description": "provider:model (default: subagent tier)."
+        "description": "provider:model (default: subagent tier).",
+        "fullSurfaceOnly": true
       },
       "allowed_tools": {
         "type": "array",
@@ -3836,15 +3959,18 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         "description": "Subset of your write prefixes.",
         "items": {
           "type": "string"
-        }
+        },
+        "fullSurfaceOnly": true
       },
       "max_turns": {
         "type": "number",
-        "description": "Default 20, max 100."
+        "description": "Default 20, max 100.",
+        "fullSurfaceOnly": true
       },
       "queue": {
         "type": "string",
-        "description": "Default \"default\"."
+        "description": "Default \"default\".",
+        "fullSurfaceOnly": true
       }
     },
     "mutating": true,
@@ -4743,15 +4869,14 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "name": "request_tools",
     "idempotent": false,
     "outputRedaction": "no_stored_text",
-    "description": "More tools: no arguments lists your catalog; {tools: [names]} returns schemas; {surface} widens it (per client or stdio session).",
+    "description": "More tools and params: no arguments lists your catalog; {tools: [names]} returns full schemas, every optional param included; {surface} widens it (per client or stdio session).",
     "area": "discovery",
     "agentCallable": true,
     "params": {
       "tools": {
         "type": "array",
         "items": {
-          "type": "string",
-          "description": "A tool name from the catalog."
+          "type": "string"
         },
         "description": "Tool names to fetch."
       },
@@ -4762,7 +4887,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
           "starter",
           "full"
         ],
-        "description": "Surface to widen to (stdio: this session only)."
+        "description": "stdio: this session only."
       }
     },
     "scope": "read",
@@ -4778,15 +4903,16 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
     "params": {
       "days": {
         "type": "number",
-        "description": "Window in days (default 14)."
+        "description": "Default 14."
       },
       "limit": {
         "type": "number",
-        "description": "Max results (default 20)."
+        "description": "Default 20."
       },
       "slugPrefix": {
         "type": "string",
-        "description": "Slug prefix."
+        "description": "Slug prefix.",
+        "fullSurfaceOnly": true
       },
       "recency_bias": {
         "type": "string",
@@ -4794,7 +4920,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
           "flat",
           "on"
         ],
-        "description": "flat (default) or on (per-prefix decay)."
+        "description": "flat (default) or on (per-prefix decay).",
+        "fullSurfaceOnly": true
       }
     },
     "cliHints": {
@@ -4817,11 +4944,13 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "lookback_days": {
         "type": "number",
-        "description": "Baseline days (default 30)."
+        "description": "Baseline days (default 30).",
+        "fullSurfaceOnly": true
       },
       "sigma": {
         "type": "number",
-        "description": "Threshold (default 3)."
+        "description": "Threshold (default 3).",
+        "fullSurfaceOnly": true
       }
     },
     "cliHints": {
@@ -5542,7 +5671,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         ]
       }
     },
-    "description": "MEMORY VERB (v1): read facts by entity, since or session_id; `query` also searches pages. Remote callers: world facts only. One card: entity; reasoning: synthesize.",
+    "description": "Read facts by entity, since or session_id; `query` also searches pages. Remote callers: world facts only. One card: entity; reasoning: synthesize.",
     "params": {
       "entity": {
         "type": "string",
@@ -5566,7 +5695,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
           "facts_first",
           "query_first"
         ],
-        "description": "Default facts_first."
+        "description": "Default facts_first.",
+        "fullSurfaceOnly": true
       },
       "source_id": {
         "type": "string",
@@ -5582,23 +5712,28 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "include_expired": {
         "type": "boolean",
-        "description": "Also expired; question ranks them."
+        "description": "Also expired; question ranks them.",
+        "fullSurfaceOnly": true
       },
       "supersessions": {
         "type": "boolean",
-        "description": "Supersession log only."
+        "description": "Supersession log only.",
+        "fullSurfaceOnly": true
       },
       "limit": {
         "type": "number",
-        "description": "Per-arm max (default 50, cap 100)."
+        "description": "Per-arm max (default 50, cap 100).",
+        "fullSurfaceOnly": true
       },
       "grep": {
         "type": "string",
-        "description": "Text substring."
+        "description": "Text substring.",
+        "fullSurfaceOnly": true
       },
       "include_pending": {
         "type": "boolean",
-        "description": "Pending count."
+        "description": "Pending count.",
+        "fullSurfaceOnly": true
       },
       "return_unit": {
         "type": "string",
@@ -5609,11 +5744,13 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
           "page",
           "auto"
         ],
-        "description": "results[] unit (see search)."
+        "description": "results[] unit (see search).",
+        "fullSurfaceOnly": true
       },
       "return_window": {
         "type": "number",
-        "description": "Window 1-3."
+        "description": "Window 1-3.",
+        "fullSurfaceOnly": true
       },
       "min_trust": {
         "type": "string",
@@ -5648,7 +5785,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         ]
       }
     },
-    "description": "MEMORY VERB (v1): core memory, budget-packed cards, open threads and hot facts for up to 8 entities, zero LLM. Call at session start and after compaction.",
+    "description": "Core memory, budget-packed cards, open threads and hot facts for up to 8 entities, zero LLM. Call at session start and after compaction.",
     "params": {
       "entities": {
         "type": "string",
@@ -5660,15 +5797,18 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "since": {
         "type": "string",
-        "description": "Open-thread events after this ISO time."
+        "description": "Open-thread events after this ISO time.",
+        "fullSurfaceOnly": true
       },
       "session_id": {
         "type": "string",
-        "description": "Opaque session id."
+        "description": "Opaque session id.",
+        "fullSurfaceOnly": true
       },
       "include_private": {
         "type": "boolean",
-        "description": "Local trusted callers only."
+        "description": "Local trusted callers only.",
+        "fullSurfaceOnly": true
       },
       "min_trust": {
         "type": "string",
@@ -5751,7 +5891,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         ]
       }
     },
-    "description": "MEMORY VERB (v1): pages, facts, thread events changed since a cursor, zero LLM. Pass session_id, cursor or since.",
+    "description": "Pages, facts, thread events changed since a cursor, zero LLM. Pass session_id, cursor or since.",
     "params": {
       "since": {
         "type": "string",
@@ -5759,7 +5899,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "since_slug": {
         "type": "string",
-        "description": "Legacy: next_cursor.slug."
+        "description": "Legacy: next_cursor.slug.",
+        "fullSurfaceOnly": true
       },
       "cursor": {
         "type": "string",
@@ -5767,7 +5908,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "entities": {
         "type": "string",
-        "description": "Entities for thread events (max 8)."
+        "description": "Entities for thread events (max 8).",
+        "fullSurfaceOnly": true
       },
       "budget_tokens": {
         "type": "number",
@@ -5779,7 +5921,8 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "include_private": {
         "type": "boolean",
-        "description": "Local trusted callers only."
+        "description": "Local trusted callers only.",
+        "fullSurfaceOnly": true
       },
       "min_trust": {
         "type": "string",
@@ -5877,6 +6020,10 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "status": {
         "type": "boolean",
         "description": "Report the stored receipt and completion of the purge named by request_id."
+      },
+      "continue": {
+        "type": "boolean",
+        "description": "With status: first continue the purge's sweep of stored derivation results (derivation_sweep pending or stalled), then report."
       },
       "vacuum": {
         "type": "boolean",

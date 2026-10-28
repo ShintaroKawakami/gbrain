@@ -26,7 +26,7 @@ const canonical = (path: string) => { try { return join(realpathSync(dirname(pat
 
 const effectStatusFix = readFix('Shows each source\'s canonical owner with its retrying and parked Git effects, read-only.',
   { argv: ['gbrain', 'sources', 'writer', 'status', '--json'] });
-const gitFailure = (message: string, cause: string) => opError('git_unavailable', message,
+export const gitFailure = (message: string, cause: string) => opError('git_unavailable', message,
   `${cause} The page write itself is committed; the effect worker tries this Git effect again and parks it after repeated failures. If it keeps failing, check the checkout with git status on the brain host.`,
   { fix: effectStatusFix });
 const rootGone = (relativePath: string) => opError('git_target_unsafe', 'The canonical Git root disappeared.',
@@ -60,12 +60,23 @@ export interface GitEffectOwner {
   onReclaim?: (receipt: IndexLockReclaim) => void;
 }
 
-interface GitSession { root: string; hooks: string; signal?: AbortSignal; timeoutMs: number; owner?: GitEffectOwner }
+export interface GitSession { root: string; hooks: string; signal?: AbortSignal; timeoutMs: number; owner?: GitEffectOwner; indexFile?: string }
 
-function run(session: GitSession, args: string[]) {
-  return execFileBounded('git', ['--literal-pathspecs', '-C', session.root, '-c', `core.hooksPath=${session.hooks}`, '-c', 'commit.gpgsign=false', ...args], {
-    timeout: session.timeoutMs, termGraceMs: GIT_TERM_GRACE_MS, maxBuffer: 1024 * 1024, signal: session.signal, env: gitChildEnv(GIT_ENV),
-  });
+const gitArgs = (session: GitSession, args: string[], literal: boolean) =>
+  [...(literal ? ['--literal-pathspecs'] : []), '-C', session.root, '-c', `core.hooksPath=${session.hooks}`, '-c', 'commit.gpgsign=false', ...args];
+const gitOptions = (session: GitSession) => ({ timeout: session.timeoutMs, termGraceMs: GIT_TERM_GRACE_MS, maxBuffer: 1024 * 1024, signal: session.signal });
+const sessionEnv = (session: GitSession) => session.indexFile ? { ...GIT_ENV, GIT_INDEX_FILE: session.indexFile } : GIT_ENV;
+
+function run(session: GitSession, args: string[], literal = true) {
+  return execFileBounded('git', gitArgs(session, args, literal), { ...gitOptions(session), env: gitChildEnv(sessionEnv(session)) });
+}
+
+/** A read-only git step whose stdout is raw bytes (a tree object); null when git exits non-zero. */
+export async function gitBytes(session: GitSession, args: string[]): Promise<Buffer | null> {
+  const { error, stdout } = await execFileBounded('git', gitArgs(session, args, true), { ...gitOptions(session), env: gitChildEnv(sessionEnv(session)), maxBuffer: 256 * 1024 * 1024, encoding: 'buffer' });
+  if (error && (error.killed || typeof error.code !== 'number')) throw gitFailure('Git execution did not finish within its bounded attempt.',
+    `A git command in the canonical checkout did not finish within ${Math.round(session.timeoutMs / 1000)} seconds or could not start.`);
+  return error ? null : stdout;
 }
 
 /** The deadline of one staging or commit step in a checkout whose index holds `indexBytes`. */
@@ -89,6 +100,18 @@ const staleLockFix = (root: string, lock: string, why: string): Action => ({
 });
 
 /**
+ * #6932: while this session's caller holds the checkout's writer lock, reclaims `lock` once it is proven abandoned
+ * (index-lock-reclaim.ts). True when it was reclaimed; otherwise why it stays.
+ */
+export function reclaimAbandonedIndexLock(session: GitSession, lock: string): true | string {
+  if (!session.owner || session.owner.writerLock.released) return 'this caller does not hold the checkout\'s writer lock';
+  const verdict = proveIndexLockAbandoned(lock, session.root, INDEX_LOCK_GRACE_MS);
+  const receipt = verdict.abandoned ? reclaimIndexLock(lock, session.root, verdict) : null;
+  if (receipt) { session.owner.onReclaim?.(receipt); return true; }
+  return verdict.abandoned ? 'the lock changed while it was being reclaimed' : verdict.reason;
+}
+
+/**
  * Git refused because another process holds this checkout's index lock. Only the checkout's own index lock
  * (`git rev-parse --git-path index.lock`, so linked worktrees resolve) qualifies; a ref or remote lock with
  * the same wording does not. #6932: while the canonical writer holds its writer lock, a lock it proves
@@ -106,11 +129,10 @@ async function indexLockError(session: GitSession, stderr: string, mayReclaim: b
   let age: number;
   try { age = Date.now() - statSync(lock).mtimeMs; } catch { return null; }
   let why = 'this caller does not hold the checkout\'s writer lock';
-  if (session.owner && !session.owner.writerLock.released && mayReclaim) {
-    const verdict = proveIndexLockAbandoned(lock, session.root, INDEX_LOCK_GRACE_MS);
-    const receipt = verdict.abandoned ? reclaimIndexLock(lock, session.root, verdict) : null;
-    if (receipt) { session.owner.onReclaim?.(receipt); return 'reclaimed'; }
-    why = verdict.abandoned ? 'the lock changed while it was being reclaimed' : verdict.reason;
+  if (mayReclaim) {
+    const reclaimed = reclaimAbandonedIndexLock(session, lock);
+    if (reclaimed === true) return 'reclaimed';
+    why = reclaimed;
   }
   if (age >= 0 && age < INDEX_LOCK_GRACE_MS) {
     return new OperationError('git_index_locked', 'Another Git process holds the canonical checkout index lock.', 'The effect is retried shortly.');
@@ -120,9 +142,9 @@ async function indexLockError(session: GitSession, stderr: string, mayReclaim: b
     { detail: lock, fix: staleLockFix(session.root, lock, why) });
 }
 
-async function git(session: GitSession, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
+export async function git(session: GitSession, args: string[], literal = true): Promise<{ stdout: string; stderr: string; code: number }> {
   for (let reclaimed = false; ; reclaimed = true) {
-    const { error, stdout, stderr } = await run(session, args);
+    const { error, stdout, stderr } = await run(session, args, literal);
     if (error && (error.killed || typeof error.code !== 'number')) throw gitFailure('Git execution did not finish within its bounded attempt.',
       `A git command in the canonical checkout did not finish within ${Math.round(session.timeoutMs / 1000)} seconds or could not start.`);
     const code = error?.code as number ?? 0;
@@ -161,6 +183,7 @@ async function stageTarget(session: GitSession, relativePath: string): Promise<{
     return { path: relativePath, state: 'unchanged' };
   }
   if (tracked.code === 0) return { path: relativePath, state: 'unchanged' };
+  if (existsSync(path)) await refuseIgnoredTarget(session, relativePath);
   if (existsSync(path)) throw new OperationError('git_target_unsafe', 'Git cannot identify the existing canonical file by its native spelling.',
     'Reconcile the index and worktree spelling before retrying publication.');
   let parent = dirname(path);
@@ -185,8 +208,28 @@ async function stageTarget(session: GitSession, relativePath: string): Promise<{
   return { path: relativePath, skip: { git: 'skipped', reason: 'target_absent', push: 'skipped' } };
 }
 
+/**
+ * GBRA-133: an existing untracked file a .gitignore rule excludes cannot be committed while the rule stands. It refuses
+ * as `git_target_ignored` naming the rule (`detail`), so the effect parks at once with the cause instead of looping.
+ */
+async function refuseIgnoredTarget(session: GitSession, relativePath: string): Promise<void> {
+  const status = await git(session, ['status', '--porcelain', '--ignored=matching', '--untracked-files=all', '--', relativePath]);
+  if (status.code !== 0 || !status.stdout.startsWith('!! ')) return;
+  // check-ignore takes no literal pathspecs; it only names the rule for the message.
+  const matched = await run(session, ['check-ignore', '-v', '--', relativePath], false);
+  throw ignoredTargetError(relativePath, matched.error ? '.gitignore' : matched.stdout.split('\t')[0]!.replace(/^(.*?):(\d+):/, '$1:$2: '));
+}
+
+/** The refusal of a target a .gitignore `rule` (`source:line: pattern`) excludes; `detail` names the rule. */
+export function ignoredTargetError(relativePath: string, rule: string): OperationError {
+  const error = new OperationError('git_target_ignored', `Git ignores ${relativePath} (${rule}), so its Git effect cannot commit it.`,
+    `Either remove or narrow the rule (${rule}) and commit that change, then retry the parked effects with gbrain sources writer retry-effects and --parked-code git_target_ignored for the source this checkout backs (gbrain sources writer status names it); or keep the file out of Git and leave the effect parked. The page itself is committed in the database.`);
+  error.detail = rule;
+  return error;
+}
+
 /** A git session with an empty hooks directory; `scaled` sizes its step deadline by the checkout's index. */
-async function withSession<T>(root: string, signal: AbortSignal | undefined, owner: GitEffectOwner | undefined, scaled: boolean,
+export async function withSession<T>(root: string, signal: AbortSignal | undefined, owner: GitEffectOwner | undefined, scaled: boolean,
   work: (session: GitSession) => Promise<T>): Promise<T> {
   const base = join(persistenceHome(), 'empty-hooks');
   mkdirSync(base, { recursive: true, mode: 0o700 });
@@ -199,6 +242,18 @@ async function withSession<T>(root: string, signal: AbortSignal | undefined, own
 }
 
 const commitText = (text: string) => text.replace(/[\u0000-\u001f\u007f]/g, '');
+
+/**
+ * The message paragraphs (`-m` arguments) of a commit of `commitPaths` (see commitGitTargets): the subject, the noted
+ * paths' lines when several paths commit together, and their trailers last.
+ */
+export function commitMessage(commitPaths: string[], noted: ReadonlyMap<string, GitCommitNote>): string[] {
+  const subject = commitPaths.length > 1 ? `gbrain: persist ${commitPaths.length} canonical memory updates`
+    : commitText(noted.get(commitPaths[0]!)?.subject ?? '') || 'gbrain: persist canonical memory update';
+  const body = commitPaths.length > 1 ? [...new Set([...noted.keys()].sort().map(path => commitText(noted.get(path)!.line)).filter(Boolean))] : [];
+  const trailers = [...new Set([...noted.keys()].sort().map(path => commitText(noted.get(path)!.trailer ?? '')).filter(Boolean))];
+  return [subject, ...(body.length ? [body.join('\n')] : []), ...(trailers.length ? [trailers.join('\n')] : [])];
+}
 
 /**
  * #5530: commit a group of single-file targets with one `commit --only`. The
@@ -291,11 +346,8 @@ export async function commitGitTargets(root: string, relativePaths: string[], si
     const commitPaths = [...new Set(changed.map(c => c.path))];
     const noted = new Map<string, GitCommitNote>();
     for (const c of changed) { const note = notes?.get(c.requested); if (note && !noted.has(c.path)) noted.set(c.path, note); }
-    const subject = commitPaths.length > 1 ? `gbrain: persist ${commitPaths.length} canonical memory updates`
-      : commitText(noted.get(commitPaths[0]!)?.subject ?? '') || 'gbrain: persist canonical memory update';
-    const body = commitPaths.length > 1 ? [...new Set([...noted.keys()].sort().map(path => commitText(noted.get(path)!.line)).filter(Boolean))] : [];
-    const trailers = [...new Set([...noted.keys()].sort().map(path => commitText(noted.get(path)!.trailer ?? '')).filter(Boolean))];
-    const result = await git(session, [...(commitPaths.some(path => removed.has(path)) ? NO_FSCACHE : []), 'commit', '--only', '-m', subject, ...(body.length ? ['-m', body.join('\n')] : []), ...(trailers.length ? ['-m', trailers.join('\n')] : []), '--', ...commitPaths]);
+    const message = commitMessage(commitPaths, noted).flatMap(paragraph => ['-m', paragraph]);
+    const result = await git(session, [...(commitPaths.some(path => removed.has(path)) ? NO_FSCACHE : []), 'commit', '--only', ...message, '--', ...commitPaths]);
     const outcome = result.code === 0 ? { git: 'committed' } : gitFailure('Cannot commit the canonical Git target.',
       `git commit failed for ${commitPaths.length} file(s); a missing Git identity (user.name, user.email) in that checkout is one cause to check.`);
     for (const c of changed) results.set(c.requested, outcome);

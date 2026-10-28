@@ -7,7 +7,7 @@ history lives in `CHANGELOG.md`, per-file detail in the tests and
 
 ## Quick start
 
-Prerequisites: Bun 1.4.0 or newer (CI pins 1.4.4), Git, and bash. E2E needs
+Prerequisites: Bun 1.4.4 or newer (CI pins 1.4.4), Git, and bash. E2E needs
 Docker for a `pgvector/pgvector:pg16` container and Python 3 on `PATH` (the E2E
 runner validates Bun's JUnit reports with the standard-library XML parser).
 
@@ -235,7 +235,7 @@ Recorded ownership changes:
 
 - `test/e2e/reconcile-crash.test.ts` and `test/e2e/reconcile-crash-unactivated.test.ts`:
   the PR owner is `persistence-validation.yml`, called from `test.yml` on every
-  PR on both supported Bun versions against pg16. Its "Require all
+  PR on every supported Bun version against pg16. Its "Require all
   reconciliation crash boundaries" step runs both files by name and uploads the
   crash manifests, unchanged. Both files are in `E2E_EXCLUSIONS`
   (`PERSISTENCE_VALIDATION_OWNED` in `scripts/e2e-matrix.ts`), so PR
@@ -1458,9 +1458,10 @@ cross-subsystem duplicate entries, and byte caps for the entry docs and referenc
 | **R2** | `mock.module(...)` anywhere in the file | `*.serial.test.ts` |
 | **R3** | `new PGLiteEngine(` outside ~50 lines after a `beforeAll(` line | The canonical block (below) in `beforeAll(` |
 | **R4** | `new PGLiteEngine(` without `engine.disconnect(` in an `afterAll(` block | `afterAll(() => engine.disconnect())` |
-| **R5** | `configureGateway(` with no `resetGateway(` (comments ignored): the global gateway leaks to later files | `afterAll(() => resetGateway())`; a child-script-only call takes `isolation-lint: R5-subprocess-only` |
+| **R5** | `configureGateway(` with no `resetGateway(`: the gateway leaks to later files | `afterAll(() => resetGateway())`; a child-script-only call takes `isolation-lint: R5-subprocess-only` |
 | **R6** | `currentExitCode(` with no verdict reset outside an after-hook | `beforeEach(() => _resetCliExitVerdictForTests())` |
-| **R7** | `__unconfigureGatewayForTests(` or `_clearGatewayForTests(` with no `resetGateway(` in an `afterEach`/`afterAll` hook (comments ignored): an empty gateway leaks into the next file, and an inline restore does not survive a throw or a `-t` filter | `afterEach(() => resetGateway())` (#6514) |
+| **R7** | `__unconfigureGatewayForTests(` or `_clearGatewayForTests(` with no `resetGateway(` in an after-hook: an inline restore does not survive a throw or a `-t` filter | `afterEach(() => resetGateway())` (#6514) |
+| **R9** | A process-global hook (see the script) with no undo in an after-hook | Its undo in `afterEach` |
 
 Files that violated these rules at the lint baseline are listed in `scripts/check-test-isolation.allowlist`. **The allow-list MUST shrink over time**: never add entries.
 
@@ -1770,7 +1771,7 @@ existing fence and timeline suites.
 
 `test/guarded-http.test.ts` and `test/guarded-http-tls.serial.test.ts` cover DNS,
 TLS identity and ports, redirects, deadlines, body limits, and cleanup. CI runs
-these boundaries on Bun 1.4.0 and 1.4.4, audits root and admin dependencies, and
+these boundaries on Bun 1.4.4, audits root and admin dependencies, and
 executes `scripts/test-gitleaks-config.sh` to prove fixture exceptions still
 report an unrelated secret in the same file. `scripts/scan-worktree-secrets.sh`
 scans tracked files plus new files eligible for commit; tracked ignored files

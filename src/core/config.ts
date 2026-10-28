@@ -8,7 +8,7 @@ import { loadGbrainEnvFile } from './gbrain-env-file.ts';
 import { dotenvValuesForKey } from './env-trust.ts';
 import { REMOTE_PRIVATE_PAGES_KEY } from './search/private-visibility.ts';
 import { RUNTIME_READER_CONFIG_KEYS } from './config-runtime-keys.ts';
-import { mergeServeCliSocket } from './published-config.ts';
+import { mergeServeCliSocket, mergeServeVectorPrewarm } from './published-config.ts';
 export { MERGED_CONFIG_BY_ENGINE } from './published-config.ts';
 
 /**
@@ -284,6 +284,7 @@ export interface GBrainConfig {
    */
   self_upgrade?: {
     mode?: 'auto' | 'notify' | 'off';
+    channel?: 'latest' | 'stable';
     /** Set true once the upgrade-time consent prompt has been shown. */
     mode_prompted?: boolean;
     /** Quiet-hours window for the autopilot silent channel. */
@@ -312,6 +313,8 @@ export interface GBrainConfig {
   embedding_multimodal_model?: string;
   /** DB-plane `serve.cli_socket`: the serve opens the warm CLI socket without `--cli-socket` (see published-config.ts). */
   serve_cli_socket?: boolean;
+  /** DB-plane `serve.vector_prewarm`: the serve prewarms the HNSW indexes into shared_buffers once at start (core/vector-prewarm.ts), default off. */
+  serve_vector_prewarm?: boolean;
 
   /**
    * v0.42 (#1981) — Retrieval Reflex. The context engine's deterministic
@@ -1226,7 +1229,7 @@ export async function loadConfigWithEngine(
       : engine,
   );
 
-  return mergeServeCliSocket(merged, snapshot);
+  return mergeServeVectorPrewarm(mergeServeCliSocket(merged, snapshot), snapshot);
 }
 
 /**
@@ -1516,6 +1519,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // didn't specify one: 'private' (default) | 'world'. Resolved by
   // src/core/facts/visibility.ts; explicit caller values always win.
   'facts.default_visibility',
+  'storage.git_lfs', // G7a: a git-canonical door commit under a Git LFS rule commits the LFS pointer; default off refuses it (persistence/git-declared.ts)
   'visibility.honor_aliases', // remote page reads honor `access`/`confidentiality` aliases on pages without `visibility`; default on, false opts out (search/private-visibility.ts)
   'facts.entity_inference', // #5836: write-time subject inference kill switch (subject-infer.ts)
   'facts.candidate_fusion', // C2: 'rrf_free' (default, cosine arm) | 'interleave' (cosine + keyword; facts/single-prepare.ts)
@@ -1659,6 +1663,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'skillpack.nag_disabled',
   // Self-upgrade (v0.42; file plane, read on the hot path)
   'self_upgrade.mode',
+  'self_upgrade.channel',
   'self_upgrade.mode_prompted',
   'self_upgrade.quiet_hours',
   'self_upgrade.failed_versions',
