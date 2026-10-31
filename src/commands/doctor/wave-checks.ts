@@ -373,6 +373,13 @@ export const WAVE_CHECKS: readonly WaveCheckSpec[] = [
     run: async (engine, scope) => (await import('./checks/captured-facts.ts')).capturedFactsCheck(engine, scope.sourceIds),
   },
   {
+    id: 'agent_session_facts', resolution: 'repair', registration: 'wave',
+    hostOnly: 'Classifying agent-session facts reads the session corpus on the brain host; the repair is explicit-only and needs the user\'s agreement.',
+    count: d => Number(d.evidenced ?? 0) + Number(d.ambiguous ?? 0),
+    impact: 'Some active facts from agent-launched sessions are still attributed to the owner',
+    run: async (engine, scope) => (await import('./checks/agent-session-facts.ts')).agentSessionFactsCheck(engine, scope.sourceIds),
+  },
+  {
     id: 'facts_redaction_marker', resolution: 'repair', registration: 'wave',
     hostOnly: 'Restoring redacted fact text reads the facts\' source pages and versions on the brain host; the repair is explicit-only.',
     count: d => Number(d.affected ?? 0),
@@ -423,8 +430,8 @@ export function checkHealthUnknown(check: Check): boolean {
 export interface WaveFinding { spec: WaveCheckSpec; check: Check; state: 'ok' | 'finding' | 'unknown' }
 
 /** Run wave checks; a throwing check becomes an unknown finding instead of aborting the rest. */
-export async function runWaveChecks(engine: BrainEngine, opts: WaveScope & { only?: WaveCheckSpec['registration']; remote?: boolean } = {}): Promise<WaveFinding[]> {
-  const specs = WAVE_CHECKS.filter(spec => (!opts.only || spec.registration === opts.only) && (!opts.remote || !spec.hostOnly));
+export async function runWaveChecks(engine: BrainEngine, opts: WaveScope & { only?: WaveCheckSpec['registration']; ids?: ReadonlySet<string>; remote?: boolean } = {}): Promise<WaveFinding[]> {
+  const specs = WAVE_CHECKS.filter(spec => (!opts.only || spec.registration === opts.only) && (!opts.ids || opts.ids.has(spec.id)) && (!opts.remote || !spec.hostOnly));
   const findings: WaveFinding[] = [];
   for (const spec of specs) {
     let check: Check;

@@ -611,6 +611,14 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "source_id": {
         "type": "string",
         "description": "One source, or '__all__'."
+      },
+      "source_ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Narrow to these sources (omit or [] for all you can read).",
+        "fullSurfaceOnly": true
       }
     },
     "scope": "read",
@@ -649,7 +657,7 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       },
       "detach": {
         "type": "boolean",
-        "description": "Restore a page whose recorded canonical file is gone from the checkout as a database-only page: it forgets the file, so sync never deletes it again. Only accepted when a plain restore refuses with canonical_file_absent; ask the user first."
+        "description": "Restore a page whose recorded canonical file is gone from the checkout as a database-only page: it forgets the file, so sync never deletes it again. Only accepted when a plain restore refuses with canonical_file_absent, or for a page under a declared storage.db_only dir whose recorded file left the checkout; ask the user first."
       }
     },
     "mutating": true,
@@ -5701,6 +5709,14 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
       "source_id": {
         "type": "string",
         "description": "One readable source."
+      },
+      "source_ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Narrow to these sources (omit or [] for all you can read).",
+        "fullSurfaceOnly": true
       },
       "since": {
         "type": "string",

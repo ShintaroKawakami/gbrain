@@ -605,6 +605,7 @@ async function prepareMaintenanceKind(engine: BrainEngine, row: WriteRequest, co
   if (row.intent?.kind === 'managed_maintenance_entityless_proposal_accept') return (await import('./entityless-proposal-evidence.ts')).prepareEntitylessProposalAccept(engine, row, config);
   if (row.intent?.kind === 'managed_maintenance_restore_extractor_facts') return (await import('../repair/extractor-facts.ts')).prepareExtractorFactsRestore(engine, row);
   if (row.intent?.kind === 'managed_maintenance_expire_captured_facts') return (await import('../repair/captured-facts.ts')).prepareCapturedFactsExpiry(engine, row);
+  if (row.intent?.kind === 'managed_maintenance_agent_session_facts') return (await import('../repair/agent-session-facts.ts')).prepareAgentSessionFactsWrite(engine, row);
   if (row.intent?.kind === 'managed_maintenance_restore_redacted_facts') return (await import('../repair/redacted-facts.ts')).prepareRedactedFactsRestore(engine, row);
   if (row.intent?.kind === 'managed_maintenance_tighten_fact_visibility') return (await import('../repair/visibility.ts')).prepareFactVisibilityTighten(engine, row);
   if (row.intent?.kind === 'managed_maintenance_conversation_label_retire') return (await import('../repair/conversation-labels.ts')).prepareConversationLabelRetirement(engine, row);

@@ -11,8 +11,13 @@ no token needed. Works with both PGLite and Supabase engines.
 ## Register (recommended)
 
 ```bash
-printf 'Y\n' | hermes mcp add gbrain --env GBRAIN_HOME=$HOME --connect-timeout 60 --command $(which gbrain) --args serve
+printf 'Y\n' | hermes mcp add gbrain --env GBRAIN_HOME=$HOME --connect-timeout 60 --command $(which gbrain) --args serve --surface starter --advertise verbs
 ```
+
+The tool list shows the seven memory verbs (`recall`, `remember`, `entity`, …)
+plus `request_tools`; every other operation stays callable, and `request_tools`
+lists it and returns its schema. Drop `--advertise verbs` to list every
+operation.
 
 `hermes mcp add` performs a real MCP handshake and tool discovery at add time,
 then prompts `Enable all N tools? [Y/n/select]:`. Three gotchas, all observed:
@@ -67,8 +72,19 @@ reaches the model next to the turn instead of only in the system prompt. Text
 outside the markers is never touched, and a re-run after an upgrade rewrites the
 command and moves its approval. When config.yaml already has a `hooks:` section,
 setup prints the entry to add yourself instead; approve it when Hermes asks (or
-set `HERMES_ACCEPT_HOOKS=1`). `hermes hooks doctor` checks it.
+set `HERMES_ACCEPT_HOOKS=1`). `hermes hooks doctor` checks it: setup runs it
+when `hermes` is on PATH and exits non-zero with `turn_hook_not_loaded` when the
+hook is not healthy ([repair](../guides/repair.md#turn-hook-not-loaded)).
 `--no-instructions` and `--remove` take the hook and its approval out.
+
+Hermes lists gbrain's tools only inside `tool_search`'s description, so with an
+MCP connection the rule also names them (`mcp_gbrain_recall`, `mcp_gbrain_entity`
+and the rest) and says to find them with `tool_search`.
+
+Search results also carry `_meta.brain_hot_memory`, the brain's recent facts.
+Hermes may pass them to the model; they can include other sessions' facts, so
+see [the channel's contract](../protocol/MCP_META_CHANNELS.md#brain_hot_memory)
+before relying on them.
 
 ## Direct config (equally supported)
 
@@ -81,6 +97,10 @@ mcp_servers:
     command: gbrain
     args:
       - serve
+      - --surface
+      - full
+      - --advertise
+      - verbs
     env:
       GBRAIN_HOME: /home/alice-example
     connect_timeout: 60.0
