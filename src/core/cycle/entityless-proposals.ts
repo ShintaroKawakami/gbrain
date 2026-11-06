@@ -13,7 +13,7 @@ const MIN_FACTS = 3;
 const MIN_OLDEST_AGE_MS = 24 * 60 * 60 * 1000;
 const CLUSTER_THRESHOLD = 0.85;
 
-interface RawEntitylessFact extends Omit<FactRow, 'embedding' | 'valid_from' | 'valid_until' | 'expired_at' | 'consolidated_at' | 'embedded_at' | 'created_at'> {
+interface RawEntitylessFact extends Omit<FactRow, 'embedding' | 'valid_from' | 'valid_until' | 'expired_at' | 'consolidated_at' | 'embedded_at' | 'created_at' | 'claim_value'> {
   embedding: string | number[] | Float32Array | null;
   valid_from: Date | string;
   valid_until: Date | string | null;
