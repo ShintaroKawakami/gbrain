@@ -97,6 +97,11 @@ export async function headBlob(root: string, path: string, signal?: AbortSignal)
   return quiet(gitRead(root, ['rev-parse', '--verify', '--quiet', `HEAD:./${relative(root, path).split(sep).join('/')}`], signal), signal);
 }
 
+/** The bytes of blob `blob` in `root`'s repository as text, or null when Git cannot read it. */
+export async function blobText(root: string, blob: string, signal?: AbortSignal): Promise<string | null> {
+  return gitRead(root, ['cat-file', 'blob', blob], signal).then(out => out, error => { if (signal?.aborted) throw error; return null; });
+}
+
 /**
  * The blob id HEAD holds at `path` when the working-tree file there is exactly that blob (`hash-object` applies the
  * path's clean filters, as `git add` would); null when the file differs, is absent, or HEAD has no entry there.
@@ -115,6 +120,11 @@ export async function landedCommit(root: string, from: string | null, path: stri
   return quiet(gitRead(root, ['rev-list', '-1', from ? `${from}..HEAD` : 'HEAD', '--', `:(literal)${relative(root, path).split(sep).join('/')}`]));
 }
 
+/** #8759: the text of `path` as `commit` holds it, or null when Git cannot read it there. */
+export async function fileAtCommit(root: string, commit: string, path: string): Promise<string | null> {
+  return gitRead(root, ['show', `${commit}:./${relative(root, path).split(sep).join('/')}`]).catch(() => null);
+}
+
 /** The commit HEAD names in `root`, or null on an unborn branch or when Git cannot read it. */
 export async function headCommit(root: string, signal?: AbortSignal): Promise<string | null> {
   return quiet(gitRead(root, ['rev-parse', '--verify', '--quiet', 'HEAD'], signal), signal);
@@ -128,7 +138,8 @@ function quiet(read: Promise<string>, signal?: AbortSignal): Promise<string | nu
  * The refusal: nothing was overwritten; a remember waits for its replay, any other write is resubmitted after the next sync.
  * GBRA-133: neither fix starts a sync; both read the status, so no caller puts a second sync owner beside a running one.
  */
-export function pendingImportRefusal(row: { source_id: string; slug: string; operation?: string }, remote: boolean): OperationError {
+export function pendingImportRefusal(row: { source_id: string; slug: string; operation?: string }, remote: boolean, importFrom?: string,
+  importFile?: { root: string; path: string }): OperationError {
   const status = ['gbrain', 'sync', 'status', '--source', row.source_id, '--json'];
   const remember = row.operation === 'remember';
   const fix: Action = remember
@@ -138,9 +149,12 @@ export function pendingImportRefusal(row: { source_id: string; slug: string; ope
     : { argv: status, consent: [], actor: remote ? 'host_admin' : 'agent', requires_exclusive: false,
       verify: { argv: status }, docs: 'docs/guides/write-refusals.md#pending_import',
       why: `${PENDING_IMPORT_OWNER.replace('<source>', row.source_id)} Once it has, read the page again and resubmit the intended write with a new request_id.` };
-  return opError('source_changed', PENDING_IMPORT_MESSAGE,
+  const refusal = opError('source_changed', PENDING_IMPORT_MESSAGE,
     `Nothing was overwritten. The canonical file of ${row.slug} in source ${row.source_id} holds a change committed through Git that managed sync has not imported yet, `
     + (remember ? 'so this remember was refused and kept: the first sync that imports the file makes one replay attempt, with its original date and authority.'
       : 'so this write was refused rather than replacing those bytes: after the next sync imports them, read the page again and resubmit with a new request_id.'),
     { detail: 'file_database_drift', reason: PENDING_IMPORT, fix });
+  // GST-1582: the last imported commit the check compared against, so a refresh-barrier consumer can hold the write for the import;
+  // GST-1623: and the file it compared, so a write deferred behind a refresh is checked against that refresh before it is held.
+  return importFrom === undefined ? refusal : Object.assign(refusal, { importFrom, ...(importFile ? { importFile } : {}) });
 }
