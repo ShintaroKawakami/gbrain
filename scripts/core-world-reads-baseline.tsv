@@ -436,6 +436,10 @@ src/core/git-visible-files.ts	als_store	1	W2: engine scope (decision E) replaces
 src/core/git-visible-files.ts	fs_import	1	W7: filesystem boundary moves to the local app
 src/core/git-visible-files.ts	spawn_import	1	W7: process-wide effects move to src/cli
 src/core/git/commit-guard.ts	fs_import	1	W7: filesystem boundary moves to the local app
+src/core/git/commit-guard.ts	spawn_import	1	W7: process-wide effects move to src/cli; PR B owner-path guard reads git version and hook paths of the worktree it installs into
+src/core/git/commit-ledger.ts	fs_import	1	W7: filesystem boundary moves to the local app; PR B commit ledger appends to <git common dir>/gbrain/commit-ledger.jsonl
+src/core/git/commit-ledger.ts	module_collection	1	W6: per-engine state; PR B ledger location cache keyed by checkout root (git common dir never changes for a root)
+src/core/git/commit-ledger.ts	spawn_import	1	W7: process-wide effects move to src/cli; PR B ledger resolves the git common dir
 src/core/git/commit-push.ts	fs_import	1	W7: filesystem boundary moves to the local app
 src/core/git/commit-push.ts	module_collection	1	W6: per-engine state, or mark as a constant table
 src/core/git/commit-push.ts	process_env	7	W6: settings plane out of the core
@@ -683,6 +687,7 @@ src/core/persistence/journal.ts	process_env	1	W6: settings plane out of the core
 src/core/persistence/large-file.ts	fs_import	1	W5: repo-less persistence for hosts
 src/core/persistence/links-preparation.ts	module_collection	1	W6: per-engine state, or mark as a constant table
 src/core/persistence/local-client.ts	fs_import	1	W5: repo-less persistence for hosts
+src/core/persistence/local-edit-adoption.ts	fs_import	1	W5: repo-less persistence for hosts (reads the drifted canonical file it adopts)
 src/core/persistence/maintenance.ts	fs_import	1	W5: repo-less persistence for hosts
 src/core/persistence/native-file-target.ts	fs_import	1	W5: repo-less persistence for hosts
 src/core/persistence/native-lock.ts	fs_import	2	W5: repo-less persistence for hosts
@@ -719,6 +724,7 @@ src/core/persistence/reconcile-state.ts	load_config	1	W6: settings plane out of 
 src/core/persistence/reconcile-state.ts	process_env	1	W6: settings plane out of the core
 src/core/persistence/reconcile.ts	load_config	1	W6: settings plane out of the core
 src/core/persistence/recovery-resolve.ts	fs_import	1	W5: repo-less persistence for hosts
+src/core/persistence/refresh-barrier.ts	module_collection	1	W6: per-engine state; PR B bounded cache (32) of the paths each refresh changed, keyed by refresh id and root (an immutable git diff)
 src/core/persistence/resolve-paths.ts	fs_import	1	W5: repo-less persistence for hosts
 src/core/persistence/root-registry.ts	fs_import	1	W5: repo-less persistence for hosts
 src/core/persistence/root-registry.ts	spawn_import	1	W7: process-wide effects move to src/cli
@@ -849,6 +855,7 @@ src/core/readiness.ts	process_env	1	W6: settings plane out of the core
 src/core/reason-trailers.ts	fs_import	1	W7: filesystem boundary moves to the local app (realpath of the source and Git roots for the gbrain-reason trailer scan; #7798 in the memory train #8481)
 src/core/reason-trailers.ts	module_collection	1	W6: per-engine state (short-lived trailer-scan cache keyed by source root; #7798 in the memory train #8481)
 src/core/recall-cursor-state.ts	fs_import	1	W7: filesystem boundary moves to the local app
+src/core/release-channel-notice.ts	fs_import	1	W7: filesystem boundary moves to the local app (GBRA-224: the once-per-GBRAIN_HOME channel notice marker file)
 src/core/remediation-checkpoint.ts	fs_import	2	W7: filesystem boundary moves to the local app
 src/core/remediation/context.ts	process_env	1	W6: settings plane out of the core
 src/core/remote-token-cache.ts	fs_import	1	W7: filesystem boundary moves to the local app
@@ -946,7 +953,7 @@ src/core/self-upgrade-swap.ts	load_config	4	W6: settings plane out of the core
 src/core/self-upgrade-swap.ts	process_env	1	W6: settings plane out of the core
 src/core/self-upgrade-swap.ts	spawn_import	1	W7: process-wide effects move to src/cli
 src/core/self-upgrade.ts	fs_import	1	W7: filesystem boundary moves to the local app
-src/core/self-upgrade.ts	process_env	2	W6: settings plane out of the core
+src/core/self-upgrade.ts	process_env	3	W6: settings plane out of the core (+1 GBRA-224: resolveReleaseChannel defaults its env argument to GBRAIN_RELEASE_CHANNEL)
 src/core/serve-behavior-notice.ts	fs_import	1	W7: filesystem boundary moves to the local app
 src/core/serve-fail-fast.ts	process_env	1	W6: settings plane out of the core
 src/core/serve-http-status-marker.ts	fs_import	1	W7: filesystem boundary moves to the local app
@@ -1143,6 +1150,10 @@ src/core/uncommitted-deletions.ts	fs_import	1	W7: filesystem boundary moves to t
 src/core/url-clone.ts	spawn_import	1	W7: process-wide effects move to src/cli
 src/core/utils.ts	module_collection	1	W6: per-engine state, or mark as a constant table
 src/core/verbs/usage-log.ts	fs_import	1	W7: filesystem boundary moves to the local app
+src/core/wakeshift/config.ts	fs_import	1	stays: the Wakeshift key and HMAC secret are host files (0600) by design, never engine settings (docs/guides/wakeshift.md#the-key)
+src/core/wakeshift/config.ts	load_config	1	stays: wakeshift.enabled is read from the host file plane only, so no DB-plane or remote writer can turn reporting back on
+src/core/wakeshift/config.ts	process_env	2	stays: an explicit env argument is compared with process.env to decide whether the key moves into env-key.ts
+src/core/wakeshift-env-key.ts	process_env	2	stays: WAKESHIFT_API_KEY is taken out of the process environment whenever config loads, so child processes do not inherit the signing key
 src/core/workspace-push.ts	fs_import	1	W7: filesystem boundary moves to the local app
 src/core/workspace-push.ts	process_env	2	W6: settings plane out of the core
 src/core/workspace-push.ts	spawn_import	1	W7: process-wide effects move to src/cli
