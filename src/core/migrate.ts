@@ -18,6 +18,7 @@ import { hardenFunctionSearchPaths } from './schema-migrations/v277-function-sea
 import { resumePageRevisionBackfill } from './page-state/revision-backfill-schema.ts';
 import { repairPagesUpsertArbiter } from './pages-upsert-arbiter.ts';
 import { repairLinkSourceCheck, LINK_SOURCE_GATE_MIGRATION_VERSION } from './link-source-check-repair.ts';
+import { rewindJttTakeProposalCollision } from './jtt-take-proposal-collision.ts';
 
 export type { Migration };
 
@@ -365,7 +366,8 @@ export function isDeadlockError(err: unknown): boolean {
 }
 
 export async function runMigrations(engine: BrainEngine): Promise<{ applied: number; current: number }> {
-  const currentStr = await engine.getConfig('version');
+  const rewound = await rewindJttTakeProposalCollision(engine);
+  const currentStr = rewound != null ? String(rewound) : await engine.getConfig('version');
   const current = parseInt(currentStr || '1', 10);
 
   // Sort by version ascending so array insertion order doesn't affect
