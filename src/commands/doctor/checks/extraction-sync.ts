@@ -16,6 +16,7 @@ import { chunkerStamp } from '../../../core/chunkers/code.ts';
 import { smallBrainBacklogNote } from '../../../core/link-extraction-watermark.ts';
 import { extractionLagVerdict, extractionRoutes, heldExtractionReport, readExtractionLag } from '../../../core/extraction-lag.ts';
 import { isMissingSchemaObject } from '../../../core/utils.ts';
+import { ATOM_PROVENANCE_CTE, unchangedBodyAtoms } from './atom-body-recheck.ts';
 import {
   loadStorageConfig,
   effectiveDbOnlyDirs,
@@ -29,13 +30,14 @@ import { unverifiedExtractionFragment } from '../../../core/extraction-review.ts
 import { quarantineFilterFragment } from '../../../core/quarantine.ts';
 import { persistenceEnabledForHealth } from '../../../core/persistence/ownership.ts';
 import { upstreamFreshness } from '../../../core/sync-upstream.ts';
+import { syncContentDirectory } from '../../../core/sync-applicability.ts';
 import type { Check } from '../../doctor.ts';
 import { isOwnedContentSchemaMissing, ownedContentFreshness } from '../../../core/shared-skills/content-freshness.ts';
 import { readOnlyCatalogPackSourceIds } from '../../../core/shared-skills/adopted-packs.ts';
 import { connectorAuthorities } from '../../../core/persistence/connector-authority.ts';
 import { parseSourceConfig } from '../../../core/sources-load.ts';
 import { checkError } from '../check-fix.ts';
-import { checkpointMovedFix, firstSyncRunning, noSuccessfulSync, stoppedConnectorIssues, type SyncOutcomeEntry } from '../sync-outcome.ts';
+import { checkpointMovedFix, firstSyncRunning, noSuccessfulSync, receiptContentDirectory, stoppedConnectorIssues, type SyncOutcomeEntry } from '../sync-outcome.ts';
 import { haltReasonsWithUnknown, readRecordedHaltReasons7d, topHaltReason } from '../../../core/extract/rollup-writer.ts';
 
 /** Local alias; the shared warn-once memo lives in core so it can't fork per module. */
@@ -811,6 +813,7 @@ export async function computeExtractAtomsBacklogCheck(
  * `source_path`, pre-binding-era atoms by neither); their page liveness cannot
  * be resolved by slug, so they are reported as their own informational count
  * and never as drift, gone, or part of the WARN ratio.
+ * A source page a sync rename moved stays alive through its rename alias (#7462).
  */
 export async function computeAtomProvenanceDriftCheck(
   engine: BrainEngine,
@@ -833,31 +836,14 @@ export async function computeAtomProvenanceDriftCheck(
       // garbage from the min(); the age math happens in TS where Date
       // parsing can never throw (semantically-invalid dates become NaN →
       // metric omitted, verdict untouched).
-      `WITH atom AS (
-         SELECT a.source_id,
-                -- managed atoms keep their provisional prefix for good (#5770)
-                CASE WHEN a.frontmatter->>'managed_extraction' = 'true'
-                     THEN regexp_replace(a.frontmatter->>'source_hash', '^pending:', '')
-                     ELSE a.frontmatter->>'source_hash' END AS sh,
-                -- NULL = slug-unbound: transcript-minted (source_path only) or
-                -- pre-binding-era. \`ss IS NULL\` is THE predicate for that
-                -- population everywhere below (#4799 / #4806).
-                NULLIF(a.frontmatter->>'source_slug', '') AS ss,
-                CASE WHEN a.frontmatter->>'extracted_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
-                     THEN a.frontmatter->>'extracted_at' END AS ext
-           FROM pages a
-          WHERE a.type = 'atom'
-            AND a.deleted_at IS NULL
-            AND a.frontmatter->>'source_hash' IS NOT NULL
-            -- in-flight marker written before an unmanaged extraction commits
-            AND (a.frontmatter->>'source_hash' NOT LIKE 'pending:%' OR a.frontmatter->>'managed_extraction' = 'true')
+      `WITH ${ATOM_PROVENANCE_CTE},
        -- Lookup sets are built ONCE and joined (#4937). A correlated EXISTS in
        -- the SELECT list is not rewritten to a semi-join — Postgres re-runs it
        -- per atom over substring(content_hash), which no index serves, so the
        -- check went O(atoms x same-source pages) and blew health-check budgets.
        -- DISTINCT is load-bearing: duplicate live content_hash values are a
        -- real state and would otherwise fan one atom out into several rows.
-       ), live_hashes AS MATERIALIZED (
+       live_hashes AS MATERIALIZED (
          SELECT DISTINCT source_id, substring(content_hash from 1 for 16) AS sh
            FROM pages WHERE deleted_at IS NULL AND content_hash IS NOT NULL
        ), live_slugs AS MATERIALIZED (
@@ -867,10 +853,12 @@ export async function computeAtomProvenanceDriftCheck(
                 -- a slug-unbound atom is never drift: its hash is over a file,
                 -- not a page, so the page probe is meaningless (#4806)
                 (atom.ss IS NOT NULL AND h.sh IS NULL) AS drifted,
-                (s.slug IS NOT NULL) AS src_alive
+                (s.slug IS NOT NULL OR rs.slug IS NOT NULL) AS src_alive
            FROM atom
            LEFT JOIN live_hashes h ON h.source_id = atom.source_id AND h.sh = atom.sh
            LEFT JOIN live_slugs  s ON s.source_id = atom.source_id AND s.slug = atom.ss
+           LEFT JOIN slug_aliases r ON s.slug IS NULL AND r.source_id = atom.source_id AND r.alias_slug = atom.ss AND r.notes = 'rename'
+           LEFT JOIN live_slugs rs ON rs.source_id = r.source_id AND rs.slug = r.canonical_slug
        )
        SELECT count(*) FILTER (WHERE ss IS NOT NULL) AS total,
               count(*) FILTER (WHERE ss IS NULL) AS slug_unbound,
@@ -891,8 +879,9 @@ export async function computeAtomProvenanceDriftCheck(
     const num = (v: string | number | null | undefined) => (v == null ? 0 : Number(v));
     const total = num(r.total);
     const slugUnbound = num(r.slug_unbound);
-    const drifted = num(r.drifted);
-    const sourceChanged = num(r.source_changed);
+    const bodyUnchanged = num(r.source_changed) > 0 ? await unchangedBodyAtoms(engine) : 0;
+    const drifted = num(r.drifted) - bodyUnchanged;
+    const sourceChanged = num(r.source_changed) - bodyUnchanged;
     const sourceGone = num(r.source_gone);
     const oldestExtMs = r.oldest_ext ? new Date(String(r.oldest_ext)).getTime() : NaN;
     const oldestDays = Number.isFinite(oldestExtMs)
@@ -905,6 +894,7 @@ export async function computeAtomProvenanceDriftCheck(
       drifted,
       source_changed: sourceChanged,
       source_gone: sourceGone,
+      body_unchanged: bodyUnchanged,
       drift_pct: total > 0 ? Math.round(ratio * 1000) / 10 : 0,
       oldest_drifted_days: oldestDays ?? undefined,
     };
@@ -929,7 +919,7 @@ export async function computeAtomProvenanceDriftCheck(
           `${drifted}/${total} atom(s) (${details.drift_pct}%) reference a source_hash no live page carries ` +
           `— ${sourceChanged} whose source page still exists (edited), ${sourceGone} whose source page is gone` +
           (oldestDays != null ? `; oldest ${oldestDays}d` : '') + su +
-          `. This compares source_hash only (any edit to the source page changes it); it does not re-check whether ` +
+          `. Past metadata- and fence-only edits whose extracted edition a recent version still holds, this compares source_hash only; it does not re-check whether ` +
           `the atom's source_quote still appears in the page, so edited-source atoms may still be accurate. Fix: ${fix}`,
         details,
       };
@@ -1223,6 +1213,8 @@ export async function checkSyncFreshness(
     // #6076: an adopted read-only catalog pack (no commit history) has nothing to sync.
     const catalogPacks = await readOnlyCatalogPackSourceIds(engine, sources, localOnly);
     let writer_owned_count = 0, read_only_pack_count = 0;
+    // #9471: roots inside gbrain's own content directory, which sync refuses (a receipt-claimed root is writer-owned above while persistence is on, else fails naming the import).
+    const contentDirectories: Array<{ id: string; keyless: boolean }> = [];
     // v0.41.27.0: D6 count math. Every source falls into
     // EXACTLY ONE bucket per iteration. Invariant pinned by unit test:
     //   unchanged + synced_recently + stale + writer_owned + read_only_pack counts === sources.length
@@ -1279,6 +1271,8 @@ export async function checkSyncFreshness(
     for (const source of sources) {
       if (ownedContent.has(source.id)) { writer_owned_count++; continue; }
       if (catalogPacks.ids.has(source.id)) { read_only_pack_count++; continue; }
+      const contentDirectory = await syncContentDirectory(engine, { sourceId: source.id, repoPath: source.local_path ?? undefined });
+      if (contentDirectory?.ownedBy === 'content_root') { contentDirectories.push({ id: source.id, keyless: contentDirectory.keyless }); continue; }
       // Embed source.id in user-visible messages so `gbrain sync --source <id>`
       // matches what the user copy-pastes. Show display name in parens when set.
       const display = source.name && source.name !== source.id
@@ -1335,7 +1329,7 @@ export async function checkSyncFreshness(
       const stopped = stoppedConnectors.get(source.id);
       if (stopped) { issues.push(stopped.issue); stale_count++; hasFailures ||= stopped.fail; hasWarnings ||= !stopped.fail; continue; }
       if (!source.last_sync_at) {
-        const never = await noSuccessfulSync(engine, source.id, display, managed);
+        const never = contentDirectory ? receiptContentDirectory(contentDirectory, display) : await noSuccessfulSync(engine, source.id, display, managed);
         issues.push(never.issue); outcomes.push(never.entry);
         hasFailures = true;
         stale_count++;
@@ -1443,14 +1437,16 @@ export async function checkSyncFreshness(
 
     // D6 invariant: every source incremented exactly one bucket.
     const details = { unchanged_count, synced_recently_count, stale_count, ...(writer_owned_count ? { writer_owned_count } : {}),
-      ...(read_only_pack_count ? { read_only_pack_count } : {}), ...(catalogPacks.note ? { read_only_pack_note: catalogPacks.note } : {}),
+      ...(read_only_pack_count ? { read_only_pack_count } : {}), ...(contentDirectories.length ? { content_directory_count: contentDirectories.length } : {}), ...(catalogPacks.note ? { read_only_pack_note: catalogPacks.note } : {}),
       ...(outcomes.length ? { code: outcomes[0]!.code, no_successful_sync: outcomes } : {}),
       ...(upstream_unknown_count ? { upstream_unknown_count } : {}), ...(upstream_behind_count ? { upstream_behind_count } : {}) };
     // BUG 4: append in-progress context when any source is actively syncing.
     // Empty otherwise, so steady-state messages are byte-for-byte unchanged.
     const inProgressNote = (inProgress.length ? `. ${inProgress.join('; ')}` : '')
       + (writer_owned_count ? `. ${writer_owned_count} writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status` : '')
-      + (read_only_pack_count ? `. ${read_only_pack_count} read-only skill-pack source(s): no commits to sync` : '') + (catalogPacks.note ? `. ${catalogPacks.note}` : '');
+      + (read_only_pack_count ? `. ${read_only_pack_count} read-only skill-pack source(s): no commits to sync` : '')
+      + (contentDirectories.length ? `. ${contentDirectories.length} gbrain-owned content director${contentDirectories.length === 1 ? 'y' : 'ies'}, where sync does not apply: add files with ${contentDirectories.map(dir => `\`gbrain import <dir>${dir.keyless ? ' --no-embed' : ''} --source ${dir.id}\``).join(', ')}` : '')
+      + (catalogPacks.note ? `. ${catalogPacks.note}` : '');
 
     const remedy = issues.length > outcomes.length;
     const moved = managed && localOnly && staleIds.length ? await checkpointMovedFix(engine, staleIds) : null;
@@ -1467,7 +1463,7 @@ export async function checkSyncFreshness(
       name: 'sync_freshness', status: 'ok',
       message: `${writer_owned_count} writer-owned canonical content source(s): upstream sync is not applicable; see canonical_content_writes for publication status.`, details,
     };
-    const upstreamCount = sources.length - writer_owned_count - read_only_pack_count;
+    const upstreamCount = sources.length - writer_owned_count - read_only_pack_count - contentDirectories.length;
     if (upstreamCount === 0) return { name: 'sync_freshness', status: 'ok', message: `No upstream-synced sources${inProgressNote}.`, details };
     // v0.41.27.0: D2 ok-message reshape. Three branches surface what the
     // git short-circuit actually did so operators understand "unchanged

@@ -90,6 +90,7 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'trust_release_unpreviewed_fields',
   'credential_projection_pending',
   'derived_visibility',
+  'privacy_label_ignored',
   // GBRA-218: member read access (doctor/checks/member-access.ts).
   'access_readers_malformed',
   'access_unknown_readers',
@@ -99,10 +100,31 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'access_policy_widening_held',
   'access_policy_invalid',
   'access_policy_store_mismatch',
+  // GST-363: a brain that serves several people keeps each people/<name>/ folder to its readers (doctor/checks/unlabeled-people-folders.ts).
+  'unlabeled_people_folders',
+  // GST-2670: pages every member's key reads on a brain that serves several people (doctor/checks/open-shared-pages.ts).
+  'open_shared_pages',
+  // GST-363: credentials bound to nobody on a brain that serves several people (doctor/checks/unscoped-shared-reads.ts).
+  'unscoped_shared_reads',
+  // GST-363: config mcp.stdio_member set on a host where OpenClaw or Hermes is installed (doctor/checks/shared-stdio-binding.ts).
+  'shared_stdio_binding',
   // GBRA-231: shared agents (doctor/checks/shared-agent-access.ts).
   'access_may_act_for_wildcard',
+  // GST-2490: the owner opt-in (doctor/checks/owner-reads-restricted.ts).
+  'access_owner_reads_restricted',
+  // GBRA-108: raw-only rules, audience members and members-read-lineage (doctor/checks/access-lineage.ts).
+  'access_raw_only_rules',
+  'access_audience_members',
+  'access_members_read_lineage',
+  // GBRA-108 design 1: labelled-only members (doctor/checks/access-labelled-only.ts).
+  'access_labelled_only_members',
+  // GST-1158 F3: attest credentials that read a shared-scope source as the person (doctor/checks/attest-read-access.ts).
+  'attest_read_shared_scope',
+  // GBRA-504: guest sources, their writers and the owner credentials that read them (doctor/checks/guest-source.ts).
+  'guest_source',
   'extractor_facts_expired',
   'unwithdrawn_facts',
+  'purged_page_facts',
   'loop_facts_drift',
   'ontology_facts_fenced',
   'orphan_persistence_bindings',
@@ -126,6 +148,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'content_hash_duplicates',
   'content_sanity_audit_recent',
   'contextual_retrieval_coverage',
+  // #8744: configured per_chunk_synopsis tier vs the chunks that carry it.
+  'synopsis_tier_coverage',
   'contradictions',
   'conversation_facts_backlog',
   'conversation_format_coverage',
@@ -198,6 +222,10 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'parked_effects',
   // #6741: managed purges parked after repeated failures (doctor/checks/purge-parks.ts).
   'purge_parked_pages',
+  // GST-2689: origins kept from the purge because a page derived from them could not be labelled private (doctor/checks/purge-parks.ts).
+  'derived_origin_parked',
+  // #9469: recent purges this process's purge mirror lacks, so a restore could not replay them (doctor/checks/purge-mirror.ts).
+  'purge_mirror',
   // Wave B PR 4: fact purge sweeps of stored derivation results still pending or stalled (doctor/checks/derivation-purge-sweeps.ts).
   'derivation_purge_sweeps',
   'partial_embedding',
@@ -211,6 +239,8 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'source_config_shape',
   'source_routing_health',
   'stale_mentions',
+  // GST-1943: storage shelf cards that fail the card schema, interim records not adopted, a hosted shelf directory gone.
+  'storage_manifest',
   'stub_guard_24h',
   // Fact supersession threshold calibrated for the active embedding model (facts/supersession-threshold.ts).
   'supersession_calibration',
@@ -239,12 +269,16 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'takes_weight_grid',
   // #5836: active facts with no entity (invisible to entity recall and the conflict sweep).
   'unlinked_facts',
+  // GST-1158: QM's proposed writes awaiting the owner (doctor/checks/memory-proposals.ts).
+  'memory_proposals_pending',
   // #7160: title-prefixed person pages that likely duplicate an unprefixed page (preview only).
   'person_title_duplicates',
   // Git-canonical G1: the database compared with the commit at HEAD per source, informational (doctor/checks/db-ahead-of-git.ts).
   'db_ahead_of_git',
   // Git-canonical G3: how far each strict source's index trails HEAD (doctor/checks/git-index-lag.ts).
   'git_index_lag',
+  // GST-2492 PR 2: facts of a strict source without a Git home, or held for more than 30 days (doctor/checks/strict-facts-outside-git.ts).
+  'strict_facts_outside_git',
   // GST-1601: local edits adopted in the last 24 h per source (doctor/checks/local-edit-adoptions.ts).
   'local_edit_adoptions',
   'edge_validity',
@@ -254,6 +288,10 @@ export const BRAIN_CHECK_NAMES: ReadonlySet<string> = new Set([
   'timeline_history',
   // #6147: imported conversation pages that may still carry a typed credential (cached audit).
   'transcript_secret_exposure',
+  // GST-2768: the conversation archive keeping up with the harness sessions (doctor/checks/transcript-archive.ts).
+  'transcript_archive_freshness',
+  // GST-2731: facts pages with undated fact lines (doctor/checks/facts-pages.ts).
+  'facts_undated_lines',
   // #5254 — pages written database-only to a source with no canonical owner.
   'unbound_source',
   'undeclared_db_only_pages',
@@ -304,6 +342,11 @@ export const SKILL_CHECK_NAMES: ReadonlySet<string> = new Set([
   'skills_manifest_integrity',
   'skill_currency',
   'skill_preconditions',
+  // Skill size, growth since the last diet, triggers, and drift against this gbrain (gbrain skillpack health).
+  'skill_health',
+  // Skillpack update journals (crash-pending updates, kept backups).
+  'skillpack_update_incomplete',
+  'skillpack_backups',
   'whoknows_health',
 ]);
 
@@ -324,6 +367,8 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'url_source_origin',
   // F4b: PGLite row-delta planner statistics / Postgres autovacuum ANALYZE lag on the hot tables.
   'planner_stats_stale',
+  // #6770: MCP request-log size and the opt-in retention prune (mcp-request-log-retention.ts).
+  'mcp_request_log_retention',
   'alternative_providers',
   'autopilot_fanout_concurrency',
   'autopilot_lock_scope',
@@ -344,6 +389,9 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'brainstorm_health',
   'connectors',
   'dream_paid_loop',
+  // W3 (GBRA-224): self-heals that reached their bound (doctor/checks/dream-write-deferred.ts, embedding-restamp.ts).
+  'dream_write_deferred',
+  'embedding_restamp_stalled',
   'connection',
   'db_only_collector_collision',
   'federation_health',
@@ -416,14 +464,20 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'postgres_cancellation_driver',
   'plugin_lane_collision',
   'pool_budget',
+  // GBRA-133: session connections across every process vs the pooler's per-role limit (doctor/checks/session-lane.ts).
+  'session_lane_budget',
   'progressive_batch_audit_health',
   'queue_health',
   // Wakeshift PR 1: report-back key, enabled state and dead/id_reused watches (doctor/checks/wakeshift.ts).
   'wakeshift',
+  // Wakeshift PR 2: installed @wakeshift/openclaw vs the pinned version (doctor/checks/wakeshift-openclaw.ts).
+  'wakeshift_openclaw',
   // #4578: brain-wide maintenance jobs dying at their deadline.
   'global_maintenance_timeouts',
   // GBRA-130 C-6: no completed brain-wide pass while jobs fail or a phase keeps blocking it.
   'global_maintenance_stalled',
+  // GBRA-438: free unattended upkeep (maintenance.last_run) overdue or failing.
+  'unattended_maintenance',
   'embed_backfill_stalled',
   // #7117: the content-drift sweep's latest batch failed.
   'content_drift_sweep',
@@ -437,8 +491,12 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'legacy_token_null_scope',
   // D4: grants whose operation snapshot or stored surface keeps operations their scopes allow out of reach.
   'grant_new_ops_available',
+  // GST-363: credentials or local bot agents reading chat from several channels the same way for everyone who talks to their agent.
+  'unscoped_multi_user_token',
   'reranker_health',
   'rls',
+  // The session's TLS state on a non-loopback Postgres host (doctor/checks/postgres-tls.ts).
+  'postgres_tls',
   // #7632: every gbrain function that pins a search_path ends it with pg_temp.
   'function_search_path',
   // A Postgres brain whose server_encoding is not UTF8 (doctor/checks/database-encoding.ts).
@@ -489,6 +547,8 @@ export const META_CHECK_NAMES: ReadonlySet<string> = new Set([
   // #5216: the resumable pages.knowledge_revision backfill (resumed by apply-migrations --force-schema).
   'revision_backfill',
   'schema_columns',
+  // #7776: function bodies an older gbrain's schema replay reverted (init --migrate-only reinstalls them).
+  'schema_function_bodies',
   // #6911: tables the applied migrations created that are missing (repair missing-tables recreates rebuildable caches).
   'schema_missing_tables',
   'schema_pack_active',
@@ -544,3 +604,29 @@ export function categorizeCheck(name: string): CheckCategory {
  * categorization and the per-check categorization aligned.
  */
 export const SKILL_CHECK_GROUP_NAMES: ReadonlySet<string> = SKILL_CHECK_NAMES;
+
+/**
+ * W4: the page class of `DoctorReport.alert`. Each name is an existing check that, at the status given or worse,
+ * means the brain needs someone now; every other check (skill checks included) never pages. `warn`: a warning
+ * pages too; `fail`: only a failure pages (that check's warning is an early or advisory state). Drift-guarded in
+ * test/doctor-categories.test.ts against the emitted check names.
+ */
+export const PAGE_CHECK_LEVELS: ReadonlyMap<string, 'warn' | 'fail'> = new Map([
+  ['connection', 'fail'],
+  ['schema_version', 'warn'],
+  ['schema_missing_tables', 'fail'],
+  ['minions_migration', 'warn'],
+  ['persistence_terminal_failures', 'warn'],
+  ['persistence_write_stall', 'warn'],
+  ['runtime_build_skew', 'fail'],
+  ['managed_sync_blocked', 'fail'],
+  ['managed_sync_not_moving', 'fail'],
+  ['global_maintenance_stalled', 'fail'],
+  ['jsonb_integrity', 'warn'],
+  ['rls', 'fail'],
+  ['dream_paid_loop', 'warn'],
+  ['dream_write_deferred', 'warn'],
+  ['embedding_restamp_stalled', 'warn'],
+]);
+
+export const PAGE_CHECK_NAMES: ReadonlySet<string> = new Set(PAGE_CHECK_LEVELS.keys());

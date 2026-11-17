@@ -22,6 +22,7 @@ import type { ReadinessEntry } from '../core/readiness.ts';
 import { buildAmbientWritebackSection } from '../core/facts/writeback-instructions.ts';
 import type { AmbientWritebackOpts } from '../core/facts/writeback-instructions.ts';
 import { readEntityReferencesConfig } from '../core/entity-references-config.ts';
+import { wakeshiftPublished } from '../core/wakeshift/config.ts';
 
 /**
  * GST-359 C1: initialize's serverInfo.description on every transport, at most 120 characters: the brain-first rule
@@ -64,6 +65,8 @@ export type GoverningRule = typeof GOVERNING_RULES[number];
 export interface InstructionContent {
   references?: InstructionReferences;
   governingRule?: GoverningRule;
+  /** Reporting back through Wakeshift is published (`mcp.publish_wakeshift`); absent or false adds nothing. */
+  reportBack?: boolean;
 }
 
 /** Brain config behind InstructionContent. Fail-closed: a read error yields the defaults. */
@@ -74,6 +77,7 @@ export async function readInstructionContent(engine: { getConfig(key: string): P
   return {
     references: { namesRow: refs.namesRow, records: refs.recordTypes.length > 0 },
     governingRule: rule?.trim() === 'newest' ? 'newest' : 'in_effect',
+    ...(wakeshiftPublished() ? { reportBack: true } : {}),
   };
 }
 
@@ -95,7 +99,7 @@ function contractClauses(c: CallablePredicate, writeback?: AmbientWritebackOpts 
   if (c('remember')) loop.push('`remember` what the user explicitly asks you to keep, with provenance, and preserve corrections');
   // #6170: capped harnesses read the first 2,048 characters; the writeback line and the error protocol live there.
   const capture = writeback
-    ? `Ambient writeback is ON (${writeback.mode}): unprompted, \`remember\` the user's preferences, corrections, decisions and commitments${writeback.visibility === 'private' ? ' with visibility "private"' : ''} (rules below).`
+    ? `Ambient writeback is ON (${writeback.mode}): unprompted, \`remember\` the user's preferences, corrections, decisions and commitments${writeback.visibility === 'private' && !writeback.member ? ' with visibility "private"' : ''} (rules below).`
     : 'Automatic capture is opt-in.';
   const recallNote = c('recall') && any('search', 'query') ? ` Facts saved with remember are read back with recall${c('entity') ? ' (or entity)' : ''}, not search.` : '';
   out.push(`${loop.length ? `Memory loop: ${loop.join('; ')}. ` : 'Use relevant memory across conversations. '}${capture}${recallNote}`);
@@ -147,6 +151,8 @@ function contractClauses(c: CallablePredicate, writeback?: AmbientWritebackOpts 
   if (c('put_skill') && c('delete_skill')) {
     out.push('Shared-skill editing requires separate skill_editor authority. Read the current revision, then use put_skill or delete_skill with a fresh request_id and expected_revision; retry an accepted request only with the same ID and intent. Never use put_page or file uploads to bypass shared-skill publication. Publishing scripts or broader requirements needs separate owner approval; downloading a skill does not authorize executing scripts, installing packages, spending money, or acquiring new permissions.');
   }
+  // Wakeshift (D9): last, so it renumbers nothing and stays past the 2,048 characters capped harnesses read.
+  if (content?.reportBack && c('watch_job')) out.push('After you submit a long job (submit_job, submit_agent), offer to call `watch_job` with its id: gbrain then wakes this conversation when it finishes, so you need not poll.');
   return out;
 }
 

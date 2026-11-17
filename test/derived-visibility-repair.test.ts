@@ -23,6 +23,7 @@ import { derivedVisibilityCheck } from '../src/commands/doctor/checks/derived-vi
 import { runPhaseWithStoredPageFixtures } from './helpers/extract-atoms-page-fixtures.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { renamePageOntoSlug } from '../src/commands/sync/rename-collision.ts';
 import { testBackends } from './helpers/test-backends.ts';
 
 const backends = testBackends();
@@ -294,6 +295,55 @@ describe('#5525 tighten-only visibility backfill', () => {
       expect(await remoteSees(engine, 'atoms/leaked-gone-origin')).toBe(false);
       expect(await remoteSees(engine, 'atoms/unstamped-world')).toBe(true);
       expect((await derivedVisibilityCheck(engine)).status).toBe('ok');
+    }
+  }, 120_000);
+
+  test('an unstamped synthesized concept with no recoverable lineage is stamped private, so the doctor warning clears (#8848)', async () => {
+    for (const engine of engines) {
+      await reset(engine);
+      await seed(engine, 'concepts/unstamped-orphan', 'concept', { synthesized_by: 'synthesize_concepts-v0.41' });
+      await seed(engine, 'concepts/world-orphan', 'concept', { synthesized_by: 'synthesize_concepts-v0.41', visibility: 'world' });
+      expect(await remoteSees(engine, 'concepts/unstamped-orphan')).toBe(false);
+      expect(await derivedVisibilityCheck(engine)).toMatchObject({ status: 'warn', details: { unstamped_concepts: 1 } });
+      await withEnv({ GBRAIN_HOME: home }, async () => {
+        const scope = await resolveRepairScope(engine);
+        const preview = await runRepair(ctx(engine, false), visibilityRepair, scope, { apply: false });
+        expect(preview.affected).toBe(1);
+        expect(preview.residuals).toMatchObject({ concepts_without_lineage: 2 });
+        expect(await runRepair(ctx(engine, false), visibilityRepair, scope, { apply: true })).toMatchObject({ applied: 1, complete: true });
+        expect(await runRepair(ctx(engine, false), visibilityRepair, scope, { apply: true })).toMatchObject({ affected: 0, applied: 0, complete: true });
+      });
+      expect(await visibilityOf(engine, 'concepts/unstamped-orphan')).toBe('private');
+      expect(await visibilityOf(engine, 'concepts/world-orphan')).toBe('world');
+      expect(await remoteSees(engine, 'concepts/unstamped-orphan')).toBe(false);
+      expect((await derivedVisibilityCheck(engine)).status).toBe('ok');
+    }
+  }, 120_000);
+});
+
+describe('GST-2687 the backfill follows an atom origin a rename moved under a dropped alias', () => {
+  test('repair previews the moved-origin atoms and concept doctor reports and stamps them private, never world', async () => {
+    for (const engine of engines) {
+      await reset(engine);
+      await engine.executeRaw("DELETE FROM slug_aliases"); await engine.executeRaw("DELETE FROM slug_rename_history");
+      await seed(engine, 'notes/secret', 'note', { visibility: 'private' });
+      await seed(engine, 'notes/other', 'note', { visibility: 'world' });
+      await seed(engine, 'atoms/moved-world', 'atom', { visibility: 'world', source_slug: 'notes/secret' });
+      await seed(engine, 'atoms/moved-unstamped', 'atom', { source_slug: 'notes/secret' });
+      await seed(engine, 'concepts/moved', 'concept', { synthesized_by: 'synthesize_concepts-v0.41' });
+      await engine.addLink('concepts/moved', 'atoms/moved-unstamped', 'input', 'synthesized_from', 'concept-provenance', undefined, undefined, { fromSourceId: 'default', toSourceId: 'default' });
+      expect(await renamePageOntoSlug(engine, { sourceId: 'default', oldSlug: 'notes/secret', newSlug: 'archive/secret', to: 'archive/secret.md' })).toBe('renamed');
+      expect(await renamePageOntoSlug(engine, { sourceId: 'default', oldSlug: 'notes/other', newSlug: 'notes/secret', to: 'notes/secret.md' })).toBe('renamed');
+      expect((await derivedVisibilityCheck(engine)).details).toMatchObject({ unstamped_atoms: 1, unstamped_concepts: 1, looser_atoms: 1 });
+      await withEnv({ GBRAIN_HOME: home }, async () => {
+        const scope = await resolveRepairScope(engine);
+        const preview = await runRepair(ctx(engine, false), visibilityRepair, scope, { apply: false });
+        expect(preview.affected).toBe(3);
+        expect(await runRepair(ctx(engine, false), visibilityRepair, scope, { apply: true })).toMatchObject({ applied: 3, complete: true });
+      });
+      expect({ world: await visibilityOf(engine, 'atoms/moved-world'), unstamped: await visibilityOf(engine, 'atoms/moved-unstamped'), concept: await visibilityOf(engine, 'concepts/moved') })
+        .toEqual({ world: 'private', unstamped: 'private', concept: 'private' });
+      expect((await derivedVisibilityCheck(engine)).details).toMatchObject({ unstamped_atoms: 0, unstamped_concepts: 0, looser_atoms: 0, looser_concepts: 0 });
     }
   }, 120_000);
 });

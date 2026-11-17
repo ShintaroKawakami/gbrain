@@ -8,8 +8,9 @@ name: Promote stable
 # maintain role; v<version> is an existing release tag; soak_run_url is a
 # successful completed run of the workflow named by the STABLE_SOAK_WORKFLOW
 # repository variable; that run's head commit has the release's exact git
-# tree; and the version is newer than the current stable (an older one only
-# with rollback=true and a reason). It then creates the immutable annotated
+# tree; matrix_run_url, when given, is a green upgrade matrix run of master's
+# harness on this release's exact tag and tree; and the version is newer than
+# the current stable (an older one only with rollback=true and a reason). It then creates the immutable annotated
 # record tag stable-v<version> (first promotion only) and moves the annotated
 # `stable` tag to the release commit, both carrying the same key: value body,
 # and commits the evidence record stable.json (version, commit, tree, soak run,
@@ -35,6 +36,11 @@ on:
         description: GitHub Actions run URL of the passed soak on this release's tree
         required: true
         type: string
+      matrix_run_url:
+        description: GitHub Actions run URL of a green upgrade matrix run on this release's tag and tree (empty promotes on your decision, recorded as matrix_run null)
+        required: false
+        type: string
+        default: ''
       scoreboard_url:
         description: Scoreboard URL (defaults to soak_run_url)
         required: false
@@ -55,10 +61,30 @@ on:
         required: false
         type: string
         default: ''
+      not_promotable:
+        description: Versions the daily check must never soak or promote, comma-separated (clients ignore this list)
+        required: false
+        type: string
+        default: ''
+      not_promotable_reason:
+        description: Why those versions are bad (required with not_promotable)
+        required: false
+        type: string
+        default: ''
+      not_promotable_fixed_in:
+        description: The release that fixes them (required with not_promotable)
+        required: false
+        type: string
+        default: ''
+      not_promotable_remove:
+        description: Versions to take off the not_promotable list, comma-separated
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write  # create and push the stable-v<version> and stable tags and the stable-record branch
-  actions: read    # read the soak run
+  actions: read    # read the soak run and the upgrade matrix run's receipt
 
 concurrency:
   group: promote-stable
@@ -83,10 +109,15 @@ jobs:
           STABLE_SOAK_WORKFLOW: ${{ vars.STABLE_SOAK_WORKFLOW }}
           PROMOTE_VERSION: ${{ inputs.version }}
           PROMOTE_SOAK_RUN_URL: ${{ inputs.soak_run_url }}
+          PROMOTE_MATRIX_RUN_URL: ${{ inputs.matrix_run_url }}
           PROMOTE_SCOREBOARD_URL: ${{ inputs.scoreboard_url }}
           PROMOTE_ROLLBACK: ${{ inputs.rollback }}
           PROMOTE_REASON: ${{ inputs.reason }}
           PROMOTE_WITHDRAW: ${{ inputs.withdraw }}
+          PROMOTE_NOT_PROMOTABLE: ${{ inputs.not_promotable }}
+          PROMOTE_NOT_PROMOTABLE_REASON: ${{ inputs.not_promotable_reason }}
+          PROMOTE_NOT_PROMOTABLE_FIXED_IN: ${{ inputs.not_promotable_fixed_in }}
+          PROMOTE_NOT_PROMOTABLE_REMOVE: ${{ inputs.not_promotable_remove }}
         run: |
           git config user.name "gbrain-release-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

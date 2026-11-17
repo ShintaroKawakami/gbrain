@@ -30,7 +30,7 @@ import { tierRaiseFix } from './confirm.ts';
 import { queueTierProjection } from './page-write.ts';
 import { propagateTierLowering } from './propagation.ts';
 import { compareTrust, effectiveWriteTrust, storedTrustTier, trustRankSql, type TrustTier, type WriteTrust } from './tier.ts';
-import { privateProvenanceFilterFragment } from '../search/private-visibility.ts';
+import { remoteProvenanceFloorSql } from '../search/private-visibility.ts';
 
 /** I3: a write at `writer` may supersede, expire or forget a row at `target` only when it is at least as trusted. */
 export function supersessionGuarded(writer: TrustTier | null | undefined, target: unknown): boolean {
@@ -72,11 +72,31 @@ export async function lexicalContestCandidate(engine: BrainEngine, sourceId: str
   return best ? { id: best.id, trust_tier: best.trust_tier } : null;
 }
 
+/**
+ * GST-2875: the active non-world fact of `sourceId` on entity `entity` stating exactly `claim`, more trusted than `writer`,
+ * while no active world fact states it. A world write of that claim restates it: the write is stored at the copy's visibility
+ * and its proposal carries the widening, which only the owner's accept applies (the fence rule of GST-2511, for every
+ * remember). Same entity only, as GST-2511 is same page only: the supersede_fact accept refuses a pair across entities.
+ */
+export async function restatedPrivateCopy(engine: BrainEngine, sourceId: string, claim: string, entity: string | null, writer: TrustTier):
+  Promise<{ id: number; visibility: string; trust_tier: TrustTier } | null> {
+  const [row] = await engine.executeRaw<{ id: number; visibility: string; trust_tier: string }>(
+    `SELECT f.id, f.visibility, f.trust_tier FROM facts f WHERE f.source_id = $1 AND f.fact = $2 AND f.visibility <> 'world'
+       AND f.entity_slug IS NOT DISTINCT FROM $4::text AND f.expired_at IS NULL AND (f.valid_until IS NULL OR f.valid_until > now()) AND ${trustRankSql('f.trust_tier')} > ${trustRankSql('$3::text')}
+       AND NOT EXISTS (SELECT 1 FROM facts w WHERE w.source_id = $1 AND w.fact = $2 AND w.visibility = 'world' AND w.expired_at IS NULL
+         AND (w.valid_until IS NULL OR w.valid_until > now()))
+     ORDER BY f.id LIMIT 1`, [sourceId, claim, writer, entity]);
+  return row ? { id: Number(row.id), visibility: row.visibility, trust_tier: storedTrustTier(row.trust_tier) } : null;
+}
+
 /** The pending supersede_fact proposal for a contested write, inside its publication transaction. */
-export async function recordContestedFact(tx: BrainEngine, input: { sourceId: string; oldId: number; oldTier: TrustTier; newId: number; newTier: TrustTier; guard: string }): Promise<{ proposal_ref: string }> {
+export async function recordContestedFact(tx: BrainEngine, input: { sourceId: string; oldId: number; oldTier: TrustTier; newId: number; newTier: TrustTier; guard: string;
+  /** GST-2511: the widening the writer asked for; the new row is stored at `from` and the owner's accept sets `to`. */ visibility?: { from: string; to: string };
+  /** GST-2875: the new row was written database-only (no page), so no fence can withdraw the widening. */ pageless?: boolean }): Promise<{ proposal_ref: string }> {
   const { id } = await insertTrustProposal(tx, {
     action: 'supersede_fact', sourceId: input.sourceId, target: { table: 'facts', id: input.oldId }, related: { table: 'facts', id: input.newId },
-    proposer: input.guard, before: { guard: input.guard, old: { id: input.oldId, tier: input.oldTier }, new: { id: input.newId, tier: input.newTier } },
+    proposer: input.guard, before: { guard: input.guard, old: { id: input.oldId, tier: input.oldTier }, new: { id: input.newId, tier: input.newTier },
+      ...(input.visibility ? { visibility: input.visibility } : {}), ...(input.visibility && input.pageless ? { pageless: true } : {}) },
   });
   return { proposal_ref: trustProposalRef(id) };
 }
@@ -119,7 +139,7 @@ export async function forgetRequiresOwner(engine: BrainEngine, input: { sourceId
 
 /** Pre-admission check for a remote forget: a guarded target becomes a `forget` proposal and the verb error. */
 export async function guardRemoteForget(engine: BrainEngine, input: { sourceId: string; factId: number; principal: Principal; reason: string | null; excludePrivate?: boolean }): Promise<void> {
-  const [fact] = await engine.executeRaw<{ trust_tier: string }>(`SELECT trust_tier FROM facts WHERE id = $1 AND source_id = $2 AND visibility = 'world'${input.excludePrivate ? ` AND ${privateProvenanceFilterFragment('facts')}` : ''}`, [input.factId, input.sourceId]);
+  const [fact] = await engine.executeRaw<{ trust_tier: string }>(`SELECT trust_tier FROM facts WHERE id = $1 AND source_id = $2 AND visibility = 'world'${input.excludePrivate ? ` AND ${remoteProvenanceFloorSql('facts')}` : ''}`, [input.factId, input.sourceId]);
   if (!fact || !supersessionGuarded('agent_written', fact.trust_tier)) return;
   throw await forgetRequiresOwner(engine, { ...input, factTier: storedTrustTier(fact.trust_tier), writerTier: 'agent_written' });
 }
@@ -172,6 +192,31 @@ function pairOf(row: TrustProposalRow): PairProposal | null {
   };
 }
 
+/**
+ * The visibility change a contested fence widening asked for (GST-2511), from the proposal's before_state; null unless
+ * `newId` is the contested row (the reversed view confirms the old row and widens nothing).
+ */
+async function requestedVisibility(engine: BrainEngine, id: number, newId: number): Promise<{ from: string; to: string; pageless: boolean } | null> {
+  const row = await getTrustProposal(engine, id);
+  const visibility = row?.before_state.visibility as { from?: unknown; to?: unknown } | undefined;
+  return row?.related_id === newId && typeof visibility?.from === 'string' && typeof visibility.to === 'string'
+    ? { from: visibility.from, to: visibility.to, pageless: row.before_state.pageless === true } : null;
+}
+
+/** GST-2511: the page's fence still asks for `visibility` at the fact's row (same number and claim); a later write that narrowed it withdrew the widening. */
+async function fenceAsks(engine: BrainEngine, factId: number, visibility: string, pageless: boolean): Promise<boolean> {
+  const [fact] = await engine.executeRaw<{ fact: string; row_num: number | null; slug: string | null; source_id: string }>(
+    'SELECT fact, row_num, source_markdown_slug AS slug, source_id FROM facts WHERE id = $1', [factId]);
+  // GST-2875: a restatement written database-only, and still without a page, has no fence that could narrow it. A fence row
+  // detached later (url-clone-fences) was not written database-only, so its widening still needs a fence that asks for it.
+  if (pageless && fact && !fact.slug && fact.row_num === null) return true;
+  if (!fact?.slug || fact.row_num === null) return false;
+  const snapshot = await engine.readPageSnapshot(fact.slug, { sourceId: fact.source_id });
+  if (!snapshot) return false;
+  const { pageFenceRowKeys } = await import('../generations/fence-evidence.ts');
+  return (await pageFenceRowKeys(engine, snapshot.page, fact.slug, fact.source_id)).has(`${Number(fact.row_num)}\u0000${fact.fact}\u0000${visibility}`);
+}
+
 export const TRUST_PAIR_STORE: PairProposalStore = {
   name: 'trust',
   async get(engine, id, lock) {
@@ -186,17 +231,22 @@ export const TRUST_PAIR_STORE: PairProposalStore = {
       : undefined;
     return transitionTrustProposal(engine, id, fromPair(from) as TrustProposalRow['status'], fromPair(to) as TrustProposalRow['status'], after ? { after } : {});
   },
-  /** CEO-9: the owner's accept also confirms the new fact. */
+  /** CEO-9: the owner's accept also confirms the new fact, and applies the widening its writer asked for (GST-2511). */
   async onAccept(tx, proposal) {
+    const requested = await requestedVisibility(tx, proposal.id, proposal.new_fact_id);
+    const widen = requested && await fenceAsks(tx, proposal.new_fact_id, requested.to, requested.pageless) ? requested : null;
     await withTrustPromotion(tx, 'user_confirmed', () => tx.executeRaw(
-      `UPDATE facts SET trust_tier = 'user_confirmed' WHERE id = $1 AND source_id = $2`, [proposal.new_fact_id, proposal.source_id]));
+      `UPDATE facts SET trust_tier = 'user_confirmed'${widen ? ', visibility = $3' : ''} WHERE id = $1 AND source_id = $2`,
+      [proposal.new_fact_id, proposal.source_id, ...(widen ? [widen.to] : [])]));
     for (const id of [proposal.old_fact_id, proposal.new_fact_id]) await queueTierProjection(tx, 'facts', id);
   },
   /** Undo returns the new fact to the tier it had before the accept confirmed it (lowering needs no promotion). */
   async onUndo(tx, proposal) {
     const row = await getTrustProposal(tx, proposal.id);
     const prior = storedTrustTier((row?.before_state.new as { tier?: unknown } | undefined)?.tier);
-    await tx.executeRaw(`UPDATE facts SET trust_tier = $3 WHERE id = $1 AND source_id = $2`, [proposal.new_fact_id, proposal.source_id, prior]);
+    const widen = await requestedVisibility(tx, proposal.id, proposal.new_fact_id);
+    await tx.executeRaw(`UPDATE facts SET trust_tier = $3${widen ? ', visibility = $4' : ''} WHERE id = $1 AND source_id = $2`,
+      [proposal.new_fact_id, proposal.source_id, prior, ...(widen ? [widen.from] : [])]);
     for (const id of [proposal.old_fact_id, proposal.new_fact_id]) await queueTierProjection(tx, 'facts', id);
     // W1 #6783 §12 (b): what was derived from the confirmed row while it was confirmed follows it back down.
     await propagateTierLowering(tx, [{ table: 'facts', id: proposal.new_fact_id }]);

@@ -67,7 +67,7 @@ const remember: Operation = {
   name: 'remember',
   idempotent: true,
   outputRedaction: 'no_stored_text',
-  description: 'Save {fact, provenance (required: source), `entity` (subject; recall needs it)} or items[]. Branch on `status`; write_pending: poll get_write_request.',
+  description: 'Save {fact, provenance (required), `entity` (subject; recall needs it)} or items[]. Branch on `status`; write_pending: poll get_write_request.',
   callShape: REMEMBER_CALL_SHAPE,
   params: {
     ...AGENT_CONTENT_PARAMS,
@@ -104,12 +104,16 @@ const remember: Operation = {
       type: 'string', description: 'Default fact.',
       enum: [...FACT_KINDS],
     },
+    share: {
+      type: 'boolean',
+      description: 'Members save privately, owner shared; true: all source readers recall it. Not for facts about a person.',
+    },
     visibility: {
       type: 'string',
       enum: ['world', 'private'],
       // [2026-10-24][fix] 「world」を ChatGPT が「世界公開で保存」と要約し、安全判定で保存のたびに確認が出ていた。
       // world は接続中の brain の中だけで公開ではないので、省略を促し「公開ではない」と明記する。
-      description: 'Omit; default is this brain, not public.',
+      description: 'Omit; default is this brain, not public. Members: use share.',
       fullSurfaceOnly: true,
     },
     replaces: { type: 'string', description: 'fact_id this fact replaces (same entity, or none).', fullSurfaceOnly: true },
@@ -181,6 +185,25 @@ const remember: Operation = {
         `visibility "${visibility}" is not valid.`,
         'Use "world" (default — agents can recall it) or "private" (local CLI reads only).',
       );
+    }
+    if (p.share !== undefined && typeof p.share !== 'boolean') {
+      throw verbError('invalid_params', 'share must be true or false.', 'Pass share: true to save the fact for everyone who reads this source, or omit it.');
+    }
+    if (p.share === true && p.visibility === 'private') {
+      throw verbError('invalid_params', 'share: true and visibility "private" contradict each other; nothing was saved.', 'Pass share: true to share the fact, or visibility "private" to keep it to yourself, not both.');
+    }
+    // GST-2249 W1: a save made for a person (x-qm-actor) stays on that person's member page; sharing it is a write every
+    // reader of the source sees, made with no owner approval, so it is refused like the direct page writes.
+    const memberFacts = await import('./access/member-facts.ts');
+    const attested = ctx.attestedOp !== 'memory_write' && (await import('./search/private-visibility.ts')).currentCallerAccess().actor != null;
+    if (attested && p.share === true) throw memberFacts.attestedShareRefused(verbError);
+    // GST-2243: a member shares only with share: true, so its explicit visibility "world" is refused, never quietly made private.
+    // GST-2346 D1: the brain owner speaking for itself is not refused; its "world" is saved shared.
+    if (p.share !== true && p.visibility === 'world' && ctx.attestedOp !== 'memory_write' && memberFacts.memberFactPage(ctx) && !memberFacts.ownerSpeaksForItself(ctx)) {
+      if (attested) throw memberFacts.attestedShareRefused(verbError);
+      throw Object.assign(verbError('invalid_params', 'remember: a member credential shares a fact with share: true, not visibility "world"; nothing was saved.',
+        'Retry the same call with share: true in place of visibility "world" to share a fact about the team\'s work with everyone who reads this source, or with no visibility to keep a fact about a person on your own member page. A member shares only this way: pass share: true, never visibility "world".'),
+        { reason: 'member_share_required' });
     }
     if (p.valid_from !== undefined && !isStrictIsoDateTime(p.valid_from)) {
       throw verbError(
@@ -611,9 +634,9 @@ export const RESPONSE_SCHEMAS: Record<VerbName, Record<string, unknown>> = {
       facts_order: { type: 'string', enum: ['relevance', 'newest'], description: 'How facts[] is ordered: relevance (question passed) or newest. A server without question ranking omits it.' },
       facts_degraded: {
         type: 'object',
-        description: 'Present when question ranking ran without full semantic matching.',
+        description: 'Present when question ranking ran without full semantic matching, or date headers could not read when facts were said.',
         properties: {
-          reason: { type: 'string', description: 'Why the cosine arm did not run: keyword_only_no_embedding_provider, keyword_only_embedding_disabled, embed_timeout, embed_unavailable, no_query_terms or facts_embedding_column_missing.' },
+          reason: { type: 'string', description: 'Why the cosine arm did not run: keyword_only_no_embedding_provider, keyword_only_embedding_disabled, embed_timeout, embed_unavailable, no_query_terms or facts_embedding_column_missing; or fact_observed_date_unavailable: date headers show observed unknown because the source-page read failed.' },
           unembedded: { type: 'integer', description: 'Facts in scope without a comparable embedding (ranked by word overlap only).' },
         },
       },

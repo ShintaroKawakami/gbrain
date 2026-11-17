@@ -28,7 +28,7 @@ import { normalizeSlugPrefix } from '../ops/context.ts';
 import { resolveSourceLocalFilePath } from '../markdown.ts';
 import { recordedPathFromFileUri, scannerSlugRootMode } from '../write-through.ts';
 import { hardenedGitSync, hardenedPathDirty } from '../hardened-git.ts';
-import { privatePagesFilterFragment } from '../search/private-visibility.ts';
+import { remoteReadFloorSql } from '../search/private-visibility.ts';
 import { isValidSourceId } from '../source-id.ts';
 import { validateSlug } from '../utils.ts';
 import type { PageSnapshot } from '../page-state/types.ts';
@@ -134,8 +134,8 @@ export async function liveFileDrift(engine: BrainEngine, sourceId: string, slug:
  * GBRA-108: how liveFileDrift reads an origin twin with no recorded file, in a source that is not a read-only mirror (no
  * repair writes there): `db_only` when its slug path is under a declared storage.db_only directory and holds a file (one
  * or several), which sync imports into the twin but no repair adopts; `adopt` when it adopts its slug path as reconcile
- * does (adoptableSlugOrigin) and sync admits that path (loadSyncEligibility: scope, sync.exclude, hidden and reserved
- * paths); null (prepareFileTarget's database-only reading) otherwise, including a slug path several files import as.
+ * does (adoptableSlugOrigin), sync admits that path (loadSyncEligibility: scope, sync.exclude, hidden and reserved
+ * paths) and sync reads its file (syncReadsFile: committed at HEAD, or not ignored in a working tree sync reads); null (prepareFileTarget's database-only reading) otherwise, including a slug path several files import as.
  * Any other refusal or failure throws.
  */
 async function twinReading(engine: BrainEngine, sourceId: string, root: string, page: PageSnapshot): Promise<'adopt' | 'db_only' | null> {
@@ -150,11 +150,24 @@ async function twinReading(engine: BrainEngine, sourceId: string, root: string, 
     const gitRoot = realpathSync(syncGit(real, ['rev-parse', '--show-toplevel']).trim());
     const { nativeRoot, nativeGitRoot, eligible } = await loadSyncEligibility(engine, { root: real, gitRoot, sourceId,
       source: { last_commit: source?.last_commit ?? null, config: source?.config ?? {} } });
-    return eligible(relative(nativeGitRoot, join(nativeRoot, relative(real, derived.path))).split(sep).join('/')) ? 'adopt' : null;
+    const gitPath = relative(nativeGitRoot, join(nativeRoot, relative(real, derived.path))).split(sep).join('/');
+    return eligible(gitPath) && await syncReadsFile(engine, gitRoot, gitPath) ? 'adopt' : null;
   } catch (error) {
     if (error instanceof OperationError && error.detail === 'slug_path_ambiguous') return publishesDatabaseOnly(real, slug, page) ? 'db_only' : null;
     throw error;
   }
+}
+
+/**
+ * GBRA-108: whether sync reads a Git path's file at all, as discoverManagedSync does: from the HEAD commit, or also the
+ * working tree (detached HEAD or sync.include_working_tree), where an untracked file counts unless Git ignores it.
+ */
+async function syncReadsFile(engine: BrainEngine, gitRoot: string, gitPath: string): Promise<boolean> {
+  try { syncGit(gitRoot, ['cat-file', '-e', `HEAD:${gitPath}`]); return true; } catch { /* not in the HEAD commit */ }
+  const working = syncGit(gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim() === 'HEAD' || await engine.getConfig('sync.include_working_tree') === 'true';
+  if (!working) return false;
+  try { syncGit(gitRoot, ['check-ignore', '-q', '--', gitPath]); return false; }
+  catch (error) { if ((error as { status?: number }).status === 1) return true; throw error; }
 }
 
 /**
@@ -307,7 +320,7 @@ export async function auditDriftConflicts(engine: BrainEngine, sourceId: string,
     where.push(`(${alternatives.join(' OR ')})`);
   }
   if (!access.trusted || access.excludePrivate) {
-    where.push(`EXISTS (SELECT 1 FROM pages p WHERE p.source_id=r.source_id AND p.slug=r.slug AND p.deleted_at IS NULL${access.excludePrivate ? ` AND ${privatePagesFilterFragment('p')}` : ''})`);
+    where.push(`EXISTS (SELECT 1 FROM pages p WHERE p.source_id=r.source_id AND p.slug=r.slug AND p.deleted_at IS NULL${access.excludePrivate ? ` AND ${remoteReadFloorSql('p')}` : ''})`);
   }
   const filtered = where.join(' AND ');
   const [totals] = await engine.executeRaw<{ slugs: number; receipts: number }>(
@@ -451,6 +464,6 @@ export class ConceptDriftSkips {
       }
     }
     return this.skipped.length ? [`List them: ${auditConflictsCommand(this.sourceId)}`,
-      `Preview the resolution: ${fileDriftRepairCommand(this.sourceId)} (or --prefer database); apply with the --expect hash it prints.`] : [];
+      `Preview the resolution: ${fileDriftRepairCommand(this.sourceId)} (or --prefer database); its apply needs the user's consent (it asks; add --yes only after they agree).`] : [];
   }
 }

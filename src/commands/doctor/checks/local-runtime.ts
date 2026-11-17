@@ -8,7 +8,7 @@
  */
 
 import { loadCompletedMigrations } from '../../../core/preferences.ts';
-import { MIGRATION_OPT_OUT_KEYS, declinedMigrations, indexCompletedEntries, isFreshInstallStamp, migrationLedgerSummary, trailingPartialCount } from '../../../core/migration-ledger.ts';
+import { MIGRATION_OPT_OUT_KEYS, declinedMigrations, hostWorkOwedFix, hostWorkOwedForVersion, hostWorkOwedMessage, indexCompletedEntries, isFreshInstallStamp, migrationLedgerSummary, trailingPartialCount, upgradeLedgerApplies } from '../../../core/migration-ledger.ts';
 import { VERSION } from '../../../version.ts';
 import { pendingFreshInstallCheck } from './pending-fresh-install.ts';
 import { autopilotInstallPendingCheck } from './autopilot-install-pending.ts';
@@ -24,14 +24,14 @@ import type { DoctorContext, DoctorEntry } from '../context.ts';
 import { checkError } from '../check-fix.ts';
 
 async function runBootstrapChecks(ctx: DoctorContext): Promise<Check[]> {
-  const { engine } = ctx;
+  const { engine, entryDeadlineAt } = ctx;
   const checks: Check[] = [];
 
   // 2d. Agent-bootstrap health (plan B2/B4/ENG-4). Filesystem-first; the
   // one engine-dependent pairing check degrades gracefully when engine is
   // null. Emits NOTHING on machines with no bootstrap state, so ordinary
   // brains keep a clean doctor.
-  checks.push(...(await bootstrapDoctorChecks(engine)));
+  checks.push(...(await bootstrapDoctorChecks(engine, entryDeadlineAt)));
   return checks;
 }
 
@@ -73,6 +73,7 @@ async function runMemorableRelay(ctx: DoctorContext): Promise<Check[]> {
 export const memorableRelayEntry: DoctorEntry = {
   name: 'memorable_relay_health',
   emits: ['memorable_relay_health', 'memory_writeback'],
+  engineChecks: ['memory_writeback'],
   run: runMemorableRelay,
 };
 
@@ -153,10 +154,13 @@ async function runMinionsMigration(ctx: DoctorContext): Promise<Check[]> {
     // version pending again, as statusForVersion and get_health read it: it
     // is reported below as not run yet, never as still wedged.
     const history = indexCompletedEntries(completed);
+    // A wedge whose latest row records apply_migrations_pending still owes host work: never superseded, reported as a warning.
+    const owed = [...history.keys()].filter(v => !declined.has(v) && compareVersions(v, VERSION) <= 0 && hostWorkOwedForVersion(v, history)).sort(compareVersions);
     const stuck = Array.from(byVersion.entries())
       .filter(([v, s]) => {
         if (!s.partial || s.complete) return false;
         if (history.get(v)?.at(-1)?.status === 'retry') return false;
+        if (owed.includes(v)) return false;
         // Forward-progress override: if any version >= v has completed, the
         // partial is stale. compareVersions returns 1 when first arg is newer.
         const supersededBy = completedVersions.find(cv => compareVersions(cv, v) >= 0);
@@ -181,10 +185,16 @@ async function runMinionsMigration(ctx: DoctorContext): Promise<Check[]> {
     // Registered host migrations get_health lists as `pending` (no ledger
     // entry, or reset by a retry marker) that a NEWER migration already ran
     // past were skipped, not merely not reached yet. Versions above the newest
-    // run are the next apply-migrations' ordinary work and stay quiet here.
+    // run are the next apply-migrations' ordinary work and stay out of this list.
+    // #8720: without an engine (--fast) the config that declines an opt-out
+    // migration is unreadable, so such a version is unknown, never pending.
     const newestRun = completedVersions.reduce<string | null>((a, v) => (a === null || compareVersions(v, a) > 0 ? v : a), null);
     const pending = completed.length === 0 ? [] : migrationLedgerSummary(VERSION, declined).pending.filter(v =>
-      (newestRun !== null && compareVersions(v, newestRun) < 0) || history.get(v)?.at(-1)?.status === 'retry');
+      (engine || !(v in MIGRATION_OPT_OUT_KEYS))
+      && ((newestRun !== null && compareVersions(v, newestRun) < 0) || history.get(v)?.at(-1)?.status === 'retry'));
+    // GBRA-541 4a: connected to the brain, doctor also reports the upgrade migrations connect's notice names (versions
+    // not reached yet), so an owner whose brain runs only `gbrain serve` sees them here.
+    const notReached = engine && upgradeLedgerApplies(engine) ? migrationLedgerSummary(VERSION, declined).pending : [];
 
     if (declined.size > 0) {
       const keys = [...declined].map(v => `${MIGRATION_OPT_OUT_KEYS[v]}=false`);
@@ -219,12 +229,21 @@ async function runMinionsMigration(ctx: DoctorContext): Promise<Check[]> {
         message: `${pending.length} host migration(s) not run yet: ${pending.join(', ')}. Run: gbrain apply-migrations --yes`,
         details: { pending },
       });
+    } else if (notReached.length > 0) {
+      checks.push({
+        name: 'minions_migration',
+        status: 'warn',
+        message: `${notReached.length} upgrade migration(s) have not run on this brain yet: ${notReached.join(', ')}. Run: gbrain apply-migrations --yes --no-autopilot-install`,
+        details: { pending: notReached },
+      });
     } else {
       const setup = pendingFreshInstallCheck();
       if (setup) checks.push(setup);
     }
     const hostWork = migrationHostWorkCheck(history, declined, engine ? await hostWorkMigrations(engine).catch(() => new Set<string>()) : new Set<string>());
     if (hostWork) checks.push(hostWork);
+    if (owed.length > 0) checks.push({ name: 'minions_migration', status: 'warn', message: hostWorkOwedMessage(owed), fix: hostWorkOwedFix(owed),
+      details: { code: 'migration_host_work_owed', wedged_host_work: owed } });
     const skippedInstall = autopilotInstallPendingCheck();
     if (skippedInstall) checks.push(skippedInstall);
     // Note: the "no preferences.json but schema is v7+" case is detected
@@ -246,7 +265,10 @@ async function runMinionsMigration(ctx: DoctorContext): Promise<Check[]> {
   // the surface an operator actually runs on the host, never emitted it,
   // so a wedged auto-upgrade loop was invisible exactly where it would be
   // diagnosed. Sits beside the upgrade_errors trail it complements.
-  checks.push(checkSelfUpgradeHealth());
+  // #8776: with the plan the next `gbrain upgrade` makes, so a restart it would
+  // refuse (an autopilot started outside gbrain's service) shows before it fails.
+  const restart = await import('../../upgrade-restart.ts').then((m) => m.upgradeRestartReadiness()).catch(() => null);
+  checks.push(checkSelfUpgradeHealth(restart));
   checks.push(checkBunRuntime());
   return checks;
 }

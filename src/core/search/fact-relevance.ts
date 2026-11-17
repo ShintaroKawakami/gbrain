@@ -14,9 +14,13 @@
  * question names, constrained to that page's source.
  *
  * Score: cosine + term share + DATED_BONUS when the writer supplied the date.
- * Term share counts whole words, and its denominator grows with a long fact's
- * own term count, so a fact stuffed with common words cannot match most
- * questions. Order: score, then newest valid_from, then id.
+ * Term share matches words on their stems under the brain's full-text config
+ * (one to_tsvector read per pool, as the keyword arm matches them; whole words
+ * when that read fails). ISO dates, years, auxiliaries and the config's own
+ * stopwords count on neither side (GBRA-574 A4), so an as-of phrasing does not
+ * dilute the share. Its denominator grows with a long fact's own term count,
+ * so a fact stuffed with common words cannot match most questions. Order:
+ * score, then newest valid_from, then id.
  *
  * Errors: a missing embedding column or a dimension mismatch skips the cosine
  * arm (expected on old or migrating brains); any other database error throws,
@@ -41,6 +45,10 @@ import type { HnswIterativeScanMode } from './hnsw-iterative-scan.ts';
 const STOPWORDS = new Set(['the', 'and', 'for', 'who', 'what', 'when', 'where', 'which', 'with', 'from', 'that', 'this', 'are', 'was', 'were', 'our', 'your', 'their',
   'now', 'current', 'currently', 'should', 'does', 'did', 'has', 'have', 'how', 'any', 'all', 'about', 'into', 'its', 'next', 'use', 'uses', 'tell']);
 const WORD_RE = /[\p{L}\p{N}][\p{L}\p{N}'-]+/gu;
+/** Words that frame a question's time or tense, never its subject: they count toward neither side of the term share. */
+const DATE_TOKEN = /^\d{4}(-\d{2}(-\d{2})?)?$/;
+const AUXILIARIES = new Set(['had', 'been', 'being', 'having', 'will', 'would', 'could', 'might', 'must', 'shall']);
+const neutralWord = (w: string) => DATE_TOKEN.test(w) || AUXILIARIES.has(w);
 
 /** A question with more content terms than this is scored on the ones its candidates hold (`heldTerms`). */
 export const MAX_QUERY_TERMS = 12;
@@ -54,6 +62,8 @@ export function queryTerms(query: string): string[] {
 }
 
 export const DATED_BONUS = 0.1;
+/** What a term matched only through its stem (Rogers for Roger, lives for live) adds to the score, as a share of an exact match. */
+const STEM_ONLY_WEIGHT = 0.9;
 /** valid_from this far from created_at means the writer supplied the date. */
 const DATED_MIN_MS = 24 * 60 * 60 * 1000;
 /** A fact with more content terms than this many times the question's has its term share scaled down (term stuffing). */
@@ -82,7 +92,9 @@ export const FACTS_ARM_COSINE_MIN = 0.6;
 export const FACT_ADMISSION_FLOOR_EVIDENCE: Readonly<Record<string, string>> = {};
 
 export interface FactPoolScope {
-  sourceId?: string; sourceIds?: string[]; remote: boolean;
+  sourceId?: string; sourceIds?: string[];
+  /** World-only facts: worldOnlyFacts(remote) for the caller (private facts only for the local CLI and the brain owner). */
+  worldOnly: boolean;
   /** #5575 read floor and activation control, applied in the pool SQL like every retrieval arm. */
   minTrust?: TrustTier; suppressFlagged?: boolean;
   /** Hide facts whose provenance page is private (resolveExcludePrivatePages for the caller). */
@@ -115,6 +127,8 @@ export interface FactPoolOpts {
 export interface FactCandidate {
   id: number; fact: string; kind: string; entity_slug: string | null; source_id: string; source: string;
   valid_from: Date | string; valid_until: Date | string | null; created_at?: Date | string | null; claim_metric: string | null; claim_period: string | null;
+  /** The page the fact was taken from (its observation date) and the columns copies collapse on (capture-dedup.ts). */
+  source_markdown_slug?: string | null; visibility?: string; attributed_to?: import('../engine.ts').FactAttribution | null;
   similarity?: number;
   /** Found by the named-entity arm. */
   entity: boolean;
@@ -128,9 +142,30 @@ export interface FactPool {
   column: boolean;
   /** The content terms the keyword arm searched and `scoreFactCandidates` scores with. */
   terms: string[];
+  /** Each question and candidate word's lexemes under the brain's full-text config (empty: a stopword); null when that read failed. */
+  stems: WordStems | null;
 }
 
-const COLS = 'f.id, f.fact, f.kind, f.entity_slug, f.source_id, f.source, f.valid_from, f.valid_until, f.created_at, f.claim_metric, f.claim_period';
+/** Word to its full-text lexemes, for `scoreFactCandidates`. */
+export type WordStems = Map<string, string[]>;
+
+/** One to_tsvector read for every word: its lexemes under the brain's full-text config. Null on any database error (whole words then). */
+async function wordStems(engine: BrainEngine, words: string[]): Promise<WordStems | null> {
+  if (!words.length) return new Map();
+  try {
+    const rows = await engine.executeRaw<{ w: string; lexemes: string[] | string | null }>(
+      `SELECT w, tsvector_to_array(to_tsvector('${getFtsLanguage()}'::regconfig, w)) AS lexemes FROM unnest($1::text[]) AS w`, [words]);
+    return new Map(rows.map(r => {
+      const all = Array.isArray(r.lexemes) ? r.lexemes : typeof r.lexemes === 'string' ? r.lexemes.replace(/^\{|\}$/g, '').split(',').filter(Boolean) : [];
+      const whole = all.filter(l => l.length > 1 || l === r.w);
+      return [r.w, whole.length ? whole : all];
+    }));
+  } catch {
+    return null;
+  }
+}
+
+const COLS = 'f.id, f.fact, f.kind, f.entity_slug, f.source_id, f.source, f.valid_from, f.valid_until, f.created_at, f.claim_metric, f.claim_period, f.source_markdown_slug, f.visibility, f.attributed_to';
 
 /** The facts embedding column's type and declared dimensions, or null when there is none. */
 async function factsEmbeddingColumn(engine: BrainEngine): Promise<{ type: string; dims: number } | null> {
@@ -151,7 +186,7 @@ function poolPredicate(scope: FactPoolScope, filters: FactPoolFilters | undefine
     filters?.includeExpired ? 'f.source_id = ANY($1::text[])' : 'f.source_id = ANY($1::text[]) AND f.expired_at IS NULL AND f.superseded_by IS NULL',
     filters?.includeExpired ? 'f.source != ALL($2::text[])' : '(f.valid_until IS NULL OR f.valid_until > now()) AND f.source != ALL($2::text[])',
     quarantinedProvenanceFilterFragment('f'),
-    ...(scope.remote ? [factVisibilitySql('f', ['world'])] : []),
+    ...(scope.worldOnly ? [factVisibilitySql('f', ['world'])] : []),
     ...(scope.excludePrivate ? [privateProvenanceFilterUnderPolicy('f')] : []),
     projectionEligibleSql('facts', 'f', { floor: scope.minTrust, suppressFlagged: scope.suppressFlagged }),
   ];
@@ -262,7 +297,9 @@ export async function collectFactCandidates(engine: BrainEngine, question: strin
   add(byCosine);
   add(byEntity, true);
   const candidates = [...found.values()];
-  return { candidates, cosine, column: !!column, terms: heldTerms(searched, candidates) };
+  const terms = heldTerms(searched, candidates);
+  const stems = await wordStems(engine, [...new Set([...terms, ...candidates.flatMap(c => [...wordsOf(c)])])].filter(w => !neutralWord(w)));
+  return { candidates, cosine, column: !!column, terms, stems };
 }
 
 /**
@@ -315,15 +352,26 @@ const wordsOf = (c: FactCandidate) => {
 export const isDatedFact = (f: Pick<FactCandidate, 'valid_from' | 'created_at'>) =>
   !!f.created_at && Math.abs(new Date(f.valid_from).getTime() - new Date(f.created_at).getTime()) > DATED_MIN_MS;
 
-/** Score every candidate (cosine + term share + DATED_BONUS when dated), ordered by score, newest valid_from, then id. */
-export function scoreFactCandidates(question: string, candidates: FactCandidate[], terms = queryTerms(question)): ScoredFact[] {
+/**
+ * Score every candidate (cosine + term share + DATED_BONUS when dated), ordered by score, newest valid_from, then id.
+ * With `stems` (the pool's) a term matches a fact word sharing a lexeme, and a word with none is a stopword; dates,
+ * years and auxiliaries count on neither side. A stem-only match adds STEM_ONLY_WEIGHT of an exact one to the score
+ * (never to termShare, which admission reads), so "Roger" ranks the Roger fact above the Rogers one.
+ */
+export function scoreFactCandidates(question: string, candidates: FactCandidate[], terms = queryTerms(question), stems: WordStems | null = null): ScoredFact[] {
+  const lexemes = (w: string) => stems?.get(w) ?? [w];
+  const counted = (w: string) => w.length >= 3 && !STOPWORDS.has(w) && !neutralWord(w) && lexemes(w).length > 0;
+  const asked = terms.filter(counted);
   return candidates.map(c => {
-    const words = wordsOf(c);
-    const matched = terms.filter(t => words.has(t)).length;
-    const factTerms = [...words].filter(w => w.length >= 3 && !STOPWORDS.has(w)).length;
-    const termShare = terms.length ? matched / Math.max(terms.length, Math.ceil(factTerms / TERM_STUFFING_RATIO)) : 0;
+    const words = [...wordsOf(c)].filter(counted);
+    const held = new Set(words.flatMap(lexemes));
+    const hits = asked.filter(t => lexemes(t).some(l => held.has(l)));
+    const exact = hits.filter(t => words.includes(t)).length;
+    const denominator = Math.max(asked.length, Math.ceil(words.length / TERM_STUFFING_RATIO));
+    const termShare = asked.length ? hits.length / denominator : 0;
+    const scoredShare = asked.length ? (exact + STEM_ONLY_WEIGHT * (hits.length - exact)) / denominator : 0;
     const cosine = c.similarity ?? 0;
-    return { candidate: c, cosine, matched, terms: terms.length, termShare, score: cosine + termShare + (isDatedFact(c) ? DATED_BONUS : 0) };
+    return { candidate: c, cosine, matched: hits.length, terms: asked.length, termShare, score: cosine + scoredShare + (isDatedFact(c) ? DATED_BONUS : 0) };
   }).sort((a, b) => b.score - a.score
     || new Date(b.candidate.valid_from).getTime() - new Date(a.candidate.valid_from).getTime()
     || b.candidate.id - a.candidate.id);

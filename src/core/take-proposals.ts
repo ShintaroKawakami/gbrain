@@ -171,7 +171,7 @@ async function loadProposal(
 
 export interface ProposalActionTarget {
   engine: BrainEngine;
-  /** Brain repo root — accept writes the markdown fence (markdown-canonical). */
+  /** Not read: the takes_add mutation accept submits resolves its write root from the proposal's source (#7271). */
   brainDir?: string;
   /** Source scope: a proposal outside this source reads as not_found. */
   sourceId?: string;
@@ -373,12 +373,6 @@ export async function acceptProposal(
   if (entitylessStatus(proposal)) {
     const rowNum = await acceptEntitylessProposal(target, proposal);
     return { proposal: { ...proposal, status: 'evidence_accepted', promoted_row_num: rowNum }, rowNum };
-  }
-  if (!target.brainDir) {
-    throw new TakeProposalError(
-      'not_found',
-      'Accept requires a brain directory (takes are markdown-canonical). Pass --dir or configure sync.repo_path.',
-    );
   }
   // Claim-first CAS: exactly one caller wins the pending row. A claim that is
   // already held without a recorded take resumes under its own request id.

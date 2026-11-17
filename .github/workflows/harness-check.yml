@@ -37,7 +37,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  HARNESS_EVALS_PIN: 6d802d9fa6c55d31ac26e1c6c7a6ad660a42d2ca
+  HARNESS_EVALS_PIN: 7e8d872edb6d121cc7376b1ce415bd04ad1f3bfe
 
 jobs:
   # Event parity: docs/ci-event-parity.md#classification (harness-check.yml): a fork head is refused, a missing token skips.
@@ -65,9 +65,19 @@ jobs:
             exit 0
           fi
           echo "run=true" >> "$GITHUB_OUTPUT"
-      - name: Check out this pull request's gbrain
+      - id: checkout
+        name: Check out this pull request's gbrain
         if: steps.gate.outputs.run == 'true'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 3
+        continue-on-error: true
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+      - name: Check out again after a stalled first attempt
+        if: steps.checkout.outcome == 'failure'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        timeout-minutes: 3
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1

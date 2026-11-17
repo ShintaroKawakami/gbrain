@@ -23,7 +23,7 @@ import { CLAUDE_SETTINGS_FILE_RELPATH, GBRAIN_HOOK_MARKER_KEY, GBRAIN_SETUP_MARK
 import { hookLauncherInCommand, hookLauncherState, type HookLauncherState } from './hook-launcher.ts';
 import type { LauncherLane } from './launcher-lanes.ts';
 import { enabledPluginLanes } from '../bootstrap/plugin-lanes.ts';
-import { brainFirstTarget, openclawConfigPath, parseJson5ish } from './brain-first.ts';
+import { brainFirstTarget, openclawConfigPath, parseJson5ish, readBrainFirstLedger } from './brain-first.ts';
 import { inspectHermesTurnHook } from './hermes-turn-hook.ts';
 import { OPENCLAW_TURN_PLUGIN_ID, openclawTurnPluginDir } from './openclaw-turn-plugin.ts';
 import { isSkillResolverEntry } from './skill-resolver-lane.ts';
@@ -70,12 +70,15 @@ export function inspectTurnHook(harness: string, opts: { projectDir?: string; ma
   const native_inspect = TURN_HOOK_NATIVE_INSPECT[harness];
   const plugin = enabledPluginLanes('gbrain').find((l) => l.harness === harness);
   if (harness === 'claude-code') {
+    const owned = setupReceiptHashes('claude-code').owned;
     const files = [claudeUserSettingsPath(), ...(opts.projectDir ? [join(opts.projectDir, '.claude', 'settings.local.json'), join(opts.projectDir, '.claude', 'settings.json')] : []), ...claudeManagedSettingsPaths(opts.managedDir)];
     for (const path of files) {
       const committed = !!opts.projectDir && path === join(opts.projectDir, '.claude', 'settings.json');
-      const entries = claudeEntries(path).filter((e) => isTurnRuleEntry(e) || isOtherGbrainEntry(e, committed));
+      // #9505: Claude Code can rewrite the file without the _gbrain marker; setup still owns its entry by hash.
+      const setupOwned = (e: Record<string, unknown>) => !committed && owned.has(hookEntryHash(e) ?? '');
+      const entries = claudeEntries(path).filter((e) => isTurnRuleEntry(e) || isOtherGbrainEntry(e, committed) || setupOwned(e));
       const effective = entries.find((e) => !isTurnRuleEntry(e)) ?? entries[0];
-      if (effective) return { harness, state: 'wired', via: isTurnRuleEntry(effective) ? 'turn-rule' : effective[GBRAIN_HOOK_MARKER_KEY] === 'setup-v1' ? 'setup' : 'bootstrap', detail: `UserPromptSubmit hook in ${path}`, command: String(effective.command), source: path, native_inspect };
+      if (effective) return { harness, state: 'wired', via: isTurnRuleEntry(effective) ? 'turn-rule' : effective[GBRAIN_HOOK_MARKER_KEY] === GBRAIN_SETUP_MARKER_VALUE || setupOwned(effective) ? 'setup' : 'bootstrap', detail: `UserPromptSubmit hook in ${path}`, command: String(effective.command), source: path, native_inspect };
     }
     if (plugin) return { harness, state: 'wired', via: 'plugin', detail: `the '${plugin.plugin}' plugin declares the UserPromptSubmit hook`, native_inspect };
     return { harness, state: 'missing', detail: `no gbrain UserPromptSubmit hook in ${files.join(' or ')}`, native_inspect };
@@ -107,8 +110,9 @@ export function inspectTurnHook(harness: string, opts: { projectDir?: string; ma
   }
   if (harness === 'hermes') {
     const target = brainFirstTarget('hermes');
-    const home = 'error' in target ? '' : dirname(target.path);
-    const h = inspectHermesTurnHook(home);
+    const soul = 'error' in target ? '' : target.path;
+    const recorded = readBrainFirstLedger().find((e) => e.harness === harness && e.path === soul && e.status === 'installed');
+    const h = inspectHermesTurnHook(soul ? dirname(soul) : '', recorded?.access);
     if (h.state === 'absent') return { harness, state: 'missing', detail: `no gbrain pre_llm_call hook in ${h.path}`, native_inspect };
     if (h.state === 'unapproved') return { harness, state: 'untrusted', via: 'native', detail: `the gbrain pre_llm_call hook in ${h.path} is not in Hermes's shell-hooks-allowlist.json, so Hermes does not run it`, native_inspect };
     return { harness, state: 'wired', via: 'native', detail: `pre_llm_call hook in ${h.path}, approved`, native_inspect };

@@ -80,7 +80,7 @@ import {
 } from '../core/context/corpus-segments.ts';
 import { openSessionCorpus } from '../core/context/corpus-source.ts';
 import { hookLaneLabel, resolveSeat, seatReasonHint, writeSeatSidecar } from '../core/context/seat.ts';
-import { bankAsSpeaker, resolveSessionSpeaker, type AncestorProcess } from '../core/context/session-speaker.ts';
+import { hookSpeakerDecision, type AncestorProcess } from '../core/context/session-speaker.ts';
 import { gateWritebackTurn, WRITEBACK_SKIP_REASONS } from '../core/facts/writeback-gate.ts';
 import { resolveWritebackConfigFromFile } from '../core/facts/writeback-config.ts';
 import { recordCaptureIfOff } from '../core/context/capture-consent.ts';
@@ -305,7 +305,7 @@ export async function runHook(args: string[], io: HookIo = {}): Promise<number> 
   // for silence, and a disabled hook writing telemetry would be a lie).
   if (process.env.GBRAIN_HOOKS === '0') return 0;
 
-  if (process.env.GBRAIN_HOOK_LANE === 'skill-resolver') return (await import('../core/skills/resolver/hook-lane.ts')).runSkillResolverLane(event, io.harness === 'codex' ? 'codex' : 'claude-code', io.cwd ? { cwd: io.cwd } : {});
+  if (process.env.GBRAIN_HOOK_LANE === 'skill-resolver') return (await import('../core/skills/resolver/hook-lane.ts')).runSkillResolverLane(event, harnessIdx >= 0 && args[harnessIdx + 1] === 'hermes' ? 'hermes' : io.harness === 'codex' ? 'codex' : 'claude-code', io.cwd ? { cwd: io.cwd } : {});
   // #4043 harness-lane defer guard: Claude Code MERGES user- and
   // project-scope hook settings, so a machine wired by `bootstrap harness`
   // (user scope) plus a real workspace bootstrap install (settings.local.json,
@@ -1147,13 +1147,13 @@ async function hookUserPrompt(io: HookIo): Promise<number> {
     // rides the same rail (systemMessage + additionalContext) when no push
     // failure is pending. Both are cache/file readers, budgeted by the race.
     turnRule = io.turnRule !== undefined ? io.turnRule : brainFirstTurnRule(io.harness ?? 'claude-code', io.cwd ?? hookSessionCwd());
+    const j = await readStdinJson(io, 300);
+    // #8028, #9163: a task notification or agent-team message arrives as a prompt but is no human turn: no context, no rule.
+    if (typeof j?.prompt === 'string' && /^\s*<(task-notification|teammate-message)[\s>]/.test(j.prompt)) { turnRule = null; return { outcome: 'ok', reason: 'harness_prompt' }; }
     // The turn-rule lane's connection may reach another brain, so it never reads this machine's context or banners.
     if (process.env.GBRAIN_HOOK_LANE === TURN_RULE_LANE) return { outcome: 'ok', reason: 'rule_only' };
     banner = io.disablePushBanner ? null : (pendingPushFailureBanner() ?? pendingBackupBanner());
-    const j = await readStdinJson(io, 300);
     if (!j) return { outcome: 'degraded', reason: 'no_stdin' };
-    // #8028: a task notification or agent-team message arrives as a prompt but is no human turn.
-    if (typeof j.prompt === 'string' && /^\s*<(task-notification|teammate-message)[\s>]/.test(j.prompt)) return { outcome: 'ok', reason: 'harness_prompt' };
 
     // S3#8: transcript_path is untrusted input. A present-but-unconfined
     // path aborts the event (heartbeat + empty stdout), never "best effort".
@@ -1693,10 +1693,9 @@ async function clearDriftStatus(harness: string): Promise<void> {
   } catch { /* absent or unreadable: nothing to clear */ }
 }
 
-/** #8064: whether this session may be banked; an agent speaker is recorded first, and a failed record banks nothing. */
+/** #8064: whether this session may be banked; an agent speaker is recorded first, and a failed record banks nothing (#8080 notes ride `reasons`). */
 function hookSpeaker(io: HookIo, dir: string, sessionId: string) {
-  const speaker = resolveSessionSpeaker({ env: io.env ?? process.env, ...(io.processAncestry ? { ancestry: io.processAncestry } : {}) });
-  return bankAsSpeaker(dir, sessionId, speaker, io.harness ?? 'claude-code');
+  return hookSpeakerDecision(dir, sessionId, { env: io.env ?? process.env, ...(io.processAncestry ? { ancestry: io.processAncestry } : {}) }, io.harness ?? 'claude-code');
 }
 
 function captureSeat(io: HookIo, dir: string, sessionId: string, transcriptPath: string | undefined): string[] {

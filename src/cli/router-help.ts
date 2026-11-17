@@ -18,11 +18,13 @@ export const ROUTER_MODULES: Readonly<Record<string, () => Promise<RouterModule>
   hook: () => import('../commands/hook.ts'),
   search: () => import('../commands/search.ts'),
   'edge-proposals': () => import('../commands/edge-proposals.ts'),
+  'memory-proposals': () => import('../commands/memory-proposals.ts'),
   schema: () => import('../commands/schema.ts'),
   config: () => import('../commands/config.ts'),
   quarantine: () => import('../commands/quarantine.ts'),
   core: () => import('../commands/core.ts'),
   loops: () => import('../commands/loops.ts'),
+  guests: () => import('../commands/guests.ts'),
 };
 
 /**

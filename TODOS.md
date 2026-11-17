@@ -1,5 +1,9 @@
 # TODOS
 
+## Busy-agent soak cell follow-ups (filed 2026-11-11, GBRA-332, #8829)
+
+- [ ] **P2 — Refresh diverged-publish child waits 0 s for the push lock (#8975).** **What:** a refresh whose checkout diverged publishes through a child that runs `commit-push` with `GBRAIN_PUBLISH_LOCK_WAIT_SECONDS=0` (`publishInChild` in `worktree-refresh.ts`), so a refresh tick racing another committer refuses `push_unconfirmed` instead of waiting its turn. The busy-agent soak cell's mode (h) shows it as an informational red, parked by its `.github/nightly-known-red.tsv` row. **Fix:** give the child the normal push-lock wait, then delete the known-red row. **Effort:** S. **Priority:** P2.
+
 ## Local edit adoption follow-ups (filed 2026-11-07, GBRA-341, #8755)
 
 - [ ] **P2 — Harden `adopt_local_edits` before any source turns it on (#8755).** **What:** the adoption can import merge-conflict markers, adopt an editor's stale save over gbrain's committed write, read a huge file whole, hold the worktree queue through its quiet window, leave its Git commit behind when the publication transaction rolls back, and treat a nested checkout's unreadable `HEAD` as repo-less. **Fix:** per item in #8755. **Effort:** M. **Priority:** P2.
@@ -2318,12 +2322,12 @@ deferred M-effort issues above are NOT repeated here.
   synthesized answers, graph annotations) contains them — catching join/
   snippet/synthesis leak classes a source_id check can't see. **Where:**
   `evals/brainbench/`. **Effort:** M. **Priority:** P3.
-- [ ] **P3 — OpenClaw native remote-MCP register block, when upstream ships
-  remote support.** **What:** `gbrain agent register` renders the honest
-  thin-client CLI block for openclaw today (`openclawThinClientBlock` in
-  `src/core/mcp-registration.ts`) because OpenClaw has no native remote-MCP
-  client; when upstream ships one, add a native client-credentials wiring
-  block and demote the CLI block to the fallback. Blocked upstream. **Where:**
+- [ ] **P3 — OpenClaw native remote-MCP register block.** **What:**
+  `gbrain agent register` renders the honest thin-client CLI block for
+  openclaw today (`openclawThinClientBlock` in
+  `src/core/mcp-registration.ts`). OpenClaw now ships a native remote-MCP
+  client (streamable HTTP, `openclaw mcp login`; docs/mcp/OPENCLAW.md), so
+  add a native wiring block and demote the CLI block to the fallback. **Where:**
   `src/core/mcp-registration.ts`, `src/commands/agent-register.ts`.
   **Effort:** S. **Priority:** P3.
 - [ ] **P3 — E2: `gbrain agent list` / `gbrain agent revoke` conveniences.**
@@ -2339,7 +2343,7 @@ deferred M-effort issues above are NOT repeated here.
 ## Security-sweep mitigation follow-ups (filed 2026-08-16)
 
 - [ ] **P1 — `gbrain upgrade` binary lane returns success exit status on failure (autopilot false-success).** **What:** `runUpgrade`'s `binary` case logs every failure reason (`smoke_failed`, `download_failed`, `integrity_failed`, `integrity_unavailable`, `version_mismatch`, `replace_failed`) but never sets a non-zero CLI exit verdict, so callers see exit 0. **Why:** autopilot (`src/commands/autopilot.ts`) can read a false success, record "applied," relaunch, and then mark a transiently-unavailable version permanently bad — an amplification loop, now more reachable because `integrity_unavailable` fires on ordinary GitHub API rate limits. **Context:** PRE-EXISTING for the whole binary lane (not introduced by the v0.46.12.3 integrity work); surfaced by that PR's adversarial review with 2-model consensus. Fix needs care: distinguish hard-fail (`integrity_failed`/`version_mismatch` → exit non-zero, autopilot should NOT mark-bad on a security rejection) from transient (`integrity_unavailable` → retry, not a version fault), with autopilot-loop tests — hence its own PR, not a rushed rider. **Start:** `src/commands/upgrade.ts` binary case + `setCliExitVerdict` + `src/commands/autopilot.ts` upgrade handling.
-- [ ] **P3 — Self-update GitHub API rate-limit resilience.** **What:** each `gbrain upgrade` makes 2 unauthenticated `api.github.com` calls (releases/latest + attestations), 60/hr/IP; corporate NAT / CI fleets hit 403 → `integrity_unavailable` → fail-closed. **Why:** a hard availability regression for shared-egress fleets vs the pre-integrity path. **Options:** honor an ambient `GH_TOKEN`/`GITHUB_TOKEN` when present (weigh against widening what a leaked env token authorizes), or a small bounded retry with backoff, and align the attestation fetch timeout (10s) with the download budget so a slow-but-working link doesn't spuriously fail. **Start:** `defaultFetchRelease`/`defaultFetchAttestation` in `src/core/binary-self-update.ts`.
+- [ ] **P3 — Self-update GitHub API rate-limit resilience.** **What:** each `gbrain upgrade` makes 2 unauthenticated `api.github.com` calls (the release by tag + attestations), 60/hr/IP; corporate NAT / CI fleets hit 403 → `integrity_unavailable` → fail-closed. **Why:** a hard availability regression for shared-egress fleets vs the pre-integrity path. **Options:** honor an ambient `GH_TOKEN`/`GITHUB_TOKEN` when present (weigh against widening what a leaked env token authorizes), or a small bounded retry with backoff, and align the attestation fetch timeout (10s) with the download budget so a slow-but-working link doesn't spuriously fail. **Start:** `defaultFetchRelease`/`defaultFetchAttestation` in `src/core/binary-self-update.ts`.
 
 
 - [ ] **P3 — Integrity for the from-source / `latest-stable` install paths.** **What:** the
@@ -3037,7 +3041,7 @@ OUT deliberately — see the plan's "NOT in scope" list).
   (absent) config defaults to warn") and `test/mcp-tool-defs.test.ts` pins
   both emission states. **Effort:** small (1-line default + test updates).
   **Priority:** P1.
-- [ ] **P2 — mcp_request_log retention/pruning.** **What:** a retention policy
+- [x] **P2 — mcp_request_log retention/pruning.** **Done (#6770 rewrite):** opt-in `cycle.purge.mcp_request_log_retention_days` (30-3650) prunes in the cycle purge phase and, on PGLite, hourly inside a live serve; `surface_change` and `memory_setting_change` rows are never pruned, pruned rows are tallied per token in `mcp_request_log_rollup`, and usage windows that reach past pruned history report it (docs/mcp/ADMIN.md#request-log-retention). **What (as filed):** a retention policy
   (age- or row-capped prune, `gbrain maintain` hook or cron). **Why:** the
   table now carries MORE than request telemetry — `surface_change` audit rows
   (ENG-8) and `denied_after_list` metric rows ride it — and it grows unbounded
