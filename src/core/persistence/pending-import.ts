@@ -22,6 +22,7 @@ import { isAbsolute, join, relative, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { Action } from '../agent-output.ts';
 import { gitChildEnv } from '../git-env.ts';
+import { HARDENED_GIT_ARGS, NO_LAZY_FETCH_ENV } from '../hardened-git.ts';
 import { opError, type OperationError } from '../ops/contract.ts';
 import { PENDING_IMPORT_MESSAGE, PENDING_IMPORT_OWNER } from './verb-errors.ts';
 
@@ -43,12 +44,12 @@ function gitRead(root: string, args: string[], signal?: AbortSignal): Promise<st
   return gitBytes(root, args, signal).then(out => out.toString('utf8'));
 }
 
-/** #8826: gitRead's stdout as bytes, for an answer that must not be decoded lossily. */
+/** #8826: gitRead's stdout as bytes, for an answer that must not be decoded lossily. GST-2331: a partial clone fetches nothing for it. */
 function gitBytes(root: string, args: string[], signal?: AbortSignal): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(signal.reason); return; }
     const group = process.platform !== 'win32';
-    const child = spawn('git', ['-c', 'core.quotepath=false', '-C', root, ...args], { env: gitChildEnv(), stdio: ['ignore', 'pipe', 'ignore'], detached: group });
+    const child = spawn('git', ['-c', 'core.quotepath=false', ...HARDENED_GIT_ARGS, '-C', root, ...args], { env: gitChildEnv(NO_LAZY_FETCH_ENV), stdio: ['ignore', 'pipe', 'ignore'], detached: group });
     const kill = (name: NodeJS.Signals) => { try { if (group && child.pid) process.kill(-child.pid, name); else child.kill(name); } catch { /* already gone */ } };
     const stdout: Buffer[] = [];
     let settled = false;
@@ -155,6 +156,13 @@ export async function operationMarkerPaths(root: string, signal?: AbortSignal): 
 /** #8824: the full message of `commit` in `root`'s repository, or null when Git cannot read it. */
 export async function commitMessage(root: string, commit: string): Promise<string | null> {
   return gitRead(root, ['log', '-1', '--format=%B', commit]).catch(() => null);
+}
+
+/** GST-2579: the newest commit (from HEAD) that touched `path`, with its author and author date; null when none did or Git cannot read it. */
+export async function lastCommitOf(root: string, path: string): Promise<{ sha: string; author: string; date: string } | null> {
+  const out = await quiet(gitRead(root, ['log', '-1', '--no-show-signature', '--format=%H%x00%an%x00%aI', 'HEAD', '--', `:(literal)${relative(root, path).split(sep).join('/')}`]));
+  const [sha = '', author = '', date = ''] = (out ?? '').split('\0');
+  return /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(sha) ? { sha, author, date } : null;
 }
 
 /** #8824: the first parent of `commit` in `root`'s repository, or null when it has none or Git cannot read it. */

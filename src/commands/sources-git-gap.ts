@@ -57,8 +57,14 @@ export interface GitGapCensus {
   head: string | null;
   /** False when a doctor budget stopped the page scan; the counts cover the pages read so far. */
   complete: boolean;
-  /** Pages the scan read; equals `live_pages` only when `complete`. */
+  /** Pages the scan read; equals `live_pages` only when `complete` and the scan was not capped by `newest`. */
   pages: number;
+  /** The cap of a census that read only the newest live pages by `updated_at` (doctor); absent for a full census. */
+  newest?: number;
+  /** With `newest`: the oldest `updated_at` among the pages it selected, so a reader sees how far back it looked (null: no page). */
+  newest_since?: string | null;
+  /** With `newest`: fenced fact rows on live pages outside that window, whose file the census did not look for. */
+  facts_on_unread_pages?: number;
   /** The source's live pages, counted in SQL before the scan, so a partial scan's `pages` reads against the whole source. */
   live_pages: number;
   states: Record<PageState, number>;
@@ -142,7 +148,7 @@ const refuse = (message: string, suggestion: string) => new OperationError('stor
  * page (a page read with `evidence` comes without it, after the scan). `evidence` (d4) reads which side moved for the
  * pages that differ with no import record, in one history walk after the scan; a scan the deadline stopped reads none.
  */
-export async function censusGitGap(engine: BrainEngine, sourceId: string, opts: { sample: number; deadlineAt?: number; collect?: GitGapCollect; evidence?: boolean }): Promise<GitGapCensus> {
+export async function censusGitGap(engine: BrainEngine, sourceId: string, opts: { sample: number; deadlineAt?: number; collect?: GitGapCollect; evidence?: boolean; newest?: number }): Promise<GitGapCensus> {
   await resolveSourceId(engine, sourceId, undefined, { skipLocalSignals: true });
   const [source] = await engine.executeRaw<{ local_path: string | null; incarnation: string }>('SELECT local_path, incarnation::text AS incarnation FROM sources WHERE id=$1', [sourceId]);
   const root = source?.local_path && existsSync(source.local_path) ? source.local_path : null;
@@ -163,18 +169,34 @@ export async function censusGitGap(engine: BrainEngine, sourceId: string, opts: 
   const pending: Unrecorded[] = [];
   // G7a: a source with no checkout is a database-only source, one declared class for all its pages (outside strict mode).
   const policy = { mirror, databaseOnlySource: root === null, dbOnly: (slug: string) => root !== null && isSourceDbOnlySlug(root, slug, 'refuse'), ignored: new Set<string>() };
-  for (let cursor = '0'; ;) {
+  let newest: string[] | null = null;
+  if (opts.newest !== undefined) {
+    const { rows, unread } = await engine.transaction(async tx => {
+      await tx.executeRaw('SET TRANSACTION READ ONLY');
+      const rows = await tx.executeRaw<{ id: string; updated_at: string }>(`SELECT id::text, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at
+        FROM pages WHERE source_id=$1 AND deleted_at IS NULL ORDER BY updated_at DESC, id DESC LIMIT $2`, [sourceId, opts.newest]);
+      const [unread] = await tx.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM facts f
+        JOIN pages p ON p.source_id=f.source_id AND p.slug=f.source_markdown_slug AND p.deleted_at IS NULL
+        WHERE f.source_id=$1 AND f.row_num IS NOT NULL AND NOT (p.id = ANY($2::bigint[]))`, [sourceId, rows.map(row => row.id)]);
+      return { rows, unread: Number(unread?.n ?? 0) };
+    });
+    newest = rows.map(row => row.id);
+    Object.assign(census, { newest: opts.newest, newest_since: rows.at(-1)?.updated_at ?? null, facts_on_unread_pages: unread });
+  }
+  for (let cursor = '0', offset = 0; ;) {
     if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) { census.complete = false; break; }
     const done = await engine.transaction(async tx => {
       await tx.executeRaw('SET TRANSACTION READ ONLY');
       const batch = await tx.executeRaw<Key>(`SELECT id::text, slug, source_id, source_path, octet_length(source_path) AS source_path_bytes, source_uri, withheld_source_path, type, frontmatter,
           database_only_reason, body_storage='segmented' AS segmented, knowledge_revision::text AS revision, NOT ${privacyPartSql('pages')} AS lineage_private
-        FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND pages.id > $2::bigint ORDER BY pages.id LIMIT ${BATCH}`, [sourceId, cursor]);
+        FROM pages WHERE source_id=$1 AND deleted_at IS NULL AND ${newest ? 'pages.id = ANY($2::bigint[])' : 'pages.id > $2::bigint'} ORDER BY pages.id LIMIT ${BATCH}`,
+        [sourceId, newest ? newest.slice(offset, offset + BATCH) : cursor]);
       if (batch.length) {
         await censusBatch(tx, batch, census, { checkout, policy, incarnation: source!.incarnation, sample: opts.sample, collect: opts.collect, pending: opts.evidence ? pending : undefined });
         cursor = batch[batch.length - 1]!.id;
       }
-      return batch.length < BATCH;
+      offset += BATCH;
+      return newest ? offset >= newest.length : batch.length < BATCH;
     });
     if (done) break;
   }
@@ -377,6 +399,15 @@ async function countSourceRows(tx: BrainEngine, census: GitGapCensus): Promise<v
     FROM persistence_effects e CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(e.data->'parked')='array' THEN e.data->'parked' ELSE '[]'::jsonb END) p
     WHERE e.source_id=$1 GROUP BY 1, 2 ORDER BY 1, 2`, [sourceId]);
   census.parked_effects = parked.map(row => ({ kind: row.kind, code: row.code ?? 'unknown', targets: Number(row.targets) }));
+}
+
+/**
+ * GST-2492 PR 2: the fact rows the census counts with no Git home on a page that should have one: unfenced, fenced on a
+ * missing page, or fenced on a page without a file that no declared class covers. Doctor `strict_facts_outside_git` and
+ * `gbrain repair facts-home` judge a strict source by it.
+ */
+export function factsWithoutGitHome(rows: GitGapCensus['rows_without_git_home']): number {
+  return rows.facts_unfenced + rows.facts_fence_page_missing + rows.facts_on_pages_without_file.undeclared;
 }
 
 const counts = (record: Record<string, number>) => Object.entries(record).filter(([, n]) => n > 0).map(([k, n]) => `${k} ${n}`).join(', ') || 'none';

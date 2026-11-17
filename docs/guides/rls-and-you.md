@@ -113,7 +113,7 @@ psql as a BYPASSRLS role (e.g. `postgres`):
 
 ```sql
 CREATE OR REPLACE FUNCTION auto_enable_rls()
-RETURNS event_trigger AS $$
+RETURNS event_trigger SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
   obj record;
 BEGIN
@@ -133,8 +133,9 @@ CREATE EVENT TRIGGER auto_rls_on_create_table
   EXECUTE FUNCTION auto_enable_rls();
 ```
 
-(This is the same DDL migration v35 runs — the canonical copy lives in
-`src/core/schema-migrations/v035-auto-rls-event-trigger.ts`, one file per schema migration. There's no CLI shortcut:
+(This is the DDL migration v35 runs, with the `SET search_path` later migrations add: keep that clause when you
+paste it, or doctor's `function_search_path` check fails until you run the `ALTER FUNCTION` it prints. The
+original lives in `src/core/schema-migrations/v035-auto-rls-event-trigger.ts`, one file per schema migration. There's no CLI shortcut:
 `gbrain apply-migrations --force-retry` targets the vX.Y.Z orchestrator
 registry, not numeric schema migrations like v35.)
 
@@ -268,10 +269,11 @@ could shadow a purge or withdrawal ledger a guard reads with an empty temporary 
 the same name and store purged content again. On an older brain, migration v277 appends
 `pg_temp` to every gbrain function it owns with `ALTER FUNCTION` (no body changes), and
 `gbrain doctor` (`function_search_path`) names any function it could not change, with the
-`ALTER FUNCTION` to run as its owner. This does not close the scoped-writer gap: on
-Postgres, a write role with no RLS policy on a ledger still reads it empty, so its purged
-or withdrawn writes still go through (gbrain#7659 tracks the fix; [docs/ENGINES.md](../ENGINES.md)
-("Purge and withdrawal guards") has the policy to add meanwhile). The three fact-fingerprint functions
+`ALTER FUNCTION` to run as its owner. Since migration v318 (gbrain#7632, gbrain#7659) a
+write role that RLS keeps from reading a ledger is refused with `writer_coordinator_required`
+(`unreadable_state`) on the writes that guard checks, instead of reading the ledger as empty
+and letting purged or withdrawn content through; [docs/ENGINES.md](../ENGINES.md#purge-and-withdrawal-guards)
+has the policies a scoped write role needs. The three fact-fingerprint functions
 (`gbrain_fact_fingerprint`, `gbrain_fact_fingerprint_v1`,
 `gbrain_fact_normalize`) are SQL functions that an index expression uses, so
 they call `pg_catalog.`-qualified built-ins instead of pinning a setting (a

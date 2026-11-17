@@ -60,21 +60,19 @@ import { factsAbsorbWriteKey, factsRetryDeadCommand } from '../facts/dead-absorb
 import { readFactsBackstopJobPage } from '../persistence/effect-facts.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { resolveEntitySlugWithSource } from '../entities/resolve.ts';
-import { dispositionOf, PAGE_REMOVAL_OPERATIONS, supersessionOrderSql, supersessionSql } from '../persistence/terminal-classify.ts';
+import { CALLER_REPLAYABLE_OPERATIONS, dispositionOf, DRIFT_REFUSAL_SQL, GUARD_REFUSAL_SQL, PAGE_REMOVAL_OPERATIONS, supersessionOrderSql, supersessionSql } from '../persistence/terminal-classify.ts';
 import { isStatementTimeout } from '../persistence/bounded-reads.ts';
 import { readRequestIndexStates } from '../persistence/checkpoint-validation.ts';
 import { PERSISTENCE_REQUEST_REPLAY_ID_INDEX, PERSISTENCE_REQUEST_SLUG_SEQUENCE_INDEX } from '../persistence/schema.ts';
 import { StatementDeadlineError, withStatementDeadline } from '../statement-deadline.ts';
 import { afterCursor, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairPlan, type RepairScope } from './core.ts';
 
-const REPLAYABLE = ['put_page', 'add_timeline_entry', 'remember'];
+const REPLAYABLE = [...CALLER_REPLAYABLE_OPERATIONS];
 const REMEMBER_PREPARED_KEYS = ['entity_slug', 'fence', 'valid_from', 'valid_until', 'entity_inferred', 'entity_warning', 'visibility_defaulted'];
 const REMOTE_PREPARED_KEYS = ['source_kind', 'source_uri', 'ingested_via'];
 const PAGE_REMOVALS = PAGE_REMOVAL_OPERATIONS;
-const GUARD_REFUSAL = `(r.state='failed' AND (r.error_code='writer_coordinator_required'
-  OR (r.error_code='storage_error' AND r.error_message LIKE 'Publication failed (P0001)%')))`;
-/** #6429: a refusal from prepareFileTarget (page-prepare.ts); the receipt keeps the code, not the refusal's detail. */
-const DRIFT_REFUSAL = `(r.state='conflict' AND r.error_code='source_changed')`;
+const GUARD_REFUSAL = GUARD_REFUSAL_SQL('r');
+const DRIFT_REFUSAL = DRIFT_REFUSAL_SQL('r');
 /** #7602: a managed fact request refused because its entity page moved; extraction re-admits these since, but older ones stayed refused. */
 const FACTS_MOVED_REFUSAL = `(r.operation='extract_facts' AND r.state='conflict' AND r.error_code='revision_conflict'
   AND r.error_message IN (${FACTS_ENTITY_MOVED_MESSAGES.map(message => `'${message.replaceAll("'", "''")}'`).join(',')}))`;
@@ -495,9 +493,14 @@ export const failedWritesRepair: RepairHandler = {
           if (write.producer) {
             residuals[`producer_owned:${write.producer}`] = (residuals[`producer_owned:${write.producer}`] ?? 0) + 1;
             const facts = write.operation === 'extract_facts';
-            const run = facts ? await factsRecovery(engine, write, extractions) : producerCommand(write.producer, write.source_id);
-            producers.set(`${write.producer} in ${write.source_id}`, facts ? 'each listed request names the command that recovers its facts' : run);
-            listing.push({ item: label, class: 'producer_owned', detail: facts ? run : `re-run: ${run}` });
+            // GST-2517: only a caller submits a forget, so no gbrain process produces it again.
+            const forget = write.operation === 'forget' || write.operation === 'forget_fact';
+            const run = facts ? await factsRecovery(engine, write, extractions)
+              : forget ? `a caller made this ${write.operation} and nothing produces it again; read the fact, then submit the ${write.operation} again with a new request_id if it is still wanted`
+                : producerCommand(write.producer, write.source_id);
+            producers.set(`${write.producer} in ${write.source_id}`, facts ? 'produced by gbrain itself, not replayed here; each listed request names the command that recovers its facts'
+              : `${forget ? 'made by a caller' : 'produced by gbrain itself'}, not replayed here; ${run}`);
+            listing.push({ item: label, class: 'producer_owned', detail: facts ? run : `${forget ? 'resubmit' : 're-run'}: ${run}` });
             continue;
           }
           const verdict = verdicts.get(write.id)!;
@@ -511,7 +514,7 @@ export const failedWritesRepair: RepairHandler = {
           replay: replay.map(write => ({ id: write.id, digest: write.digest, revision: write.revision })) });
         if (replay.length) await saveApprovedSet<ApprovedWrite>(engine, { command: 'failed-writes', hash }, replay);
         return { items: replay.map((write, index) => item(write, hash, index === replay.length - 1)), preview_hash: hash, residuals, listing,
-          warnings: [...[...producers].map(([what, run]) => `${what}: produced by gbrain itself, not replayed here; ${run}`),
+          warnings: [...[...producers].map(([what, note]) => `${what}: ${note}`),
             ...(replay.length ? [`This preview recorded an approval checkpoint for its replay set (preview ${hash.slice(0, 12)}), which --apply --expect reads; no page content changed.`] : [])] };
       } catch (error) {
         throw await previewTimeoutRefusal(engine, error, scope);

@@ -117,6 +117,7 @@
           "skillpack-check",
           "skillpack-harvest",
           "soul-audit",
+          "storage-manifest",
           "strategic-reading",
           "testing",
           "two-tier-extraction",
@@ -125,7 +126,7 @@
         ]
       },
       "elapsed_ms": "<volatile>",
-      "message": "64 new built-in skill(s) available that this workspace hasn't installed: academic-verify, archive-crawler, article-enrichment, ask-user, blog-ingest, book-mirror, brain-ingest-gate, brain-link-discipline, … +56 more. Add them with `gbrain skillpack sync`.",
+      "message": "65 new built-in skill(s) available that this workspace hasn't installed: academic-verify, archive-crawler, article-enrichment, ask-user, blog-ingest, book-mirror, brain-ingest-gate, brain-link-discipline, … +57 more. Add them with `gbrain skillpack sync`.",
       "name": "skill_currency",
       "status": "warn"
     },
@@ -133,6 +134,23 @@
       "elapsed_ms": "<volatile>",
       "message": "no installed skills declare preconditions",
       "name": "skill_preconditions",
+      "status": "ok"
+    },
+    {
+      "details": {
+        "scope": "managed",
+        "totals": {
+          "bytes": 100,
+          "drift": 0,
+          "invocations": 0,
+          "size": 0,
+          "skills": 1,
+          "subcommands_unverified": 0
+        }
+      },
+      "elapsed_ms": "<volatile>",
+      "message": "1 skill(s), 0 KB (commands and flags not checked outside the CLI); no findings",
+      "name": "skill_health",
       "status": "ok"
     },
     {
@@ -200,9 +218,32 @@
     },
     {
       "elapsed_ms": "<volatile>",
-      "message": "mode=notify",
+      "fix": {
+        "actor": "agent",
+        "argv": [
+          "gbrain",
+          "upgrade",
+          "--restart-only",
+          "--dry-run",
+          "--json"
+        ],
+        "consent": [],
+        "docs": "docs/guides/upgrades-auto-update.md#restart",
+        "requires_exclusive": false,
+        "verify": {
+          "argv": [
+            "gbrain",
+            "doctor",
+            "--only",
+            "self_upgrade_health",
+            "--json"
+          ]
+        },
+        "why": "Read-only: lists every gbrain process on this host with the restart each one needs and the steps the upgrade cannot take."
+      },
+      "message": "gbrain upgrade refuses on this host: serve pid 17125 (build not recorded) runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: move the install at /Users/shintaro/mcp-servers/gbrain-mcp (v0.60.641.0) to the release being installed: for a git clone, `git -C /Users/shintaro/mcp-servers/gbrain-mcp fetch --tags origin && git -C /Users/shintaro/mcp-servers/gbrain-mcp checkout vpending && bun install --cwd /Users/shintaro/mcp-servers/gbrain-mcp`; otherwise start this process from the upgraded install instead; then run the upgrade again. worker pid 81831 (build not recorded) runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: move the install at /Users/shintaro/mcp-servers/gbrain-mcp (v0.60.641.0) to the release being installed: for a git clone, `git -C /Users/shintaro/mcp-servers/gbrain-mcp fetch --tags origin && git -C /Users/shintaro/mcp-servers/gbrain-mcp checkout vpending && bun install --cwd /Users/shintaro/mcp-servers/gbrain-mcp`; otherwise start this process from the upgraded install instead; then run the upgrade again. (mode=notify).",
       "name": "self_upgrade_health",
-      "status": "ok"
+      "status": "warn"
     },
     {
       "elapsed_ms": "<volatile>",

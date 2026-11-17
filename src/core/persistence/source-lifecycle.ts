@@ -8,24 +8,25 @@ import { readFix } from '../ops/op-fix.ts';
 import type { Action } from '../agent-output.ts';
 import { catalogueError } from '../error-catalogue.ts';
 import { isValidSourceId } from '../source-id.ts';
-import { EXPIRED_ARCHIVE_SQL } from '../source-delete.ts';
+import { EXPIRED_ARCHIVE_SQL, removedSourceScrubCtes } from '../source-delete.ts';
 import { parseSourceConfig } from '../sources-load.ts';
 import { redactSourceConfig } from '../source-config-redact.ts';
 import { discoverGitRoot } from '../sync-git.ts';
-import { isInsideGitRepo, hasTrackedContent } from '../git-remote.ts';
+import { inGitCheckout, hasTrackedContent } from '../git-remote.ts';
 import { containsPath, getWorktreeBinding, humanManifestProgress, type WorktreeBinding, type WorktreeManifest, worktreeManifest } from './ownership.ts';
 import { manifestDifferences, storedManifestScope, type WorktreeManifestScope } from './worktree-manifest.ts';
 import { hostIdFor } from './identity.ts';
 import { advanceTopology, assertTopologyRequestsSettled, inspectTopologyPhysicalRoot, lockTopologyPrincipal, lockTopologyRows, settleTopologyRequests, topologyCanonicalStamp, topologyPrincipal, withTopologyLocks } from './topology-locks.ts';
-import { assertTopologyChangeCapacity, priorTopologyChange, recordTopologyChange, topologyReceipt } from './topology-receipts.ts';
+import { admitTopologyRetire, isRetireAdmission, isSupersededRetire, priorTopologyChange, RETIRE_SUPERSEDED, recordTopologyChange, settleTopologyRetire, supersedeTopologyRetires, topologyReceipt, type TopologyChange } from './topology-receipts.ts';
 import { isWriteRequestId } from './types.ts';
 import { withCoordinatedWrite } from './context.ts';
 import { principalAttribution } from './attribution.ts';
 import { managedFilesystemDatastorePath, refreshManagedFilesystemRoots } from './filesystem-guard.ts';
 import { canonicalFilesystemPath, nativeFilesystemPath } from './root-registry.ts';
 import { flushTopologyDirectory } from './topology-filesystem.ts';
-import { claimPhysicalRoot } from './physical-root.ts';
-import { inspectRelocatedPhysicalRoot, relocatePhysicalRoot } from './physical-root-record.ts';
+import { claimPhysicalRoot, movedPhysicalRootRefusal } from './physical-root.ts';
+import { inspectRelocatedPhysicalRoot, physicalRootMovedError, relocatePhysicalRoot } from './physical-root-record.ts';
+import { sourceCheckoutMissingRefusal } from './verb-errors.ts';
 import { assertWriterAdminState, WRITER_INSPECTION_HINT } from './admin-intent.ts';
 import { assertWriterAdminUnlocked } from './admin-lock.ts';
 import { rebindContentReceipts } from '../shared-skills/receipt-root.ts';
@@ -52,6 +53,24 @@ function sourcesListFix():Action{
 function ownerStatusFix(sourceId:string):Action{
   return readFix('Shows the canonical binding, owner host, incarnation and any pending recovery; read it before deciding on a topology change.',
     {argv:['gbrain','sources','writer','status','--source',sourceId,'--json']});
+}
+
+/** #8984: the source this request_id was admitted against has since been removed, replaced or changed by another lifecycle operation. */
+function retireSuperseded(row:TopologyChange):OperationError{
+  return opError(RETIRE_SUPERSEDED,`This ${row.operation} request was superseded: source '${row.source_id}' has since been removed, replaced or changed by another lifecycle operation.`,
+    `Nothing was changed: request ${row.request_id} can only act on incarnation ${row.source_incarnation} of '${row.source_id}' as it stood when the request was admitted, so retrying it can never delete pages the source holds now. Do not retry it. Read the source's current state with the command in fix; removing the current source is a new decision for the user, made with a new request id.`,
+    {fix:ownerStatusFix(row.source_id)});
+}
+/** A prior receipt of this request_id, replayed; a retire admission (#8984) returns null so the run resumes. */
+/** The arguments a lifecycle request id is bound to (its receipt digest). */
+export function topologyIntent(input:SourceLifecycleInput):Record<string,unknown>{
+  return {...input,requestId:undefined,dryRun:undefined,automaticClaim:undefined};
+}
+
+function replayTopologyChange(row:TopologyChange|null):Record<string,unknown>|null{
+  if(!row||isRetireAdmission(row))return null;
+  if(isSupersededRetire(row))throw retireSuperseded(row);
+  return topologyReceipt(row);
 }
 
 function localRoot(path:string,create=false):{source:string;worktree:string}{
@@ -131,10 +150,12 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
   if(['remove','purge','archive'].includes(input.operation)&&input.sourceId==='default') throw opError('invalid_params','The default source cannot be removed or archived.',
     `The default source holds the brain's primary pages and always stays registered. ${input.operation} a named source instead; the command in fix lists them.`,{fix:sourcesListFix()});
   const principal=await topologyPrincipal(engine);
-  const intent={...input,requestId:undefined,dryRun:undefined,automaticClaim:undefined};
+  const intent=topologyIntent(input);
   const prior=await priorTopologyChange(engine,principal,requestId,intent);
-  if(prior) return topologyReceipt(prior);
-  if(input.requireGitContent&&input.path&&(!isInsideGitRepo(input.path)||!hasTrackedContent(input.path)))
+  const replayed=replayTopologyChange(prior);
+  if(replayed) return replayed;
+  // GST-2732: a plain folder outside any repository registers as one; a repository with nothing committed still refuses (#2707).
+  if(input.requireGitContent&&input.path&&(!existsSync(input.path)||inGitCheckout(input.path)&&!hasTrackedContent(input.path)))
     throw opError('not_a_git_repo','The source path must contain committed Git content. Use --force to register an ordinary directory.',
       `Commit the content in that directory with git first, or, if '${input.sourceId}' is meant to be a plain directory, rerun the add with --force (sync then imports its files without Git; a file removed from it keeps its page); nothing was registered.`);
   if(input.operation==='reclone'||input.operation==='add'&&input.remoteUrl){
@@ -146,6 +167,15 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
     `Pass the canonical directory for '${input.sourceId}' (the one the command in fix reports, or its verified successor), then rerun the ${input.operation}.`,
     {fix:ownerStatusFix(input.sourceId)});
   const [before]=await engine.executeRaw<SourceState>('SELECT id,incarnation,archived,local_path,config,name,last_commit FROM sources WHERE id=$1',[input.sourceId]);
+  // #8984: idempotency is per principal, so a request_id another CLI registration admitted against an earlier incarnation
+  // (the registration was replaced since) refuses too; one bound to this incarnation still resumes under the new registration.
+  const [superseded]=prior?[prior]:['remove','purge'].includes(input.operation)?await engine.executeRaw<TopologyChange>(`SELECT * FROM persistence_topology_changes
+    WHERE request_id=$1::uuid AND source_id=$2 AND principal_id<>$3::uuid AND operation IN ('remove','purge') AND source_incarnation IS DISTINCT FROM $4::uuid
+    ORDER BY created_at LIMIT 1`,[requestId,input.sourceId,principal,before?.incarnation??null]):[];
+  if(superseded&&superseded.source_incarnation!==before?.incarnation){
+    if(!input.dryRun) await topologyTransaction(engine,async tx=>{await lockTopologyPrincipal(tx,principal);await settleTopologyRetire(tx,superseded,'failed',{...superseded.outcome,error:RETIRE_SUPERSEDED});});
+    throw retireSuperseded(superseded);
+  }
   if(input.operation!=='add'&&!before) throw opError('not_found','Source not found.',
     `No source '${input.sourceId}' is registered on this brain. Check the ID against the command in fix, which lists archived sources too.`,{fix:sourcesListFix()});
   if(input.expectedIncarnation&&input.expectedIncarnation!==before?.incarnation) throw opError('source_changed','The source was replaced.',
@@ -160,7 +190,15 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
   const retire=['archive','remove','purge'].includes(input.operation);
   const manifestRequired=!retire||(await engine.executeRaw<{digest:string|null}>(
     `SELECT w.manifest->>'digest' AS digest FROM persistence_source_bindings b JOIN persistence_worktrees w ON w.id=b.worktree_id WHERE b.source_id=$1`,[input.sourceId])).some(row=>!row.digest);
-  if(input.dryRun) await inspectTopologyPhysicalRoot(engine,input.sourceId,root?.worktree,{relocation:input.operation==='rebind'});
+  // #8625: the operation a moved checkout's exit names; restore, archive and the others pass no path.
+  const exit={sourceId:input.sourceId,operation:input.operation as 'add'|'claim'|'rebind'};
+  if(input.dryRun&&input.operation==='rebind'&&root){
+    // #8625: the real rebind hashes the recorded checkout first, so a missing one refuses before anything else.
+    const own=await getWorktreeBinding(engine,input.sourceId);
+    if(own?.local_path&&own.owner_host_id===hostIdFor(engine)&&own.coordination_path&&!existsSync(own.local_path))
+      throw await movedPhysicalRootRefusal(engine,root.worktree,exit,hostIdFor(engine),own.local_path)??missingCheckoutError(input.sourceId,own.local_path);
+  }
+  if(input.dryRun) await inspectTopologyPhysicalRoot(engine,input.sourceId,root?.worktree,{relocation:input.operation==='rebind',operation:input.operation});
   if(input.dryRun) return {dry_run:true,operation:input.operation,source_id:input.sourceId,source_incarnation:before?.incarnation??null,path:root?.source??before?.local_path??null,manifest_required:manifestRequired};
   return withTopologyLocks(engine,input.sourceId,async bindings=>{
     // Hash canonical bytes while holding native exclusion, without a database
@@ -172,7 +210,10 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
         if(input.operation==='add'&&input.createDirectory&&path===root?.worktree)continue;
         // #5219: retiring may skip a vanished checkout; the transaction proves the source is empty and its sole member.
         if(retire&&!root){missingCheckout=path;continue;}
-        throw missingCheckoutError(input.sourceId,path);
+        const moved=root&&await movedPhysicalRootRefusal(engine,root.worktree,exit,hostIdFor(engine),path);
+        // #8625: the automatic first-write claim stays path-free, since a remote page write can reach it.
+        if(input.automaticClaim) throw moved?physicalRootMovedError():sourceCheckoutMissingRefusal(input.sourceId,null);
+        throw moved||missingCheckoutError(input.sourceId,path);
       }
       if(!manifestRequired)continue;
       const manifest=worktreeManifest(path,{progress:humanManifestProgress()});
@@ -197,12 +238,14 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
         const sources=await lockTopologyRows(tx,input.sourceId,bindings);
         const [source]=await tx.executeRaw<{incarnation:string;archived:boolean;due:boolean}>(
           `SELECT incarnation,archived,${input.expiredOnly?EXPIRED_ARCHIVE_SQL:'true'} AS due FROM sources WHERE id=$1`,[input.sourceId]);
+        const admitted=await priorTopologyChange(tx,principal,requestId,intent);
         if(source?.incarnation!==before!.incarnation||!source.due||input.operation==='purge'&&!input.expiredOnly&&!source.archived
-          ||await priorTopologyChange(tx,principal,requestId,intent)
+          ||admitted&&!(isRetireAdmission(admitted)&&admitted.source_incarnation===source.incarnation)
           ||(await tx.executeRaw('SELECT client_id FROM oauth_clients WHERE source_id=$1 LIMIT 1',[input.sourceId])).length) return 0;
         await assertTopologyRequestsSettled(tx,sources,bindings.map(binding=>binding.worktree_id));
         await lockTopologyPrincipal(tx,principal);
-        await assertTopologyChangeCapacity(tx,{principal,operation:input.operation,sourceId:input.sourceId});
+        if(!admitted) await admitTopologyRetire(tx,{principal,requestId,intent,operation:input.operation,sourceId:input.sourceId,
+          incarnation:source.incarnation,worktrees:bindings.map(binding=>binding.worktree_id),expiredOnly:input.expiredOnly});
         const gone=await withCoordinatedWrite(tx,sources,async()=>{
           deleting=true;
           const rows=await tx.executeRaw('DELETE FROM pages WHERE id IN (SELECT id FROM pages WHERE source_id=$1 LIMIT $2) RETURNING id',[input.sourceId,limit]);
@@ -226,8 +269,8 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
     if(input.operation==='claim'&&!input.automaticClaim) await assertWriterAdminUnlocked(tx);
     const [source]=await tx.executeRaw<SourceState>('SELECT id,incarnation,archived,local_path,config,name,last_commit FROM sources WHERE id=$1',[input.sourceId]);
     if(source)source.config=parseSourceConfig(source.config);
-    const repeated=await priorTopologyChange(tx,principal,requestId,intent);
-    if(repeated){await lockTopologyPrincipal(tx,principal);return topologyReceipt(repeated);}
+    const repeated=replayTopologyChange(await priorTopologyChange(tx,principal,requestId,intent));
+    if(repeated){await lockTopologyPrincipal(tx,principal);return repeated;}
     if((source?.incarnation??null)!==(before?.incarnation??null)) throw opError('source_changed','The source changed during lifecycle preparation.',
       `Source '${input.sourceId}' was replaced while this ${input.operation} was being prepared; the transaction rolled back and nothing changed. Check its current state with the command in fix before running the ${input.operation} again.`,
       {fix:ownerStatusFix(input.sourceId)});
@@ -317,9 +360,13 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
           {fix:readFix('Lists OAuth clients with the source each is bound to.',{argv:['gbrain','auth','clients','--json']})});
         const [impact]=await tx.executeRaw<{count:string}>('SELECT count(*)::text AS count FROM pages WHERE source_id=$1',[input.sourceId]);
         pagesDeleted+=Number(impact.count);
-        await tx.executeRaw('DELETE FROM sources WHERE id=$1 AND incarnation=$2::uuid',[input.sourceId,incarnation]);
+        await tx.executeRaw(`WITH gone AS (DELETE FROM sources WHERE id=$1 AND incarnation=$2::uuid RETURNING id),${removedSourceScrubCtes('EXISTS (SELECT 1 FROM gone)')} SELECT 1`,[input.sourceId,incarnation]);
+        await tx.executeRaw(`WITH ${removedSourceScrubCtes('true')} SELECT 1`,[input.sourceId]);
         await tx.executeRaw('DELETE FROM persistence_source_bindings WHERE source_id=$1 AND source_incarnation=$2::uuid',[input.sourceId,incarnation]);
+        await supersedeTopologyRetires(tx,input.sourceId,incarnation,principal,requestId);
+        await tx.executeRaw("DELETE FROM op_checkpoints WHERE op='managed-sync' AND completed_keys->0->>'sourceId'=$1",[input.sourceId]);
       }
+      if(source&&!['remove','purge'].includes(input.operation)) await supersedeTopologyRetires(tx,input.sourceId,source.incarnation,principal,requestId);
       const contentReceipts=input.operation==='rebind'?await rebindContentReceipts(tx,worktrees,hostIdFor(tx),relocated?undefined:[input.sourceId]):[];
       await advanceTopology(tx,worktrees);
       for(const id of worktrees){
@@ -344,7 +391,13 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
         error.suggestion=`This run had already deleted ${retiredPages} page(s) of source '${input.sourceId}' in committed batches before it stopped; the source and its remaining pages are still registered. ${error.suggestion??''}`.trim();
       throw error;
     }
-  },root?.worktree,5000,{relocation:input.operation==='rebind'});
+  },root?.worktree,5000,{relocation:input.operation==='rebind'}).catch(async(error:unknown)=>{
+    // #8625: the claim's own refusal is path-free; a trusted local lifecycle names the move and its exit. The automatic
+    // first-write claim keeps it path-free, since a remote page write can reach it.
+    if(error instanceof OperationError&&error.detail==='physical_root_moved'&&root&&!input.automaticClaim)
+      throw await movedPhysicalRootRefusal(engine,root.worktree,exit,hostIdFor(engine))??error;
+    throw error;
+  });
 }
 
 /** #6099: a rebind's new directory does not match the current checkout; names the first differing paths (Git-tracked paths in git scope). */

@@ -39,6 +39,7 @@ import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { performManagedSync } from '../src/core/persistence/sync-run.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { readsUnscopedOnPurpose } from './helpers/reads-unscoped.ts';
 
 const PRIVATE_SRC = 'private-alice-example';
 const SHARED_PAGE = 'notes/team-shared';
@@ -50,6 +51,7 @@ for (const kind of testBackends()) {
   describe('writes to default from a member-bound credential (' + kind + ', repo-less)', () => {
     let engine: BrainEngine;
     let close: () => Promise<void>;
+    let databaseUrl: string;
     const tokens: Record<string, string> = {};
     const provider = () => new GBrainOAuthProvider({ sql: sqlQueryForEngine(engine), transaction: fn => engine.transaction(tx => fn(sqlQueryForEngine(tx))) });
 
@@ -84,7 +86,7 @@ for (const kind of testBackends()) {
     const none = { get_page: false, search: false, query: false, recall: false, list_pages: false };
 
     beforeAll(async () => {
-      if (kind === 'postgres') ({ engine, close } = await isolatedPersistencePostgres(process.env.DATABASE_URL!));
+      if (kind === 'postgres') ({ engine, close, databaseUrl } = await isolatedPersistencePostgres(process.env.DATABASE_URL!));
       else { engine = new PGLiteEngine(); await engine.connect({ engine: 'pglite' } as never); await engine.initSchema(); close = () => engine.disconnect(); }
       __resetPrivateVisibilityCacheForTests();
       await engine.executeRaw('INSERT INTO sources (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING', [PRIVATE_SRC]);
@@ -99,6 +101,7 @@ for (const kind of testBackends()) {
         const minted = await mintLegacyToken(engine, { name, scopes: ['read', 'write'], takesHolders: ['world'], ...(sourceGrant ? { sourceGrant: [...sourceGrant] } : {}) });
         tokens[name] = minted.token;
         if (member) await engine.executeRaw('UPDATE access_tokens SET member_id = $2 WHERE id = $1::uuid', [minted.id, member]);
+        else await readsUnscopedOnPurpose(engine, minted.id);
       }
     }, 240_000);
     afterAll(async () => { await close?.(); }, 60_000);
@@ -145,7 +148,12 @@ for (const kind of testBackends()) {
       try {
         await dispatchToolCall(engine, 'put_page', { slug, content: note('Alice lookup', 'Alice lookup code ' + canary + '.'), request_id: randomUUID() },
           { remote: true, transport: 'http', auth, sourceId: 'default', takesHoldersAllowList: ['world'] });
-      } finally { await engine.executeRaw('ALTER TABLE access_tokens RENAME COLUMN member_id_unreadable TO member_id'); }
+      } finally {
+        await engine.executeRaw('ALTER TABLE access_tokens RENAME COLUMN member_id_unreadable TO member_id');
+        // GST-2314: a pooled connection that prepared an access_tokens SELECT * while the column was renamed fails 0A000 on
+        // its next use inside a transaction, so the later cases start on fresh connections.
+        if (kind === 'postgres') { await disposePersistenceConsumer(engine); await engine.disconnect(); await engine.connect({ database_url: databaseUrl, poolSize: 4 } as never); }
+      }
       expect(await stored(slug)).toBeUndefined();
       expect(await reads('public', slug, canary)).toEqual(none);
       await engine.executeRaw('INSERT INTO access_members (id) VALUES ($1) ON CONFLICT (id) DO NOTHING', ['carol-example']);

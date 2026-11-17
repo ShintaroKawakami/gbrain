@@ -1,6 +1,7 @@
 import type { BrainEngine } from '../engine.ts';
 import type { PageReadScope } from '../types.ts';
 import { projectionClassSql } from '../page-state/projection-class.ts';
+import { ACTIVATION_SERVED_REVISION } from './safe-chunks.ts';
 import { coverageScopeFilters } from './retrieval-coverage.ts';
 
 export interface ProjectionReadinessScope extends PageReadScope {
@@ -30,7 +31,7 @@ export function __resetProjectionReadinessCacheForTests(): void { readinessCache
 function scopeKey(scope: ProjectionReadinessScope): string {
   const sorted = (values?: string[]) => values === undefined ? null : [...new Set(values)].sort();
   return JSON.stringify([scope.sourceId ?? null, sorted(scope.sourceIds), scope.excludePrivate === true, scope.requireSafeChunks === true,
-    scope.pageKind ?? null, sorted(scope.types), sorted(scope.excludeSlugPrefixes)]);
+    scope.minTrust ?? null, scope.suppressFlagged === true, scope.pageKind ?? null, sorted(scope.types), sorted(scope.excludeSlugPrefixes)]);
 }
 
 /**
@@ -90,11 +91,15 @@ async function probeUncached(
     // pending its LIMIT 1 finds no protected page to stop at, so evaluating it anyway read every unsealed page (#8000).
     // The planner has no statistics for a column-to-column comparison, so it believes most pages are unsealed and an
     // EXISTS chose a sequential scan of pages that expected to stop at once; on a sealed brain it read every page
-    // (~600 ms at 600k pages, on every cold call). Ordering by idx_pages_projection_pending's columns under LIMIT 1
-    // makes that partial index the cheap first row, so the probe reads only the unsealed pages.
+    // (~600 ms at 600k pages, on every cold call). Ordering by the partial index's columns under LIMIT 1 makes it the
+    // cheap first row. The index is idx_pages_projection_waiting (v317, #9192): its predicate is this one, so pages v153
+    // left serving their pre-upgrade index are not in it and the probe no longer steps over each of them.
+    // JIT off (#8033): a remote caller's private-visibility subplans lift the estimate past jit_above_cost, and compiling
+    // them cost ~66 of ~67 ms at 20k pages while the probe itself reads one index row.
     const unsealed = (cond: string) => `(SELECT true FROM pages p JOIN sources s ON s.id = p.source_id
         WHERE p.deleted_at IS NULL
           AND p.text_projection_revision IS DISTINCT FROM p.knowledge_revision
+          AND p.text_projection_revision IS DISTINCT FROM '${ACTIVATION_SERVED_REVISION}'::uuid
           AND ${filters.join(' AND ')} AND ${cond}
         ORDER BY p.source_id, p.page_kind, p.slug LIMIT 1) IS NOT NULL`;
     const cls = projectionClassSql('p', 's');
@@ -102,6 +107,7 @@ async function probeUncached(
       `WITH r AS MATERIALIZED (SELECT ${unsealed(`${cls} NOT IN ('protected','archived')`)} AS pending)
       SELECT r.pending, CASE WHEN r.pending THEN false ELSE ${unsealed(`${cls} IN ('protected','archived')`)} END AS by_design FROM r`,
       params,
+      { jitOff: true },
     );
     if (typeof rows[0]?.pending !== 'boolean') throw new Error('Invalid readiness result');
     if (rows[0].pending) {

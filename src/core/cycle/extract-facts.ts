@@ -81,7 +81,8 @@ import {
   type SupersessionChain,
 } from '../facts/supersede-resolve.ts';
 import { writeReceipt } from '../extract/receipt-writer.ts';
-import { fenceUnfencedFacts, planUnfencedFacts } from '../facts/unfenced-facts.ts';
+import { fenceUnfencedFacts, isFenceHold, planUnfencedFacts } from '../facts/unfenced-facts.ts';
+import { heldMoveIncomplete, moveHeldFacts } from '../facts/held-fact-move.ts';
 import { classifyRunStop, upsertExtractRollup } from '../extract/rollup-writer.ts';
 import { factsFenceView } from '../facts-fence.ts';
 import { fenceReadOf, publishFenceGeneration, readFenceBlocks, FACT_FENCE_KIND, type FenceRead } from '../generations/fence.ts';
@@ -104,7 +105,7 @@ import { embed, getEmbeddingDimensions, getEmbeddingModel, isAvailable } from '.
 import { isAborted } from '../abort-check.ts';
 import { parseMarkdown } from '../markdown.ts';
 import { isWriteThroughDisabled, resolvePageWriteTarget } from '../write-through.ts';
-import { urlCloneReadOnly } from '../url-clone.ts';
+import { readOnlyCheckout } from '../persistence/mirror-read-only.ts';
 import { acquirePageLock } from '../page-lock.ts';
 import {
   lockReconcileRevision,
@@ -405,7 +406,7 @@ interface FenceReconcilePlan {
 async function planFenceReconcile(db: BrainEngine, page: PageFenceInput, slug: string, sourceId: string, warnings: string[], managed: boolean): Promise<FenceReconcilePlan | null> {
   // A segmented page's view and fence text come from its fences rows: only runs changed since their row was written are read.
   const segmented = isSegmentedPage(page) ? await incrementalFactsFence(db, page) : null;
-  const view = segmented?.view ?? factsFenceView(page);
+  const view = segmented?.view ?? factsFenceView({ ...page, slug });
   // #6686: a lone fence below the timeline sentinel that parses cleanly is the page's fence, read where the writers
   // edit it; one that does not parse keeps the #3625 guard below.
   const below = !view.sections.body && view.sections.timeline ? view.timeline : null;
@@ -458,7 +459,20 @@ async function planFenceReconcile(db: BrainEngine, page: PageFenceInput, slug: s
     if (desired && desired.fact === fact.fact) matched.set(desired.row_num, fact);
     else stale.push(fact);
   }
-  const updates = extracted.filter(f => {
+  // GST-2511: a contested row whose widening the owner has not accepted keeps its visibility; the fence's world cell is
+  // the lower-tier writer's request, which only the owner's accept applies (trust/fence-guard.ts).
+  const widening = extracted.flatMap(f => {
+    const fact = matched.get(f.row_num);
+    return fact && fact.visibility !== 'world' && (f.visibility ?? 'private') === 'world' ? [Number(fact.id)] : [];
+  });
+  const heldWidening = new Set(widening.length ? (await db.executeRaw<{ id: number }>(
+    `SELECT related_id AS id FROM trust_proposals WHERE source_id = $1 AND action = 'supersede_fact' AND related_table = 'facts'
+      AND related_id = ANY($2::bigint[]) AND status IN ('pending', 'rejected', 'undone') AND before_state->'visibility' IS NOT NULL`,
+    [sourceId, widening])).map(r => Number(r.id)) : []);
+  const updates = extracted.map((f): FenceExtractedFact => {
+    const fact = matched.get(f.row_num);
+    return fact && heldWidening.has(Number(fact.id)) ? { ...f, visibility: fact.visibility as FenceExtractedFact['visibility'] } : f;
+  }).filter(f => {
     const fact = matched.get(f.row_num);
     return fact !== undefined && factCellsDiffer(fact, f);
   });
@@ -491,8 +505,9 @@ async function planFenceReconcile(db: BrainEngine, page: PageFenceInput, slug: s
  * their positions (stale rows whose claim is still active in the fence stay,
  * others are expired in place, new rows wait). In-place updates still apply.
  */
-function reconcileWrites(plan: FenceReconcilePlan) {
-  const deferInserts = plan.toInsert.some(f => !f.embedding) && plan.stale.some(f => f.has_embedding);
+/** `embeddingDeferred`: the caller skipped embedding on purpose (the stale-fact drain adds vectors), so a vectorless insert still replaces. */
+function reconcileWrites(plan: FenceReconcilePlan, embeddingDeferred = false) {
+  const deferInserts = !embeddingDeferred && plan.toInsert.some(f => !f.embedding) && plan.stale.some(f => f.has_embedding);
   const activeClaims = new Set(plan.extracted.filter(f => f.expired_at == null).map(f => `${f.fact}\u0000${f.source}`));
   return {
     deferInserts,
@@ -569,17 +584,17 @@ function maintenanceRequestIdFor(parts: unknown[]): string {
  * changed or the request is still pending (the next run retries).
  */
 async function publishFenceReconcile(engine: BrainEngine, authority: MaintenanceAuthority, page: { id: number; knowledge_revision?: string | null },
-  slug: string, toInsert: FenceExtractedFact[]): Promise<{ inserted: number; updated: number; deleted: number; deferred: boolean; warnings: string[]; write_gate?: GateTally } | null> {
+  slug: string, toInsert: FenceExtractedFact[], deferEmbedding = false): Promise<{ inserted: number; updated: number; deleted: number; deferred: boolean; warnings: string[]; write_gate?: GateTally } | null> {
   const sourceId = authority.writer.sourceId;
   const revision = page.knowledge_revision ?? REVISION_BACKFILL_PENDING;
   const embeddings = toInsert.filter(f => f.embedding).map(f => ({ row_num: f.row_num, fact: f.fact, model: f.embedding_model ?? null, vector: Array.from(f.embedding!) }));
   for (let attempt = 0; ; attempt++) {
-    const requestId = maintenanceRequestIdFor(['extract-facts-fence-v1', authority.writer.sourceIncarnation, sourceId, slug, revision, digest(embeddings), attempt]);
+    const requestId = maintenanceRequestIdFor(['extract-facts-fence-v1', authority.writer.sourceIncarnation, sourceId, slug, revision, digest(embeddings), attempt, ...(deferEmbedding ? ['defer-embedding'] : [])]);
     const prior = await getWriteRequest(engine, authority.writer.principal, requestId);
     if (prior && isTerminal(prior) && prior.state !== 'committed') continue;
     try {
       const receipt = await submitDatabaseMaintenanceIntent(engine, authority, slug,
-        { kind: FENCE_FACTS_INTENT, expected_revision: revision, page_id: page.id, embeddings }, requestId);
+        { kind: FENCE_FACTS_INTENT, expected_revision: revision, page_id: page.id, embeddings, ...(deferEmbedding ? { defer_embedding: true } : {}) }, requestId);
       return { inserted: Number(receipt.inserted ?? 0), updated: Number(receipt.updated ?? 0), deleted: Number(receipt.deleted ?? 0),
         deferred: receipt.deferred === true, warnings: Array.isArray(receipt.warnings) ? receipt.warnings.map(String) : [],
         ...(receipt.write_gate ? { write_gate: receipt.write_gate as GateTally } : {}) };
@@ -592,7 +607,7 @@ async function publishFenceReconcile(engine: BrainEngine, authority: Maintenance
 
 /** Preparer for `managed_maintenance_fence_facts`: replans the page's reconcile under its key and applies it. */
 export async function prepareFenceFactsReconcile(engine: BrainEngine, row: WriteRequest, config: GBrainConfig): Promise<PreparedMutation> {
-  const intent = row.intent as { page_id?: unknown; expected_revision?: unknown; embeddings?: Array<{ row_num: number; fact: string; model: string | null; vector: number[] }> } | null;
+  const intent = row.intent as { page_id?: unknown; expected_revision?: unknown; defer_embedding?: unknown; embeddings?: Array<{ row_num: number; fact: string; model: string | null; vector: number[] }> } | null;
   const snapshot = await engine.readPageSnapshot(row.slug, { sourceId: row.source_id });
   if (!snapshot || snapshot.page.id !== Number(row.page_id) || Number(intent?.page_id) !== snapshot.page.id) {
     throw opError('page_identity_changed', 'The page was deleted or replaced before its facts fence was reconciled.',
@@ -614,7 +629,7 @@ export async function prepareFenceFactsReconcile(engine: BrainEngine, row: Write
         const vector = vectors.get(`${fact.row_num}\u0000${fact.fact}`);
         if (vector) { fact.embedding = new Float32Array(vector.vector); fact.embedding_model = vector.model; }
       }
-      const writes = reconcileWrites(plan);
+      const writes = reconcileWrites(plan, intent?.defer_embedding === true);
       const written = await writeFenceReconcile(tx, row.source_id, row.slug, plan, writes);
       return { status: 'completed', ...written, deferred: writes.deferInserts, warnings: [...warnings, ...written.warnings] };
     } };
@@ -709,6 +724,8 @@ export interface ExtractFactsOpts {
    * (src/core/facts/reconcile-watermark.ts). The dream cycle sets it.
    */
   drain?: FactsReconcileDrainOpts;
+  /** GBRA-438: write new rows without calling the embedding provider; the stale-fact embed drain adds their vectors later. */
+  deferEmbedding?: boolean;
 }
 
 export interface ExtractFactsResult {
@@ -725,10 +742,12 @@ export interface ExtractFactsResult {
   legacyPages: string[];
   /** Unfenced rows this run appended to their page's fence and stamped with a row number (#5299). */
   unfencedRowsFenced: number;
+  /** GST-2492: held facts this run moved into their new entity page or their folder's holding page (present only when it moved any). */
+  heldFactsMoved?: number;
   /** Active fence-owned rows expired because their page was soft-deleted. */
   factsExpiredForDeletedPages: number;
   guardTriggered: boolean;
-  /** Pages whose reconcile threw and rolled back; later pages still ran. */
+  /** Pages whose fence write or reconcile threw and rolled back; later pages still ran. */
   pagesFailed: number;
   warnings: string[];
   /** #5575 B3: new fence rows the write gate flagged, held or rejected; present only when it did any. */
@@ -782,24 +801,17 @@ async function pendingLegacyRows(engine: BrainEngine, sourceId: string): Promise
   return new Map(legacy.map(row => [row.entity_slug, parseInt(row.n ?? '0', 10)]));
 }
 
+/** Pages between macrotask yields in the reconcile walk (about 10 ms of work on PGLite). */
+const FACTS_WALK_YIELD_EVERY = 50;
+
 /**
  * Run the extract_facts phase against the current brain state. Returns
  * an ExtractFactsResult envelope; status mapping (ok / warn / fail)
  * happens in the cycle.ts caller.
  */
-export async function runExtractFacts(
-  engine: BrainEngine,
-  opts: ExtractFactsOpts = {},
-): Promise<ExtractFactsResult> {
-  const sourceId = opts.sourceId ?? 'default';
-  // Managed brains reconcile the same way, but each page's writes publish as
-  // a receipted database-only maintenance request. The authority is
-  // preflighted on the first page that needs a write, so a run with nothing
-  // to change never needs one; an unacceptable caller still refuses first.
-  const managed = await maintenanceCallerPreflight(engine, sourceId);
-  let authority: Promise<MaintenanceAuthority | null> | undefined;
-  const managedAuthority = () => managed ? authority ??= maintenancePreflight(engine, sourceId) : Promise.resolve(null);
-  const result: ExtractFactsResult = {
+/** A run's counters before it scans anything; a guest source's run returns them unchanged. */
+function emptyExtractFactsResult(): ExtractFactsResult {
+  return {
     pagesScanned: 0,
     pagesWithFacts: 0,
     factsInserted: 0,
@@ -820,6 +832,22 @@ export async function runExtractFacts(
     phantomsLockBusy: false,
     phantomsMorePending: false,
   };
+}
+
+export async function runExtractFacts(
+  engine: BrainEngine,
+  opts: ExtractFactsOpts = {},
+): Promise<ExtractFactsResult> {
+  const sourceId = opts.sourceId ?? 'default';
+  // Managed brains reconcile the same way, but each page's writes publish as
+  // a receipted database-only maintenance request. The authority is
+  // preflighted on the first page that needs a write, so a run with nothing
+  // to change never needs one; an unacceptable caller still refuses first.
+  const managed = await maintenanceCallerPreflight(engine, sourceId);
+  let authority: Promise<MaintenanceAuthority | null> | undefined;
+  const managedAuthority = () => managed ? authority ??= maintenancePreflight(engine, sourceId) : Promise.resolve(null);
+  const result = emptyExtractFactsResult();
+  if (await (await import('../guests/derived.ts')).skipsGuestSource(engine, 'extract_facts', sourceId)) return result;
 
   // ── Fence unfenced rows (#5299) ─────────────────────────────────
   // The inline writer's DB-only fallback keeps producing `row_num IS NULL`
@@ -830,6 +858,7 @@ export async function runExtractFacts(
   // fenced pages join this run's reconcile below.
   let fencedSlugs: string[] = [];
   let unboundRefused = new Set<string>();
+  let fenceStepFailed = false;
   if (!opts.dryRun) {
     try {
       const fence = await fenceUnfencedFacts(engine, await planUnfencedFacts(engine, { sourceId }), { pageLockRoot: opts.pageLockRoot });
@@ -837,8 +866,21 @@ export async function runExtractFacts(
       fencedSlugs = fence.fenced_slugs;
       unboundRefused = new Set(fence.unbound_refused.map(page => page.slug));
       for (const page of [...fence.failed_pages, ...fence.missing_files]) result.warnings.push(`FACTS_FENCE_FAILED: ${page}`);
+      result.pagesFailed += fence.write_errors;
     } catch (e) {
+      fenceStepFailed = !isFenceHold(e);
       result.warnings.push(`FACTS_FENCE_FAILED: ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}`);
+    }
+    // GST-2492: facts a strict source holds move into their entity page once it exists, and a fact held on
+    // memory/unattributed whose entity a folder rule now covers moves to that folder's holding page. A move still pending is reported, not counted.
+    try {
+      const held = await moveHeldFacts(engine, sourceId);
+      if (held.moved + held.rehomed) result.heldFactsMoved = held.moved + held.rehomed;
+      result.pagesFailed += held.write_errors;
+      result.warnings.push(...held.unmovable.map(row => `HELD_FACT_UNMOVABLE: ${row.slug} facts ${row.fact_ids.join(',')} (${row.reason})`), ...heldMoveIncomplete(held).map(w => `${w.code}: ${w.text}`));
+    } catch (e) {
+      fenceStepFailed ||= !isFenceHold(e);
+      result.warnings.push(`HELD_FACT_UNMOVABLE: ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}`);
     }
   }
 
@@ -847,10 +889,10 @@ export async function runExtractFacts(
   // the destructive reconciliation pass; the other pages reconcile.
   // #6610: rows the unbound-source policy keeps unfenced on database-only pages stay held out of reconciliation
   // but never gate the run; doctor fence_integrity names the opt-in that fences them.
-  // #6946: so do the database-only rows of a clone gbrain owns, which is never fenced.
+  // #6946, #7098: so do the database-only rows of a clone gbrain owns or a read-only mirror, which is never fenced.
   const pending = await pendingLegacyRows(engine, sourceId);
   const legacySlugs = new Set(pending.keys());
-  const gating = await urlCloneReadOnly(engine, sourceId) ? [] : [...pending].filter(([slug]) => !unboundRefused.has(slug));
+  const gating = await readOnlyCheckout(engine, sourceId) ? [] : [...pending].filter(([slug]) => !unboundRefused.has(slug));
   const legacyCount = gating.reduce((sum, [, n]) => sum + n, 0);
   result.legacyRowsPending = legacyCount;
   result.legacyPages = gating.map(([slug]) => slug).sort();
@@ -1009,7 +1051,7 @@ export async function runExtractFacts(
     // consolidate's cosine clustering and find_trajectory's drift_score see
     // them. Rows updated in place keep their vectors: the claim text is
     // unchanged. Falls open without an embedding provider, with a warning.
-    if (toInsert.length > 0) {
+    if (toInsert.length > 0 && !opts.deferEmbedding) {
       if (isAvailable('embedding')) {
         try {
           const texts = toInsert.map(e => e.fact);
@@ -1046,7 +1088,7 @@ export async function runExtractFacts(
       return 'stop';
     }
 
-    const writes = reconcileWrites(plan);
+    const writes = reconcileWrites(plan, opts.deferEmbedding === true);
     const { detach, expireInPlace, deferInserts } = writes;
     if (deferInserts) {
       result.warnings.push(`${slug}: destructive fact reconciliation deferred; existing vectors preserved until embedding succeeds`);
@@ -1055,7 +1097,7 @@ export async function runExtractFacts(
     type Written = { inserted: number; updated: number; warnings: string[]; deleted?: number; deferred?: boolean; write_gate?: GateTally };
     const apply = async (): Promise<Written | null> => {
       const authority = await managedAuthority();
-      if (authority) return publishFenceReconcile(engine, authority, page, slug, toInsert);
+      if (authority) return publishFenceReconcile(engine, authority, page, slug, toInsert, opts.deferEmbedding === true);
       try {
         return await withUnmanagedBeliefs(engine, sourceId, [slug], 'extract_facts', run => maintenanceTransaction(engine, tx => run(tx, async () => {
           opts.signal?.throwIfAborted();
@@ -1090,6 +1132,9 @@ export async function runExtractFacts(
   };
 
   for (const slug of slugs) {
+    // GBRA-438: PGLite resolves queries on a microtask chain, so a macrotask yield every FACTS_WALK_YIELD_EVERY pages lets a
+    // timer, a budget or a request (stdin) trip the abort mid-walk instead of after it.
+    if (result.pagesScanned > 0 && result.pagesScanned % FACTS_WALK_YIELD_EVERY === 0) await new Promise(r => setTimeout(r, 0));
     // #1972: bail at the top of the per-page loop on abort. Each page is an
     // independent delete-then-insert commit, so breaking leaves a consistent
     // partial state; the receipt/rollup below still runs with partial counts.
@@ -1149,7 +1194,7 @@ export async function runExtractFacts(
       kind: 'facts.fence',
       source_id: sourceId,
       cost_delta: 0,
-      ...classifyRunStop({ error: result.pagesFailed > 0 ? 'item_error' : false }),
+      ...classifyRunStop({ error: fenceStepFailed || result.pagesFailed > 0 ? 'item_error' : false }),
     });
   }
 

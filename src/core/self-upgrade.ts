@@ -421,6 +421,8 @@ export interface CacheWriteOptions {
 }
 
 const STABLE_CODES = new Set(['stable_missing', 'stable_invalid', 'stable_unreadable']);
+/** How far ahead of this clock a stored check time may be (NTP skew); further ahead means the clock moved back since the write, so it is ignored (#8795). The file's mtime is not checked: a network home's file server sets it by its own clock. */
+const CACHE_FUTURE_SKEW_MS = 5 * 60 * 1000;
 
 let _tmpCounter = 0;
 function atomicWrite(path: string, content: string): void {
@@ -476,13 +478,15 @@ export function readUpdateCache(channel: ReleaseChannel | null = currentReleaseC
 
 /**
  * Atomically write one channel's cache (0600). A refresh that started before the stored answer's refresh never
- * overwrites it (reversed completion). Best-effort: throws only on truly unexpected fs errors.
+ * overwrites it (reversed completion), unless the stored check time is more than CACHE_FUTURE_SKEW_MS ahead of this clock.
+ * Best-effort: throws only on truly unexpected fs errors.
  */
 export function writeUpdateCache(marker: UpdateMarker | null, opts: CacheWriteOptions = {}): void {
   const channel = opts.channel ?? currentReleaseChannel() ?? DEFAULT_RELEASE_CHANNEL;
-  const checkedAt = opts.checkedAt ?? Date.now();
+  const now = Date.now();
+  const checkedAt = opts.checkedAt ?? now;
   const prior = readUpdateCache(channel);
-  if (prior && prior.checkedAt > checkedAt) return;
+  if (prior && prior.checkedAt > checkedAt && prior.checkedAt <= now + CACHE_FUTURE_SKEW_MS) return;
   atomicWrite(updateCachePath(channel), JSON.stringify({
     schema: 2,
     channel,
@@ -504,7 +508,7 @@ export function clearUpdateCache(): void {
 
 export function isCacheFresh(entry: CacheEntry, now: number): boolean {
   const ttl = entry.marker?.kind === 'upgrade_available' && !entry.error ? CACHE_TTL_UPGRADE_AVAILABLE_MS : CACHE_TTL_UP_TO_DATE_MS;
-  return now - entry.mtimeMs < ttl;
+  return entry.checkedAt <= now + CACHE_FUTURE_SKEW_MS && now - entry.mtimeMs < ttl;
 }
 
 /**
@@ -693,6 +697,8 @@ export interface SelfUpgradeState {
   attempting_version?: string;
   last_check_ts?: number;
   last_applied_version?: string;
+  /** #8776: `external` declares that a launcher outside gbrain's service starts autopilot again when it exits, so upgrades hand it over instead of refusing. */
+  autopilot_launcher?: 'external';
 }
 
 export type BreadcrumbTransition = 'applied' | 'failed' | null;
@@ -704,7 +710,7 @@ export type BreadcrumbTransition = 'applied' | 'failed' | null;
  *   - No breadcrumb → nothing to do.
  *   - currentVersion >= breadcrumb → the swap+relaunch worked. The swap
  *     installs whatever is current at swap time (`git pull`, `bun update`,
- *     `releases/latest`), so a release published after the update check lands
+ *     the release `latest-stable` names), so a release published after the update check lands
  *     a NEWER version than the breadcrumb names (#5813). Clear it, record
  *     `last_applied_version`, and drop `failed_versions` entries at or below
  *     the running version: `decideSelfUpgrade` only acts on a strictly newer
@@ -813,6 +819,7 @@ export const SELF_UPGRADE_CONFIG_LEAVES = [
   'attempting_version',
   'last_check_ts',
   'last_applied_version',
+  'autopilot_launcher',
 ] as const satisfies readonly (keyof SelfUpgradeState)[];
 
 export type SelfUpgradeConfigLeaf = (typeof SELF_UPGRADE_CONFIG_LEAVES)[number];
@@ -917,6 +924,8 @@ export function parseSelfUpgradeConfigValue(leaf: SelfUpgradeConfigLeaf, raw: st
       if (['false', '0', 'no', 'off'].includes(raw.trim().toLowerCase())) return { ok: true, value: false };
       return { ok: false, error: `must be true or false (got '${raw}')` };
     }
+    case 'autopilot_launcher':
+      return raw.trim() === 'external' ? { ok: true, value: 'external' } : { ok: false, error: `must be external (got '${raw}'); unset it to refuse upgrades while autopilot runs outside gbrain's service` };
     case 'quiet_hours':
       return parseQuietHours(raw);
     case 'failed_versions':

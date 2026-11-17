@@ -16,12 +16,13 @@ import { OperationError, opError } from './contract.ts';
 import type { AuthInfo, Operation, OperationContext } from './contract.ts';
 import type { Action } from '../agent-output.ts';
 import { hostFix, invalidParam, paramUse, readFix } from './op-fix.ts';
-import { CJK_SLUG_CHARS, SLUG_WORD_CHARS } from '../cjk.ts';
+import { CJK_SLUG_CHARS } from '../cjk.ts';
+import { isOpPageSlug, OP_PAGE_SLUG_RE } from '../page-slug-grammar.ts';
 import { validateSlug } from '../utils.ts';
 import { ALL_SOURCES, NO_SOURCES, isValidSourceId } from '../source-id.ts';
 import { encodeDeepResearchId } from '../deep-research-id.ts';
 import { isSearchMode } from '../search/mode.ts';
-import { stampEvidence } from '../search/evidence.ts';
+import { stampEvidence, type EvidenceOpts } from '../search/evidence.ts';
 import { captureEvalCandidate, isEvalCaptureEnabled, isEvalScrubEnabled } from '../eval-capture.ts';
 import type { SearchResult, HybridSearchMeta, PageReadScope, PageReadPolicy } from '../types.ts';
 import { resolveExcludePrivatePages, isPrivatePage } from '../search/private-visibility.ts';
@@ -187,29 +188,6 @@ export function validateUploadPath(filePath: string, root: string, strict = true
   return real;
 }
 
-/**
- * Op-boundary page-slug segment (#4665/#5032): cjk.ts's PAGE_SLUG_SEG shape
- * widened LOCALLY so `.` and `_` are allowed as part-CONTINUATION characters.
- * Colon separates individually valid parts inside a path segment, preserving
- * existing integration slugs such as `calendar:event-id` without admitting
- * empty or dot-led parts (`calendar:../x` remains invalid). The
- * sync slugifier deliberately preserves both (`notes/v1.0.0`,
- * `people/my_file_name` — see slugifySegment in src/core/sync.ts), so the
- * put_page boundary must round-trip every slug sync can produce. The lead
- * char stays a word char, so dot-LED segments remain impossible — `..`
- * traversal and every H5 rejection (backslash, %2e/%2f encodings, control
- * chars, RTL overrides, spaces) still fail. Deliberately NOT widened in
- * cjk.ts: cite-render, SlugRegistry's SLUG_RE, and the dream-cycle
- * SUMMARY_SLUG_RE consume the shared grammar with different semantics.
- * Compose with the `u` flag — see SLUG_WORD_CHARS.
- */
-// Underscore may also LEAD a segment: the sync slugifier preserves leading
-// underscores (`_index.md` → `_index`, the Hugo convention), so rejecting
-// them recreates the un-updatable-synced-page class this widen closes.
-// Dot stays continuation-only — `..` traversal remains impossible.
-const OP_PAGE_SLUG_PART = `[${SLUG_WORD_CHARS}_][${SLUG_WORD_CHARS}._\\-]*`;
-const OP_PAGE_SLUG_SEG = `${OP_PAGE_SLUG_PART}(?::${OP_PAGE_SLUG_PART})*`;
-const OP_PAGE_SLUG_RE = new RegExp(`^${OP_PAGE_SLUG_SEG}(\\/${OP_PAGE_SLUG_SEG})*$`, 'iu');
 
 /**
  * Allowlist validator for page slugs. Rejects URL-encoded traversal, backslashes,
@@ -233,10 +211,7 @@ export function validatePageSlug(slug: string): void {
   }
 }
 
-/** True when `slug` passes validatePageSlug's op-boundary grammar. */
-export function isOpPageSlug(slug: string): boolean {
-  return typeof slug === 'string' && slug.length > 0 && slug.length <= 255 && OP_PAGE_SLUG_RE.test(slug);
-}
+export { isOpPageSlug };
 
 /**
  * #6212: a slug an older gbrain stored that today's grammar refuses (a space,
@@ -554,6 +529,24 @@ export function noSourceGrantError(operation?: string, auth?: Pick<AuthInfo, 'cl
     { docs: 'docs/mcp/ADMIN.md#legacy-token-grants', fix });
   err.detail = 'fence=no_source_grant';
   return err;
+}
+
+/**
+ * #8982 item 3: POST /ingest refuses a member-bound credential whose write source every credential without a source grant
+ * reads (GST-2051); the fix asks the operator to give it a write source of its own that is not federated.
+ */
+export function sharedWriteSourceMemberError(operation: string, auth: Pick<AuthInfo, 'clientId' | 'principal'>, sourceId: string): OperationError {
+  const fix = grantFix(auth, { token: ['--sources', '<sources>'], client: ['--source', '<source>'] },
+    'Gives this connection a write source of its own that is not federated; only the brain host operator can change grants.');
+  const input = fix.argv?.includes('<sources>')
+    ? { name: 'sources', how: 'Ask the user for a source that is not federated, written first, then default (e.g. <private-source>,default; `gbrain sources list` on the brain host shows them).' }
+    : fix.argv?.includes('<source>') ? { name: 'source', how: 'Ask the user for a source that is not federated (`gbrain sources list` on the brain host shows them).' } : null;
+  return opError('permission_denied',
+    `${operation} is unavailable to a credential bound to a member whose write source is ${sourceId}, which every credential without a source grant reads: its pages would land where other members ` +
+      'and unbound credentials read. Write through the MCP put_page op, which keeps a new page to its member, ' +
+      'or ask the brain operator to grant this credential its own write source that is not federated (gbrain auth rescope --sources <private-source>,default).',
+    "Write through the MCP put_page op, or ask the brain host's operator to give this credential a write source that is not federated (command in fix).",
+    { docs: 'docs/guides/multi-source-brains.md#lay-out-sources-by-who-may-read-them', fix: input ? { ...fix, inputs: [input] } : fix });
 }
 
 /**
@@ -1236,8 +1229,8 @@ export function resolvePerCallMode(ctx: OperationContext, raw: unknown, opName =
 }
 
 /** T4 — stamp evidence/create_safety on a result set, fail-soft. */
-export function stampEvidenceSafe(results: SearchResult[]): void {
-  try { stampEvidence(results); } catch { /* non-fatal */ }
+export function stampEvidenceSafe(results: SearchResult[], opts?: EvidenceOpts): void {
+  try { stampEvidence(results, opts); } catch { /* non-fatal */ }
 }
 
 export function stampDeepResearchIds(results: SearchResult[]): void {

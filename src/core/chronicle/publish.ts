@@ -39,11 +39,13 @@ import { serializeMarkdown } from '../markdown.ts';
 import { digest } from '../persistence/digest.ts';
 import { maintenancePreflight, submitDatabaseMaintenanceIntent, type MaintenanceAuthority } from '../persistence/prepared-maintenance.ts';
 import { preparePageMutation } from '../persistence/page-prepare.ts';
+import { stampDerivedRetirement } from '../persistence/derived-retirement-hold.ts';
 import type { Visibility } from '../search/private-visibility.ts';
 import type { ChronicleEventProposal } from './extract-events.ts';
 import { resolveChronicleEventSlugs } from './event-identity.ts';
 import { declareDerivation, deriveTrust } from '../trust/taint.ts';
 import { derivationWriteTrust } from '../trust/page-write.ts';
+import { CHRONICLE_CAPTURED_VIA } from '../trust/channel.ts';
 import { derivedGateConfig, derivedGateInput, timelineRowAllowed } from '../trust/derived-gate.ts';
 import { assessTimelineForGate, type WriteGateAssessment } from '../write-gate.ts';
 import { recordWriteGateReceipt } from '../write-gate-store.ts';
@@ -54,10 +56,9 @@ import { planManagedGeneration, recordActivation, type ActivationIntent } from '
 import { CHRONICLE_EVENT_KIND, CHRONICLE_RETIRED_BY, chronicleEventAdapter, chronicleEventItem, chronicleOwnerKey, depthInputPin, depthPinBroken,
   orphanedDepthKeys, ownedEventHashes, pinDepth, verifiedChronicleRetirement, type ChronicleDepthPin, type ChronicleGenerationContext } from '../generations/adapters/chronicle-events.ts';
 
-export { CHRONICLE_RETIRED_BY, depthPinBroken, ownedEventHashes, pinDepth, type ChronicleDepthPin };
+export { CHRONICLE_CAPTURED_VIA, CHRONICLE_RETIRED_BY, depthPinBroken, ownedEventHashes, pinDepth, type ChronicleDepthPin };
 export const CHRONICLE_EVENT_INTENT = 'managed_maintenance_chronicle_event';
 export const CHRONICLE_RETIRE_INTENT = 'managed_maintenance_chronicle_retire';
-export const CHRONICLE_CAPTURED_VIA = 'life-chronicle:auto';
 
 export interface BuiltChronicleEvent {
   slug: string;
@@ -295,8 +296,7 @@ export async function prepareChronicleMutation(engine: BrainEngine, row: WriteRe
 
 /** A retirement journaled by an earlier release (`managed_maintenance_chronicle_retire`): the stamp, and its projection row goes with it (C-3). */
 async function stampRetired(tx: BrainEngine, sourceId: string, slug: string): Promise<void> {
-  await tx.executeRaw(`UPDATE pages SET frontmatter=frontmatter||jsonb_build_object('retired_by',$1::text,'retired_at',$2::text)
-    WHERE source_id=$3 AND slug=$4 AND deleted_at IS NOT NULL`, [CHRONICLE_RETIRED_BY, new Date().toISOString(), sourceId, slug]);
+  await stampDerivedRetirement(tx, sourceId, [slug], CHRONICLE_RETIRED_BY);
   await tx.executeRaw('DELETE FROM timeline_entries t USING pages p WHERE p.id=t.event_page_id AND p.source_id=$1 AND p.slug=$2', [sourceId, slug]);
 }
 

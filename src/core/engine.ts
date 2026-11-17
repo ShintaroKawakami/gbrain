@@ -373,6 +373,9 @@ export interface TakeHit {
   kind: TakeKind;
   holder: string;
   weight: number;
+  since_date: string | null;
+  until_date: string | null;
+  source: string | null;
   score: number;            // search rank score (ts_rank for keyword, 1-cos_dist for vector)
 }
 
@@ -841,6 +844,8 @@ export interface BrainEngine {
    */
   reconnect(ctx?: { error?: unknown }): Promise<void>;
   initSchema(): Promise<void>;
+  /** GBRA-467: run `fn` under the cross-process schema migration lock; callers use schema-migration-lock.ts. */
+  holdSchemaMigrationLock?<T>(fn: (assertHeld: () => Promise<void>) => Promise<T>): Promise<T>;
   transaction<T>(fn: (engine: BrainEngine) => Promise<T>, opts?: TransactionOptions): Promise<T>;
   /** Short control transaction on the existing direct route; honors nested transaction scope. */
   transactionDirect<T>(fn: (engine: BrainEngine) => Promise<T>, opts?: TransactionOptions): Promise<T>;
@@ -940,6 +945,9 @@ export interface BrainEngine {
    * the sync loop falls back to per-slug `deletePage` to log unrecoverable
    * failures to `failedFiles`). `gbrain sync` calls this on EVERY run that
    * sees a deleted file — it is NOT admin-only.
+   *
+   * Unlike `deletePages` it scrubs nothing else: the page purge, its main
+   * caller, scrubs those stores itself and records them in its receipt.
    */
   deletePage(slug: string, opts?: { sourceId?: string }): Promise<void>;
   /**
@@ -960,7 +968,13 @@ export interface BrainEngine {
    * phases don't waste lookups on phantom slugs (paths that were in the
    * deletion list but had no DB row).
    *
-   * ATOMICITY: one statement, one transaction. The whole batch commits or
+   * #9068: in the same transaction, after the delete, it scrubs the rows
+   * that name a deleted page outside any foreign key: retrieval_event_pages,
+   * retrieval_event_links, retrieval_feedback, retrieval_weights,
+   * context_volunteer_events, mention_gazetteer_entries and the slug in
+   * eval_candidates.retrieved_slugs (scrubPurgedSlugs, scrubPurgedNameStores).
+   *
+   * ATOMICITY: one transaction. The whole batch commits or
    * the whole batch rolls back. Coarser than the per-row `deletePage`
    * cadence — a mid-loop abort or transient connection failure can roll
    * back up to `DELETE_BATCH_SIZE - 1` successful deletes from the
@@ -1049,7 +1063,7 @@ export interface BrainEngine {
    * cutoff arithmetic, same DB `now()` clock source) instead of the DELETE,
    * so the preview and a subsequent real run agree up to whatever crosses
    * the cutoff (or is soft-deleted/restored) between the two statements.
-   * Dry-run responses additionally carry `pages` (slug + deleted_at) for
+   * Dry-run responses additionally carry `pages` (slug, source_id, deleted_at) for
    * display; the destructive path leaves `pages` undefined.
    * `opts.excludeIds` keeps those page ids out of both (GBRA-130 A-49: the
    * tombstones the unmanaged belief-ledger expiry failed or parked).
@@ -1057,7 +1071,7 @@ export interface BrainEngine {
   purgeDeletedPages(
     olderThanHours: number,
     opts?: { dryRun?: boolean; excludeIds?: number[] },
-  ): Promise<{ slugs: string[]; count: number; pages?: { slug: string; deleted_at: Date }[] }>;
+  ): Promise<{ slugs: string[]; count: number; pages?: { slug: string; source_id: string; deleted_at: Date }[] }>;
   /**
    * v0.26.5: by default `listPages` excludes soft-deleted rows. Set
    * `filters.includeDeleted: true` to surface them.
@@ -1421,7 +1435,7 @@ export interface BrainEngine {
    * `attendance` (#5761) excludes or selects pages whose attendance marker
    * equals their current knowledge revision.
    */
-  countStalePagesForExtraction(opts?: { sourceId?: string; versionTs?: string; attendance?: 'exclude' | 'blocked'; held?: 'exclude' | 'only' }): Promise<number>;
+  countStalePagesForExtraction(opts?: { sourceId?: string; versionTs?: string; attendance?: 'exclude' | 'blocked'; held?: 'exclude' | 'only'; wantedProducers?: readonly string[] }): Promise<number>;
   /**
    * List a keyset page (ordered by `id`, `id > afterPageId`) of stale pages
    * WITH their content so the caller extracts without an N+1 `getPage`. Same
@@ -1435,6 +1449,7 @@ export interface BrainEngine {
     sourceId?: string;
     versionTs?: string;
     held?: 'exclude';
+    wantedProducers?: readonly string[];
   }): Promise<StalePageRow[]>;
   /**
    * Stamp `links_extracted_at` for a batch of pages keyed on the unique
@@ -2295,10 +2310,10 @@ export interface BrainEngine {
 
   /**
    * Mark a fact expired. Never DELETE. Returns true iff a row was updated.
-   * Idempotent-as-false (already expired returns false without changing state).
+   * Idempotent-as-false (already expired returns false without changing state). `successorFrom`: end by facts/supersede-interval.ts's rule.
    * @deprecated GBRA-161 PR 2: retire through publishFenceGeneration / publishExtractedFacts (docs/architecture/generations.md).
    */
-  expireFact(id: number, opts?: { supersededBy?: number; at?: Date }): Promise<boolean>;
+  expireFact(id: number, opts?: { supersededBy?: number; at?: Date; successorFrom?: Date }): Promise<boolean>;
 
   /** List active facts about an entity within a source, newest first. */
   listFactsByEntity(

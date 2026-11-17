@@ -298,7 +298,28 @@ import { v294 } from './v294-refresh-barrier-import-deferral.ts';
 import { v295 } from './v295-refresh-retry-hint-history-index.ts';
 import { v296 } from './v296-ingest-applied-captures.ts';
 import { v297 } from './v297-chronicle-judge-window.ts';
-import { v298 } from './v298-take-proposal-evidence.ts';
+import { v298 } from './v298-attest-read.ts';
+import { v299 } from './v299-access-member-sources.ts';
+import { v300 } from './v300-memory-proposals.ts';
+import { v301 } from './v301-member-email.ts';
+import { v302 } from './v302-link-transitions-source.ts';
+import { v303 } from './v303-access-page-rules.ts';
+import { v304 } from './v304-access-owner-origin.ts';
+import { v305 } from './v305-access-lineage-designs.ts';
+import { v306 } from './v306-member-page-withdrawal-scope.ts';
+import { v307 } from './v307-page-label-guards.ts';
+import { v308 } from './v308-access-labelled-only.ts';
+import { v309 } from './v309-requester-scope.ts';
+import { v310 } from './v310-mcp-request-log-rollup.ts';
+import { v311 } from './v311-concept-inputs-private.ts';
+import { v312 } from './v312-guest-notes.ts';
+import { v313 } from './v313-wake-events.ts';
+import { v314 } from './v314-guest-notes-fail-closed.ts';
+import { v315 } from './v315-facts-context-head-index.ts';
+import { v316 } from './v316-pages-source-type-index.ts';
+import { v317 } from './v317-pages-projection-waiting-index.ts';
+import { v318 } from './v318-guard-ledgers-fail-closed.ts';
+import { v319 } from './v319-take-proposal-evidence.ts';
 
 // Array order is historical (see HISTORICAL_ARRAY_ORDER in the generator); the
 // runner sorts by version before applying.
@@ -596,4 +617,25 @@ export const MIGRATIONS: Migration[] = [
   v296,
   v297,
   v298,
+  v299,
+  v300,
+  v301,
+  v302,
+  v303,
+  v304,
+  v305,
+  v306,
+  v307,
+  v308,
+  v309,
+  v310,
+  v311,
+  v312,
+  v313,
+  v314,
+  v315,
+  v316,
+  v317,
+  v318,
+  v319,
 ];

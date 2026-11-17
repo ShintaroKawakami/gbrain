@@ -13,7 +13,7 @@ import { quarantineFilterFragment } from '../../../core/quarantine.ts';
 import { entityTypePredicateSql, resolveEntityTypes } from '../../../core/schema-pack/entity-types.ts';
 import { MIN_ENTITY_PAGES_FOR_COVERAGE } from '../../../core/types.ts';
 import type { Check } from '../../doctor.ts';
-import { connectedEngine, type DoctorContext, type DoctorEntry, doctorHealth } from '../context.ts';
+import { connectedEngine, type DoctorContext, type DoctorEntry, doctorHealth, doctorSourceIds } from '../context.ts';
 import { agentFix, brainScorePlanFix, checkError } from '../check-fix.ts';
 import { ORPHAN_FULL_SCAN_KEY, countLivePages, estimateOrphanRatio, orphanFullScanMaxPages, type OrphanEstimate } from './orphan-estimate.ts';
 
@@ -320,7 +320,7 @@ async function runTimelineHistory(ctx: DoctorContext): Promise<Check[]> {
     }
     // Wave checks registered in doctor/wave-checks.ts rather than inline here.
     const { runWaveChecks } = await import('../wave-checks.ts');
-    for (const finding of await runWaveChecks(engine, { only: 'wave', ids: only ?? undefined, sourceIds: orphanRatioSourceId ? [orphanRatioSourceId] : undefined })) checks.push(finding.check);
+    for (const finding of await runWaveChecks(engine, { only: 'wave', ids: only ?? undefined, sourceIds: doctorSourceIds(ctx) })) checks.push(finding.check);
   }
   return checks;
 }
@@ -362,6 +362,7 @@ export const timelineHistoryEntry: DoctorEntry = {
   name: 'timeline_history',
   emits: [
     'timeline_history',
+    'privacy_label_ignored',
     'safe_index_pending',
     'credential_projection_pending',
     'connector_checkpoints',
@@ -378,6 +379,8 @@ export const timelineHistoryEntry: DoctorEntry = {
     'foreign_ownership_marker',
     'coordination_lock_location',
     'unbound_source',
+    'dream_write_deferred',
+    'embedding_restamp_stalled',
     'writer_version',
     'segmented_storage',
     'self_capture',
@@ -394,6 +397,7 @@ export const timelineHistoryEntry: DoctorEntry = {
     'generation_pending',
     'extractor_facts_expired',
     'unwithdrawn_facts',
+    'purged_page_facts',
     'conversation_label_facts',
     'conversation_outcomes_stale',
     'captured_facts_active',

@@ -697,6 +697,21 @@ vars — incident-time escape hatches, not everyday knobs.
    file the upstream changed refuses `refresh_dirty` before anything is pushed,
    an upstream rewritten by a force-push (or one gbrain has no earlier record
    of) still refuses `refresh_diverged`, and `--dry-run` never publishes.
+   The Git effects of page writes push the same local commits with the same
+   scan: a script's commit holding a secret holds them with `publish_secret_found`
+   and nothing is pushed until the user removes it or allowlists a false positive.
+
+   `gbrain sources git-reconcile` does this for every source checkout, and
+   autopilot runs it each tick (`autopilot.git_pull false` skips it). A
+   checkout gbrain cloned also publishes its local commits;
+   `sources.refresh_publish_diverged false` keeps them local. A level
+   checkout costs one fetch, so call it as often as you like. To leave one
+   source out of publishing and keep its sync, run
+   `gbrain config set sources.auto_reconcile.source.<id> false`. Neither
+   git-reconcile nor refresh then pushes that checkout's local commits (a
+   Git repository several sources share stays unpublished while any of
+   them is off, even one whose sync is off), but it still fast-forwards and syncs. `gbrain sources status` and
+   `gbrain sources git-reconcile --dry-run` show which sources are off.
 
    **Say to your agent:** *"Bring my notes source up to date with its remote."*
 
@@ -764,7 +779,12 @@ Any other brain gets names with a suffix: `com.gbrain.autopilot.<suffix>`,
 and a crontab line ending in `# gbrain-autopilot:<suffix>`. The suffix is the
 first 8 hex characters of a random id that `--install` records in
 `<brain>/.gbrain/autopilot-install-id`. Every brain logs to its own
-`<brain>/.gbrain/autopilot.log`.
+`<brain>/.gbrain/autopilot.log`. On macOS, when the brain is on a volume other
+than your home folder (an external `GBRAIN_HOME`), launchd can't start a job
+whose program or log files are on that volume (it exits 78, `EX_CONFIG`). For
+such a brain the job starts the wrapper through `/bin/bash` and logs to
+`~/Library/Logs/gbrain/<label>.log` and `.err`. Re-run `--install` to move
+an existing job onto this layout.
 
 `gbrain autopilot --status [--json]` prints the brain's job name, suffix,
 install-id path, wrapper path and log path (`job` in `--json`). `--status`

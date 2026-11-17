@@ -5,12 +5,15 @@
  * so an EXISTS over it chose a sequential scan of pages that expected to stop
  * at the first row; on a sealed brain it read every page (~600 ms at 600k
  * pages). Pins the plan on real Postgres with analyzed, fully sealed filler
- * pages: the probe walks the partial idx_pages_projection_pending and no
- * sequential scan of pages runs.
+ * pages: the probe walks a partial index and no sequential scan of pages runs.
+ * Since #9192 that index is idx_pages_projection_waiting (v317), which also
+ * leaves out pages still served from their pre-upgrade index.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { BrainEngine } from '../../src/core/engine.ts';
+import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import { probeProjectionReadiness, type ProjectionReadinessScope } from '../../src/core/search/projection-readiness.ts';
+import { ACTIVATION_SERVED_REVISION } from '../../src/core/search/safe-chunks.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { withEnv } from '../helpers/with-env.ts';
 import { hasDatabase } from './helpers.ts';
@@ -20,9 +23,10 @@ const describePostgres = hasDatabase() ? describe : describe.skip;
 describePostgres('projection readiness probe plan on Postgres (GBRA-156)', () => {
   let engine: BrainEngine;
   let close: () => Promise<void>;
+  let databaseUrl: string;
 
   beforeAll(async () => {
-    ({ engine, close } = await isolatedPersistencePostgres(process.env.DATABASE_URL!));
+    ({ engine, close, databaseUrl } = await isolatedPersistencePostgres(process.env.DATABASE_URL!));
     await engine.executeRaw("INSERT INTO sources(id,name) VALUES ('source-a','source-a'),('source-b','source-b') ON CONFLICT DO NOTHING");
     await engine.executeRaw(`INSERT INTO pages(source_id,slug,title,type,page_kind,compiled_truth,chunker_version,frontmatter)
       SELECT CASE WHEN i % 2 = 0 THEN 'source-a' ELSE 'source-b' END, 'filler-' || i, 'Filler ' || i, 'concept',
@@ -60,7 +64,7 @@ describePostgres('projection readiness probe plan on Postgres (GBRA-156)', () =>
       const { result, probe } = await probeStatement(scope);
       expect(result).toEqual({ status: 'ready', ready: true });
       const text = await plan(probe.sql, probe.params);
-      expect(text).toMatch(/Index Scan using idx_pages_projection_pending on pages p\b/);
+      expect(text).toMatch(/Index Scan using idx_pages_projection_waiting on pages p\b/);
       // The private-visibility clause carries lazily evaluated subplans over pages; none may run.
       expect(text.split('\n').filter(line => line.includes('Seq Scan on pages') && !line.includes('never executed'))).toEqual([]);
     });
@@ -74,6 +78,49 @@ describePostgres('projection readiness probe plan on Postgres (GBRA-156)', () =>
       expect((await probeStatement({})).result.status).toBe('projection_pending');
     } finally {
       await engine.executeRaw("UPDATE pages SET text_projection_revision=knowledge_revision WHERE slug='filler-7'");
+    }
+  });
+
+  // #8033: a remote caller's private-visibility subplans lift the estimate past jit_above_cost, and compiling them
+  // cost nearly all of the probe's time. The session below compiles every statement that keeps JIT on.
+  test('the probe runs with JIT off for a remote scope (#8033)', async () => {
+    const reader = new PostgresEngine();
+    await reader.connect({ database_url: databaseUrl, poolSize: 1 });
+    try {
+      await reader.executeRaw('SET jit = on');
+      await reader.executeRaw('SET jit_above_cost = 0');
+      const explain = async (sql: string, params?: unknown[], opts?: Parameters<BrainEngine['executeRaw']>[2]) =>
+        JSON.stringify((await reader.executeRaw<Record<string, unknown>>(`EXPLAIN (ANALYZE, FORMAT JSON) ${sql}`, params, opts))[0]);
+      const plans: Array<{ asRun: string; jitOn: string }> = [];
+      const recording = { executeRaw: async (sql: string, params?: unknown[], opts?: Parameters<BrainEngine['executeRaw']>[2]) => {
+        if (sql.includes('IS DISTINCT FROM')) plans.push({ asRun: await explain(sql, params, opts), jitOn: await explain(sql, params) });
+        return reader.executeRaw(sql, params, opts);
+      } } as unknown as BrainEngine;
+      const result = await withEnv({ GBRAIN_PROJECTION_READINESS_CACHE: '0' }, () =>
+        probeProjectionReadiness(recording, { sourceIds: ['source-a', 'source-b'], excludePrivate: true, requireSafeChunks: true }));
+      expect(result).toEqual({ status: 'ready', ready: true });
+      expect(plans).toHaveLength(1);
+      expect(plans[0].jitOn.includes('"JIT"')).toBe(true);
+      expect(plans[0].asRun.includes('"JIT"')).toBe(false);
+    } finally {
+      await reader.disconnect();
+    }
+  });
+
+  // #9192: pages v153 left serving their pre-upgrade index are unsealed but not pending. The probe reads
+  // idx_pages_projection_waiting, which leaves them out, instead of stepping over each one in idx_pages_projection_pending.
+  test('a brain of pages still served from their pre-upgrade index answers ready without walking them (#9192)', async () => {
+    await engine.executeRaw(`UPDATE pages SET text_projection_revision='${ACTIVATION_SERVED_REVISION}'::uuid`);
+    try {
+      await engine.executeRaw('ANALYZE pages');
+      const { result, probe } = await probeStatement({});
+      expect(result).toEqual({ status: 'ready', ready: true });
+      const text = await plan(probe.sql, probe.params);
+      expect(text).toMatch(/Index Scan using idx_pages_projection_waiting on pages p\b/);
+      expect(text).not.toContain('Rows Removed by Filter');
+    } finally {
+      await engine.executeRaw('UPDATE pages SET text_projection_revision=knowledge_revision');
+      await engine.executeRaw('ANALYZE pages');
     }
   });
 

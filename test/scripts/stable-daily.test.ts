@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { load } from 'js-yaml';
 import { promote, renderTagMessage, scheduleAuthorized, Refusal, type GitResult } from '../../scripts/promote-stable.ts';
 import { daily, integrityFailures, parseRecord, shapeFailures, type DailyDeps, type Scoreboard, type SoakRunRow } from '../../scripts/stable-daily.ts';
+import type { MatrixReceipt, MatrixRunRow } from '../../scripts/stable-matrix.ts';
 import { parseStableRecord } from '../../src/core/stable-channel.ts';
 
 const ROOT = join(import.meta.dir, '..', '..');
@@ -40,8 +41,15 @@ interface World {
   master?: number;
   releases: Record<string, number>;
   stable: { version: string; commit: number; message: string };
-  importantPrs?: Array<{ number: number; merge: number }>;
+  /** `important`: the class its changelog.d fragment's front matter names. */
+  importantPrs?: Array<{ number: number; merge: number; important?: string }>;
+  /** The token sees no pull request at all, as a GITHUB_TOKEN without pull-requests: read does. */
+  prsHidden?: boolean;
   runs?: Array<SoakRunRow & { boards?: Scoreboard[] }>;
+  /** Upgrade matrix runs, newest first; default: one green gate run on every release (MATRIX_ID + its commit). */
+  matrix?: Array<MatrixRunRow & { receipt?: MatrixReceipt | null }>;
+  /** Open issues with the upgrade-break label (the issues query's answer). */
+  breakIssues?: unknown[];
   autoPromote?: string;
   dryRun?: boolean;
   scheduled?: boolean;
@@ -102,6 +110,14 @@ function world(w: World) {
       tags[name] = { commit: commitOf(commit)!, object: `tagobj-${name}-new`, message: rest[rest.indexOf('-m') + 1] };
       return ok();
     }
+    if (cmd === 'diff-tree') {
+      const pr = (w.importantPrs ?? []).find(p => p.important && sha(p.merge) === rest.at(-3));
+      return pr ? ok(`changelog.d/fix-${pr.number}.md`) : ok();
+    }
+    if (cmd === 'show' && rest[0]!.includes(':changelog.d/')) {
+      const pr = (w.importantPrs ?? []).find(p => rest[0] === `${sha(p.merge)}:changelog.d/fix-${p.number}.md`);
+      return pr ? ok(`---\nimportant: ${pr.important}\n---\n**A fix.**\n`) : fail;
+    }
     if (cmd === 'show') return ok(rest[0]!.replace(/^refs\/tags\/v/, '').replace(/:VERSION$/, ''));
     if (cmd === 'merge-base') {
       const a = commitOf(rest[1]!); const b = commitOf(rest[2]!);
@@ -117,6 +133,7 @@ function world(w: World) {
     return fail;
   };
   const runs = w.runs ?? [];
+  const matrix = w.matrix ?? Object.values(w.releases).map(c => matrixRun(MATRIX_ID + c, c, w.releases));
   const deps: DailyDeps = {
     repo: REPO,
     actor: 'github-actions[bot]',
@@ -126,7 +143,19 @@ function world(w: World) {
     dryRun: w.dryRun ?? false,
     async ghApi(path) {
       api.push(path);
-      if (path.startsWith('search/issues')) return { items: (w.importantPrs ?? []).map(p => ({ number: p.number })) };
+      if (path.startsWith('search/issues')) {
+        if (w.prsHidden) return { total_count: 0, items: [] };
+        if (!decodeURIComponent(path).includes('label:')) return { total_count: 1, items: [{ number: 1 }] };
+        return { items: (w.importantPrs ?? []).map(p => ({ number: p.number })) };
+      }
+      if (path.includes('/issues?')) return w.breakIssues ?? [];
+      if (path.includes('/actions/workflows/upgrade-matrix.yml/runs')) {
+        const q = new URLSearchParams(path.split('?')[1] ?? '');
+        const rows = matrix.filter(r => !q.get('branch') || r.head_branch === q.get('branch'));
+        return { workflow_runs: rows.slice(0, Number(q.get('per_page') ?? 30)).map(({ receipt: _, ...run }) => run) };
+      }
+      const matrixHit = matrix.find(r => path.endsWith(`/actions/runs/${r.id}`));
+      if (matrixHit) { const { receipt: _, ...run } = matrixHit; return { ...run, path: '.github/workflows/upgrade-matrix.yml' }; }
       const pull = /\/pulls\/(\d+)$/.exec(path);
       if (pull) return { merge_commit_sha: sha(w.importantPrs!.find(p => p.number === Number(pull[1]))!.merge) };
       if (path.includes('/actions/workflows/')) return { workflow_runs: runs };
@@ -134,8 +163,9 @@ function world(w: World) {
         const run = runs.find(r => path.endsWith(`/${r.id}`))!;
         return { status: run.status, conclusion: run.conclusion, path: '.github/workflows/production-soak.yml', head_sha: run.head_sha };
       }
-      if (path.includes('/releases/tags/')) return { draft: false };
+      if (path.includes('/releases/tags/')) return { draft: false, id: 42 };
       if (path.endsWith('/permission')) return { permission: 'none' };
+      if (path.endsWith('/releases/latest')) throw new Error(`gh api ${path} failed: HTTP 404: Not Found`);
       throw new Error(`unexpected api ${path}`);
     },
     git,
@@ -143,9 +173,27 @@ function world(w: World) {
     log: line => logs.push(line),
     summary: () => {},
     async ghPost(path, body) { posts.push({ path, body }); },
+    async ghApiWrite() { return {}; },
     async scoreboards(id) { return runs.find(r => r.id === id)?.boards ?? CLEAN; },
+    async matrixReceipt(id) { const hit = matrix.find(r => r.id === id); return hit ? hit.receipt ?? null : null; },
   };
   return { deps, posts, pushes, api, logs, tags, record: () => (record.head ? objects[record.head] : undefined) };
+}
+
+const MATRIX_ID = 700;
+const HARNESS = 'f'.repeat(40);
+/** A finished gate run of the upgrade matrix on the release at `commit`; green unless cells say otherwise. */
+function matrixRun(id: number, commit: number, releases: Record<string, number>, over: Partial<MatrixRunRow> = {}, receipt: Partial<MatrixReceipt> = {}): MatrixRunRow & { receipt: MatrixReceipt } {
+  const version = Object.entries(releases).find(([, c]) => c === commit)![0];
+  const red = receipt.red ?? [];
+  return {
+    id, status: 'completed', conclusion: red.length ? 'failure' : 'success', head_sha: HARNESS, head_branch: 'master', event: 'schedule',
+    html_url: `https://github.com/${REPO}/actions/runs/${id}`, ...over,
+    receipt: {
+      schema: 'gbrain-upgrade-matrix-run/1', harness: { sha: HARNESS }, candidate: { tag: `v${version}`, sha: sha(commit), tree: tree(commit) }, profile: 'full',
+      status: red.length ? 'red' : 'green', cells: [], red, holds: [], foreign_receipts: [], from: [{ tag: 'v1.0.1', roles: ['N-1', 'stable', 'stable-window'] }], skipped: [], ...receipt,
+    },
+  };
 }
 
 const soak = (id: number, commit: number, over: Partial<SoakRunRow> & { boards?: Scoreboard[] } = {}) =>
@@ -171,13 +219,23 @@ describe('scheduleAuthorized', () => {
 
   test('a scheduled promotion skips the role read and records the schedule as the promoter; a dispatch keeps the maintainer check', async () => {
     const w = world(base({ runs: [soak(9, 2)] }));
-    const p = await promote(w.deps, { version: '1.0.2', soakRunUrl: `https://github.com/${REPO}/actions/runs/9`, scoreboardUrl: '', rollback: false, reason: '' });
+    const p = await promote(w.deps, { version: '1.0.2', soakRunUrl: `https://github.com/${REPO}/actions/runs/9`, scoreboardUrl: '', rollback: false, reason: '', matrixRunUrl: `https://github.com/${REPO}/actions/runs/${MATRIX_ID + 2}` });
     expect(w.api.some(a => a.endsWith('/permission'))).toBe(false);
     expect(p.promotedBy).toBe('schedule (.github/workflows/stable-daily.yml)');
     const d = world(base({ runs: [soak(9, 2)], scheduled: false }));
     const error = await promote(d.deps, { version: '1.0.2', soakRunUrl: `https://github.com/${REPO}/actions/runs/9`, scoreboardUrl: '', rollback: false, reason: '' }).then(() => null, e => e);
     expect(error).toBeInstanceOf(Refusal);
     expect((error as Error).message).toMatch(/has the none role/);
+  });
+});
+
+describe('a scheduled promotion names a matrix run', () => {
+  test('promote() refuses a scheduled forward promotion without one, before any tag moves', async () => {
+    const w = world(base({ runs: [soak(9, 2)] }));
+    const error = await promote(w.deps, { version: '1.0.2', soakRunUrl: `https://github.com/${REPO}/actions/runs/9`, scoreboardUrl: '', rollback: false, reason: '' }).then(() => null, e => e);
+    expect(error).toBeInstanceOf(Refusal);
+    expect((error as Error).message).toMatch(/a scheduled promotion needs a green upgrade matrix run on v1\.0\.2's exact tree/);
+    expect(w.pushes).toEqual([]);
   });
 });
 
@@ -226,6 +284,22 @@ describe('daily: when it does nothing', () => {
     const w = world(base({ runs: [soak(9, 4)] }));
     const r = await daily(w.deps);
     expect(r.action).toBe('none');
+    expect(w.pushes).toEqual([]);
+    expect(w.posts).toEqual([]);
+  });
+
+  test('a quiet fortnight with no labelled PR stays none, and the check logs how many labelled PRs the search returned', async () => {
+    const w = world(base({ runs: [soak(9, 4)] }));
+    expect((await daily(w.deps)).action).toBe('none');
+    expect(w.logs.some(l => /stable:important search returned 0 merged PRs/.test(l))).toBe(true);
+    const found = world(base({ importantPrs: [{ number: 11, merge: 1 }], runs: [soak(9, 4)] }));
+    await daily(found.deps);
+    expect(found.logs.some(l => /stable:important search returned 1 merged PR\b/.test(l))).toBe(true);
+  });
+
+  test('a token that sees no merged pull request at all stops the check and names the missing pull-requests: read permission', async () => {
+    const w = world(base({ prsHidden: true, runs: [soak(9, 4)] }));
+    await expect(daily(w.deps)).rejects.toThrow(/pull-requests: read/);
     expect(w.pushes).toEqual([]);
     expect(w.posts).toEqual([]);
   });
@@ -349,9 +423,184 @@ describe('daily: weekly floor', () => {
     expect(w.pushes).toEqual([]);
   });
 
+  test('a release that was stable and rolled back is skipped: the newest release gets the soak instead of a refused promotion every run (#8792)', async () => {
+    const handPromoted = { version: '1.0.2', commit: 2, message: stableMessage('1.0.2', '2026-11-02T05:17:00Z') };
+    const w = world(base({ stable: handPromoted, runs: [soak(9, 3)] }));
+    w.tags['stable-v1.0.3'] = { commit: 3, object: 'tagobj-record-1.0.3' };
+    expect(await daily(w.deps)).toMatchObject({ action: 'soak_dispatched', version: '1.0.4' });
+    expect(w.pushes).toEqual([]);
+    expect(w.logs.some(l => l.includes('skipping v1.0.3: stable-v1.0.3 exists'))).toBe(true);
+  });
+
+  test('a soaked release stable.json lists as not_promotable is skipped on the important path: nothing is promoted and the fix release is soaked', async () => {
+    const published = JSON.stringify({ schema: 1, version: '1.0.1', commit: sha(1), known_bad: [], not_promotable: [{ version: '1.0.3', reason: 'preview exceeds its statement bound', fixed_in: '1.0.4' }] });
+    const w = world(base({ published, importantPrs: [{ number: 20, merge: 2 }], runs: [soak(9, 3)] }));
+    const r = await daily(w.deps);
+    expect(r).toMatchObject({ action: 'soak_dispatched', version: '1.0.4' });
+    expect(w.posts).toEqual([{ path: `repos/${REPO}/actions/workflows/production-soak.yml/dispatches`, body: { ref: 'v1.0.4' } }]);
+    expect(w.pushes).toEqual([]);
+    expect(w.logs.some(l => l.includes('skipping v1.0.3: stable.json lists it as not promotable (preview exceeds its statement bound; fixed in v1.0.4)'))).toBe(true);
+  });
+
+  test('the weekly walk skips a not_promotable release too, and is never soaked', async () => {
+    const published = JSON.stringify({ schema: 1, version: '1.0.1', commit: sha(1), known_bad: [], not_promotable: [{ version: '1.0.4', reason: 'regression', fixed_in: '1.0.5' }] });
+    const w = world(base({ stable: old, published, runs: [soak(9, 3)] }));
+    const r = await daily(w.deps);
+    expect(r.action === 'promoted' && r.promotion.version).toBe('1.0.3');
+    const unsoaked = world(base({ stable: old, published }));
+    expect(await daily(unsoaked.deps)).toMatchObject({ action: 'soak_dispatched', version: '1.0.3' });
+  });
+
+  test('a release stable.json lists as known_bad is never a candidate; an older qualifying release still promotes (#8792)', async () => {
+    const published = JSON.stringify({ schema: 1, version: '1.0.1', commit: sha(1), known_bad: ['1.0.3'] });
+    const w = world(base({ stable: old, published, runs: [soak(8, 2), soak(9, 3)] }));
+    const r = await daily(w.deps);
+    expect(r.action === 'promoted' && r.promotion.version).toBe('1.0.2');
+    expect(w.logs.some(l => l.includes('skipping v1.0.3: stable.json lists it as known bad'))).toBe(true);
+  });
+
   test('never moves stable backward: only releases newer than stable are candidates', async () => {
     const w = world(base({ stable: { ...old, version: '1.0.4', commit: 4, message: stableMessage('1.0.4', '2026-11-02T05:17:00Z') }, runs: [soak(9, 3)] }));
     expect((await daily(w.deps)).action).toBe('none');
+  });
+});
+
+describe('daily: the upgrade matrix gates stable (stability plan 3a)', () => {
+  const old = { version: '1.0.1', commit: 1, message: stableMessage('1.0.1', '2026-11-02T05:17:00Z') };
+  const RELEASES = { '1.0.1': 1, '1.0.2': 2, '1.0.3': 3, '1.0.4': 4 };
+  const OLD_UPDATER = 'v0.60.241.0__postgres__keyed__repo';
+  const redFrom = (id: number, commit: number, cellIds: string[], over: Partial<MatrixRunRow> = {}) =>
+    matrixRun(id, commit, RELEASES, { event: 'workflow_dispatch', ...over }, { red: cellIds, cells: cellIds.map(c => ({ id: c, from: c.split('__')[0]!, verdict: 'fail' })) });
+  const breakIssue = (number: number, from?: string[]) => ({
+    number, state: 'open', html_url: `https://github.com/${REPO}/issues/${number}`,
+    body: `<!-- gbrain-upgrade-matrix:nightly -->\n${from ? `<!-- gbrain-upgrade-matrix:red-from ${from.join(',')} -->\n` : ''}## Upgrade matrix: RED`,
+  });
+
+  test('a dry run whose candidate is red upgrading from v0.60.241.0 (the updater that exited 1) holds and writes nothing; so does a real run', async () => {
+    for (const dryRun of [true, false]) {
+      const w = world(base({ stable: old, runs: [soak(9, 4)], matrix: [redFrom(704, 4, [OLD_UPDATER])], dryRun }));
+      const r = await daily(w.deps);
+      expect(r.action).toBe('held');
+      expect(r.why).toContain('failing from v0.60.241.0');
+      expect(r.why).toContain('a maintainer decides');
+      expect(w.pushes).toEqual([]);
+      expect(w.posts).toEqual([]);
+      expect(w.logs.some(l => l.startsWith('::warning::'))).toBe(true);
+    }
+  });
+
+  test("an open break issue from the matrix holds stable, on the weekly floor and for a regression fix alike, and dispatches nothing; a labelled issue without the matrix's marker holds nothing", async () => {
+    const held = world(base({ stable: old, runs: [soak(9, 4)], importantPrs: [{ number: 30, merge: 3, important: 'regression' }], breakIssues: [breakIssue(9329)] }));
+    const r = await daily(held.deps);
+    expect(r.action).toBe('held');
+    expect(r.why).toContain('#9329');
+    expect(r.why).toContain('waiting: #30');
+    expect([...held.pushes, ...held.posts]).toEqual([]);
+    const labelled = world(base({ stable: old, runs: [soak(9, 4)], breakIssues: [{ number: 41, state: 'open', html_url: 'x', body: 'Upgrading from 0.59 fails for me' }] }));
+    expect((await daily(labelled.deps)).action).toBe('promoted');
+  });
+
+  test('a soaked candidate with no matrix run gets one dispatch on its tag from master; an active matrix run means wait; a dry run says what it would dispatch', async () => {
+    const none = world(base({ stable: old, runs: [soak(9, 4)], matrix: [] }));
+    expect(await daily(none.deps)).toMatchObject({ action: 'matrix_dispatched', version: '1.0.4' });
+    expect(none.posts).toEqual([{ path: `repos/${REPO}/actions/workflows/upgrade-matrix.yml/dispatches`, body: { ref: 'master', inputs: { candidate: 'v1.0.4' } } }]);
+    expect(none.pushes).toEqual([]);
+    const active = world(base({ stable: old, runs: [soak(9, 4)], matrix: [{ ...matrixRun(800, 4, RELEASES), status: 'in_progress', conclusion: null, receipt: null }] }));
+    expect((await daily(active.deps)).action).toBe('waiting');
+    expect(active.posts).toEqual([]);
+    const dry = world(base({ stable: old, runs: [soak(9, 4)], matrix: [], dryRun: true }));
+    expect(await daily(dry.deps)).toMatchObject({ action: 'dry_run', would: 'dispatch the upgrade matrix on v1.0.4' });
+    expect(dry.posts).toEqual([]);
+  });
+
+  test('the soak dispatch on the newest release also dispatches the matrix on it when it has no run', async () => {
+    const w = world(base({ stable: old, matrix: [] }));
+    expect(await daily(w.deps)).toMatchObject({ action: 'soak_dispatched', version: '1.0.4' });
+    expect(w.posts.map(p => p.path)).toEqual([`repos/${REPO}/actions/workflows/production-soak.yml/dispatches`, `repos/${REPO}/actions/workflows/upgrade-matrix.yml/dispatches`]);
+    const dry = world(base({ stable: old, matrix: [], dryRun: true }));
+    expect(await daily(dry.deps)).toMatchObject({ action: 'dry_run', would: 'dispatch the soak and the upgrade matrix on v1.0.4' });
+  });
+
+  test('a run on another release, a pull-request run, a run with explicit from-versions and a fault-injection proof run do not qualify the candidate', async () => {
+    const cases: Array<MatrixRunRow & { receipt?: MatrixReceipt | null }> = [
+      matrixRun(801, 3, RELEASES),
+      matrixRun(802, 4, RELEASES, { event: 'pull_request', head_branch: 'fix/x' }),
+      matrixRun(803, 4, RELEASES, {}, { profile: 'explicit' }),
+      matrixRun(804, 4, RELEASES, {}, { cells: [{ id: 'v1.0.1__pglite__keyless__repo', from: 'v1.0.1', verdict: 'pass', fault: 'corrupt-after-upgrade' }] }),
+    ];
+    for (const run of cases) {
+      const w = world(base({ stable: old, runs: [soak(9, 4)], matrix: [run] }));
+      expect(await daily(w.deps)).toMatchObject({ action: 'matrix_dispatched', version: '1.0.4' });
+      expect(w.pushes).toEqual([]);
+    }
+  });
+
+  test('a red run on the candidate behind 30 newer pull-request runs is still found: stable holds and nothing is re-dispatched', async () => {
+    const prRuns = Array.from({ length: 30 }, (_, i) => ({ ...matrixRun(900 + i, 4, RELEASES, { event: 'pull_request', head_branch: `fix/pr-${i}` }), receipt: null }));
+    const w = world(base({ stable: old, runs: [soak(9, 4)], matrix: [...prRuns, redFrom(704, 4, [OLD_UPDATER])] }));
+    const r = await daily(w.deps);
+    expect(r.action).toBe('held');
+    expect(r.why).toContain('failing from v0.60.241.0');
+    expect(w.posts).toEqual([]);
+  });
+
+  test('a green run whose receipt predates the stable-window from-versions does not qualify: the check dispatches a fresh run', async () => {
+    const preWindow = matrixRun(807, 4, RELEASES, {}, { from: [{ tag: 'v1.0.1', roles: ['N-1', 'stable'] }], skipped: [] });
+    const w = world(base({ stable: old, runs: [soak(9, 4)], matrix: [preWindow] }));
+    expect(await daily(w.deps)).toMatchObject({ action: 'matrix_dispatched', version: '1.0.4' });
+    expect(w.pushes).toEqual([]);
+    const skippedWindow = world(base({ stable: old, runs: [soak(9, 4)], matrix: [matrixRun(808, 4, RELEASES, {}, { from: [{ tag: 'v1.0.1', roles: ['N-1'] }], skipped: [{ role: 'stable-window', reason: 'no stable release older than the candidate is in the window' }] })] }));
+    expect((await daily(skippedWindow.deps)).action).toBe('promoted');
+  });
+
+  test('a green run on the exact tag and tree promotes, and stable.json and the tag carry matrix_run', async () => {
+    const w = world(base({ stable: old, runs: [soak(9, 4)] }));
+    const r = await daily(w.deps);
+    expect(r.action === 'promoted' && r.promotion.version).toBe('1.0.4');
+    const url = `https://github.com/${REPO}/actions/runs/${MATRIX_ID + 4}`;
+    expect(JSON.parse(w.record()!)).toMatchObject({ version: '1.0.4', matrix_run: url });
+    expect(parseStableRecord(w.record()!, '1.0.4')).toMatchObject({ ok: true, record: { matrix_run: url } });
+    expect(w.tags.stable!.message).toContain(`matrix_run: ${url}\n`);
+  });
+
+  test('a run whose receipt names the tag but another tree, or was written by another harness, is foreign and holds', async () => {
+    const foreignTree = matrixRun(805, 4, RELEASES, {}, { candidate: { tag: 'v1.0.4', sha: sha(4), tree: tree(9) } });
+    const foreignHarness = matrixRun(806, 4, RELEASES, { head_sha: 'a'.repeat(40) });
+    for (const run of [foreignTree, foreignHarness]) {
+      const w = world(base({ stable: old, runs: [soak(9, 4)], matrix: [run] }));
+      expect((await daily(w.deps)).action).toBe('held');
+      expect(w.pushes).toEqual([]);
+    }
+  });
+
+  describe('a security or data-loss fix past an open break', () => {
+    const important = (cls: string) => [{ number: 50, merge: 4, important: cls }];
+
+    test('green on every from-version the break issue does not name: promotes, and the record says what was excused', async () => {
+      for (const cls of ['security', 'data-loss']) {
+        const w = world(base({ importantPrs: important(cls), runs: [soak(9, 4)], matrix: [redFrom(704, 4, [OLD_UPDATER])], breakIssues: [breakIssue(9329, ['v0.60.241.0'])] }));
+        const r = await daily(w.deps);
+        expect(r.action === 'promoted' && r.promotion.version).toBe('1.0.4');
+        expect(JSON.parse(w.record()!)).toMatchObject({ matrix_run: `https://github.com/${REPO}/actions/runs/704`, reason: expect.stringContaining('upgrade break #9329 excused for v0.60.241.0') });
+      }
+    });
+
+    test('also green: promotes without excusing anything', async () => {
+      const w = world(base({ importantPrs: important('security'), runs: [soak(9, 4)], breakIssues: [breakIssue(9329, ['v0.60.241.0'])] }));
+      expect((await daily(w.deps)).action).toBe('promoted');
+    });
+
+    test('a failure on a from-version the issue does not name, an issue that names none, or a fix of another class still holds', async () => {
+      const newBreak = world(base({ importantPrs: important('security'), runs: [soak(9, 4)], matrix: [redFrom(704, 4, [OLD_UPDATER, 'v1.0.2__pglite__keyless__repo-less'])], breakIssues: [breakIssue(9329, ['v0.60.241.0'])] }));
+      const r = await daily(newBreak.deps);
+      expect(r.action).toBe('held');
+      expect(r.why).toContain('v1.0.2 is a new break');
+      const unnamed = world(base({ importantPrs: important('data-loss'), runs: [soak(9, 4)], matrix: [redFrom(704, 4, [OLD_UPDATER])], breakIssues: [breakIssue(9329)] }));
+      expect((await daily(unnamed.deps)).why).toContain('names no from-versions');
+      const regression = world(base({ importantPrs: important('regression'), runs: [soak(9, 4)], breakIssues: [breakIssue(9329, ['v0.60.241.0'])] }));
+      expect((await daily(regression.deps)).action).toBe('held');
+      expect([...newBreak.pushes, ...unnamed.pushes, ...regression.pushes]).toEqual([]);
+    });
   });
 });
 
@@ -432,7 +681,7 @@ describe('stable-daily.yml', () => {
     expect(Object.keys(wf.on).sort()).toEqual(['schedule', 'workflow_dispatch']);
     expect(wf.on.schedule.map(s => s.cron)).toEqual(['17 5 * * *', '17 13 * * *']);
     expect(wf.on.workflow_dispatch.inputs.dry_run).toMatchObject({ type: 'boolean', default: true });
-    expect(wf.permissions).toEqual({ contents: 'write', actions: 'write' });
+    expect(wf.permissions).toEqual({ contents: 'write', actions: 'write', issues: 'read', 'pull-requests': 'read' });
     expect(wf.concurrency).toEqual({ group: 'promote-stable', 'cancel-in-progress': false });
   });
 

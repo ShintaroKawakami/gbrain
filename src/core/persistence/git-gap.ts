@@ -20,7 +20,7 @@ import { alignWithStored } from './align-stored.ts';
 import { digest } from './digest.ts';
 import { isDeclaredReason, isNeverFiledDerivedPage } from './git-declared.ts';
 import { classifyDrift } from './reconcile-additive.ts';
-import { reconcileCanonical } from './reconcile-merge.ts';
+import { contentCanonical } from './reconcile-merge.ts';
 import { reconcileFileReading } from './reconcile-state.ts';
 import { SYNC_READ_BOUND } from './sync-blobs.ts';
 import { RestoreTargetError, restoreFilePath } from '../restore-target.ts';
@@ -132,13 +132,18 @@ export function compareInlineExportFile(raw: Buffer, importPath: string, snapsho
   const { page, tags } = snapshot;
   const file = canonicalFile(raw, importPath, page);
   if (file.state !== 'parsed') return file;
-  const database = reconcileCanonical(page, tags);
+  const database = contentCanonical(page, tags);
   if (digest(file.canonical) === digest(database)) return { state: 'equal' };
   return { state: 'differs', paths: classifyDrift(file.canonical, database).paths.map(p => p.path) };
 }
 
-/** A committed file parsed the way reconcile parses a canonical file, aligned with the stored page (the census contract's file side). */
-function canonicalFile(raw: Buffer, importPath: string, page: ExportSnapshot['page']): { state: 'parsed'; canonical: ReturnType<typeof reconcileCanonical> }
+/**
+ * A committed file parsed the way reconcile parses a canonical file, aligned with the stored page (the census contract's file side).
+ * GST-2568: `retypeStamp` false reads a file naming the type a retype replaced as written. Content evidence reads each blob
+ * both ways, because a version archived before the retype matches the file as written and one archived after it matches
+ * the file with the stamp kept.
+ */
+function canonicalFile(raw: Buffer, importPath: string, page: ExportSnapshot['page'], retypeStamp = true): { state: 'parsed'; canonical: ReturnType<typeof contentCanonical> }
   | { state: 'differs'; paths: string[] } | { state: 'unparseable'; reason: UnparseableReason } {
   const text = raw.toString('utf8');
   if (!Buffer.from(text).equals(raw)) return { state: 'unparseable', reason: 'not_utf8' };
@@ -146,8 +151,8 @@ function canonicalFile(raw: Buffer, importPath: string, page: ExportSnapshot['pa
   const parsed = parseMarkdown(reading.content, `${page.slug}.md`, { validate: true, expectedSlug: page.slug });
   if (parsed.errors?.some(e => !['MISSING_OPEN', 'EMPTY_FRONTMATTER'].includes(e.code))) return { state: 'unparseable', reason: 'frontmatter' };
   if (parsed.slug !== page.slug) return { state: 'differs', paths: ['/slug'] };
-  alignWithStored(parsed, page, reading.inferred);
-  return { state: 'parsed', canonical: reconcileCanonical(parsed, parsed.tags) };
+  alignWithStored(parsed, page, reading.inferred, retypeStamp);
+  return { state: 'parsed', canonical: contentCanonical(parsed, parsed.tags) };
 }
 
 export type ObjectFormat = 'sha1' | 'sha256';
@@ -464,7 +469,7 @@ export async function readDirectionEvidence(engine: BrainEngine, input: { source
           WHERE id = ANY(string_to_array($1::text, ',')::int[])`, [wanted.slice(from, to).map(row => row.id).join(',')]);
         for (const row of rows) {
           const page = snapshotOf.get(row.page_id)!.page;
-          digests.set(String(row.id), digest(reconcileCanonical({ type: (row.type ?? page.type) as Page['type'], title: row.title ?? page.title, compiled_truth: row.compiled_truth,
+          digests.set(String(row.id), digest(contentCanonical({ type: (row.type ?? page.type) as Page['type'], title: row.title ?? page.title, compiled_truth: row.compiled_truth,
             timeline: row.timeline ?? '', frontmatter: json(row.frontmatter, {}) }, json<string[]>(row.tags, []))));
         }
         from = to;
@@ -485,6 +490,8 @@ export async function readDirectionEvidence(engine: BrainEngine, input: { source
     const sizes = await readBlobSizes(root, oids) ?? new Map<string, number>();
     const readable = oids.flatMap(oid => { const size = sizes.get(oid); return size !== undefined && size <= SYNC_READ_BOUND ? [{ oid, size, mode: '100644' }] : []; });
     const fileDigests = new Map<string, string | null>();
+    const sameState = new Map<string, Map<string, string>>();
+    const stateOf = (id: string, value: string | null): string | null => { let at = value; while (at !== null && sameState.get(id)?.has(at)) at = sameState.get(id)!.get(at)!; return at; };
     for (let from = 0; from < readable.length;) {
       let to = from, bytes = 0;
       while (to < readable.length && (to === from || bytes + readable[to]!.size <= CAT_FILE_BATCH_BYTES)) bytes += readable[to++]!.size;
@@ -496,8 +503,11 @@ export async function readDirectionEvidence(engine: BrainEngine, input: { source
           const key = `${subject.id}:${blob.oid}`;
           if (fileDigests.has(key) || !blobs?.has(blob.oid)) continue;
           if (blob.oid !== subject.blob.oid && !older(subject).list.some(entry => entry.oid === blob.oid)) continue;
-          const file = canonicalFile(blobs.get(blob.oid)!, subject.importPath, page);
-          fileDigests.set(key, file.state === 'parsed' ? digest(file.canonical) : null);
+          const reading = (retypeStamp: boolean) => { const file = canonicalFile(blobs.get(blob.oid)!, subject.importPath, page, retypeStamp); return file.state === 'parsed' ? digest(file.canonical) : null; };
+          const written = reading(false), stamped = stateOf(subject.id, reading(true));
+          fileDigests.set(key, written);
+          const ownState = stateOf(subject.id, written);
+          if (ownState !== null && stamped !== null && ownState !== stamped) sameState.set(subject.id, (sameState.get(subject.id) ?? new Map()).set(stamped, ownState));
         }
       }
       from = to;
@@ -513,10 +523,11 @@ export async function readDirectionEvidence(engine: BrainEngine, input: { source
       }
       const snapshot = read.snapshots[i]!;
       const rows = byPage.get(subject.id) ?? [];
-      const versions = rows.flatMap(row => read.digests.has(String(row.id)) ? [{ id: Number(row.id), digest: read.digests.get(String(row.id))! }] : []);
+      const state = (value: string | null) => stateOf(subject.id, value);
+      const versions = rows.flatMap(row => read.digests.has(String(row.id)) ? [{ id: Number(row.id), digest: state(read.digests.get(String(row.id))!)! }] : []);
       const unread = read.gaps.has(subject.id) || rows.length >= EVIDENCE_DEPTH || versions.length < rows.length;
-      const decided = decideDirection(digest(reconcileCanonical(snapshot.page, snapshot.tags)), fileDigests.get(`${subject.id}:${subject.blob.oid}`) ?? null, versions,
-        list.map(entry => ({ oid: entry.oid, digest: fileDigests.get(`${subject.id}:${entry.oid}`) ?? null })), { versions: unread, blobs: capped });
+      const decided = decideDirection(state(digest(contentCanonical(snapshot.page, snapshot.tags)))!, state(fileDigests.get(`${subject.id}:${subject.blob.oid}`) ?? null), versions,
+        list.map(entry => ({ oid: entry.oid, digest: state(fileDigests.get(`${subject.id}:${entry.oid}`) ?? null) })), { versions: unread, blobs: capped });
       out.set(subject.id, { ...decided, versions: versions.length, blobs: list.length, committed_at });
     }
   }

@@ -24,7 +24,7 @@ import { ROBOT_CONCURRENCY, ROBOT_RANDOM_SEEDS, ROBOT_ROTATION_SEEDS, ROBOT_TOPO
 import { robotCeilingUse, robotFailure, robotFullGate, robotOverBudget, runValidation, spawnWorker } from '../scripts/persistence/validate.ts';
 import { faultPoint, installFaultHook, type FaultDetail, type FaultPoint } from '../src/core/persistence/fault-points.ts';
 import { shrinkRun } from '../scripts/persistence/shrink.ts';
-import { finish, fixedChunks, LEVEL_CHUNK_BYTES, runSchedule, runSteps, seamCounter } from '../scripts/persistence/crash-robot.ts';
+import { finish, fixedChunks, LEVEL_CHUNK_BYTES, runSchedule, robotFaultHook, runSteps, seamCounter } from '../scripts/persistence/crash-robot.ts';
 import type { hardenedGitStream } from '../src/core/hardened-git.ts';
 import { installLockOrderTrace, lockOrderReport } from '../scripts/persistence/lock-order.ts';
 import { prepareTopology } from '../scripts/persistence/history-fixture.ts';
@@ -251,6 +251,37 @@ describe('injected session drops', () => {
     });
   }, 120_000);
 
+  // #7651: a projection check whose page read failed compared an empty fence with the fact rows and reported
+  // projection_drift (seed 5105, pooler_disconnect). A failed read of a live page is a read failure, never an empty page.
+  test('a failed page read in the projection check is a read failure with its error, not projection drift', async () => {
+    await robotBrain(async ({ world }) => {
+      const source = world.remotes[0].sourceId;
+      const model = new ReferenceModel(world);
+      const put = descriptor('put', 'put_page', 'local', source, { slug: 'notes/alpha', content: pageBody('notes/alpha', 'mk-put0') });
+      const fact = descriptor('fact', 'remember', 'local', source, { fact: 'Alpha fact mk-fact0', entity: 'notes/alpha' });
+      world.descriptors = new Map([put, fact].map(d => [d.id, d]));
+      for (const d of [put, fact]) {
+        const seen = await executeOp(world, d);
+        expect(seen.status).toBe('committed');
+        model.beginStep(false);
+        await model.observe(d, seen);
+      }
+      await model.checkGlobal('before the failed read');
+      expect(model.violations).toEqual([]);
+
+      const engine = world.engine;
+      const read = engine.readPageSnapshot;
+      engine.readPageSnapshot = (async (slug: string, ...rest: never[]) => {
+        if (slug === 'notes/alpha') throw Object.assign(new Error('storage read failed mid-drop'), { code: 'storage_unavailable' });
+        return read.call(engine, slug, ...rest);
+      }) as typeof read;
+      try { await model.checkGlobal('after ov6'); } finally { engine.readPageSnapshot = read; }
+      expect(model.violations.map(v => v.class)).toEqual(['read_failure']);
+      expect(model.violations[0].detail).toContain(`after ov6: get_page of live page ${source}/notes/alpha failed`);
+      expect(model.violations[0].detail).toContain('storage read failed mid-drop');
+    });
+  }, 120_000);
+
   test('a drop round counts once it terminated a session, including a round still in flight', async () => {
     const drops = new SessionDrops();
     expect(await drops.injectedBefore()).toBe(false);
@@ -358,11 +389,11 @@ describe('requested faults are reported, never silently skipped (#6584)', () => 
     }) as unknown as typeof spawnWorker;
     return { spawn, spawned };
   }
-  async function phase(spawn: typeof spawnWorker, fault: { point: FaultPoint; nth: number }) {
+  async function phase(spawn: typeof spawnWorker, fault: { point: FaultPoint; nth: number }, planned: Pick<RobotRun, 'counted'> = {}) {
     const scratch = mkdtempSync(join(tmpdir(), 'gbrain-crash-robot-fake-'));
     try {
       return await runRobotPhase({ engine: 'pglite', seed: 0, seconds: 0, scratch, home: scratch, databases: [],
-        spawn, track: () => {}, replay: [replayRun(fault)], log: () => {} });
+        spawn, track: () => {}, replay: [{ ...replayRun(fault), ...planned }], log: () => {} });
     } finally { rmSync(scratch, { recursive: true, force: true }); }
   }
   const clean = { result: { violations: [], deferred: [] } };
@@ -595,6 +626,63 @@ await faultPoint('effect:git:mid', { requestId: 'r1', signal: cyclic as never })
       .toEqual({ crashed: 0, unreached: 1, failing: 1 });
     expect(robotFullGate(robot, 'full')).toBe(false);
     expect(robotFailure(robot.failing_runs, { engine: 'pglite' })).toContain('fault_not_reached');
+  });
+
+  const short = (reached: number) => ({ done: { result: { violations: [], deferred: [], reached } } });
+  const publication = (nth: number) => ({ point: 'publication:before_publication' as FaultPoint, nth });
+
+  test('the run hook reports how many slots of its seam it made', () => {
+    const hook = robotFaultHook({ point: 'effect:git:mid', nth: 3 });
+    hook('effect:git:mid', {}); hook('consumer:claiming', {}); hook('effect:git:mid', {});
+    expect(hook.reached()).toBe(2);
+  });
+
+  test('#8078: a run one slot short of the count run (the race\'s other outcome) crashes once more at its last slot', async () => {
+    const { spawn, spawned } = fakeSpawn([short(5), { fault: publication(5) }, { done: clean }]);
+    const robot = await phase(spawn, publication(6), { counted: 6 });
+    expect(spawned).toEqual([{ role: 'run', killed: false }, { role: 'run', killed: true }, { role: 'recover', killed: false }]);
+    expect(robot.runs[0]).toMatchObject({ crashed: true, fault: publication(5), counted: 6, retargeted: { nth: 6, reached: 5 } });
+    expect(robot.runs[0]!.fault_not_reached).toBeUndefined();
+    expect({ crashed: robot.crashed_runs, retargeted: robot.faults_retargeted.length, failing: robot.failing_runs.length })
+      .toEqual({ crashed: 1, retargeted: 1, failing: 0 });
+    expect(robotFullGate(robot, 'full')).toBe(true);
+  });
+
+  test('#8078: a short run that found violations is never retargeted; its violations fail the run', async () => {
+    const { spawn, spawned } = fakeSpawn([{ done: { result: { violations: [{ class: 'lost_write', detail: 'planted' }], deferred: [], reached: 5 } } }]);
+    const robot = await phase(spawn, publication(6), { counted: 6 });
+    expect(spawned.map(s => s.role)).toEqual(['run']);
+    expect(robot.violations.map(v => v.detail)).toEqual(['planted']);
+    expect({ retargeted: robot.faults_retargeted.length, failing: robot.failing_runs.length }).toEqual({ retargeted: 0, failing: 1 });
+  });
+
+  test('#8078: a run two slots short of the count run fails as fault_not_reached', async () => {
+    const { spawn, spawned } = fakeSpawn([short(4)]);
+    const robot = await phase(spawn, publication(6), { counted: 6 });
+    expect(spawned.map(s => s.role)).toEqual(['run']);
+    expect(robot.runs[0]).toMatchObject({ crashed: false, fault_not_reached: true, reached: 4, counted: 6 });
+    expect({ unreached: robot.faults_not_reached.length, retargeted: robot.faults_retargeted.length, failing: robot.failing_runs.length })
+      .toEqual({ unreached: 1, retargeted: 0, failing: 1 });
+    expect(robotFullGate(robot, 'full')).toBe(false);
+  });
+
+  test('#8078: a retargeted run that is short again fails; the retarget happens once', async () => {
+    const { spawn, spawned } = fakeSpawn([short(5), short(4)]);
+    const robot = await phase(spawn, publication(6), { counted: 6 });
+    expect(spawned.map(s => s.role)).toEqual(['run', 'run']);
+    expect(robot.runs[0]).toMatchObject({ crashed: false, fault_not_reached: true, fault: publication(5), reached: 4, retargeted: { nth: 6, reached: 5 } });
+    expect(robot.failing_runs).toHaveLength(1);
+    expect(robotFullGate(robot, 'full')).toBe(false);
+  });
+
+  test('#8078: a run that made no slot of its seam, or whose fault no count run planned, still fails', async () => {
+    for (const [reached, planned] of [[0, { counted: 1 }], [5, {}]] as const) {
+      const { spawn, spawned } = fakeSpawn([short(reached)]);
+      const robot = await phase(spawn, publication(6), planned);
+      expect(spawned.map(s => s.role)).toEqual(['run']);
+      expect(robot.runs[0]).toMatchObject({ fault_not_reached: true, reached });
+      expect(robot.failing_runs).toHaveLength(1);
+    }
   });
 
   test('a fault_hook_error kills the worker and fails the run and the full gate', async () => {

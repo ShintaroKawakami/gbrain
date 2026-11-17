@@ -13,7 +13,8 @@
  *     the receipt, nothing else). Codex setup installs, and anything else, get
  *     a line naming the command that fixes it.
  * Project-scope setup installs are listed, never rewritten: setup writes those
- * from the project directory. Best-effort; never throws.
+ * from the project directory. This install's launcher file itself is rewritten
+ * when stale (no entry changes, so no Codex trust moves). Best-effort; never throws.
  */
 import { readFileSync } from 'node:fs';
 import { configDir } from '../config.ts';
@@ -23,7 +24,7 @@ import { join } from 'node:path';
 import { GBRAIN_HOOK_MARKER_KEY, GBRAIN_SETUP_MARKER_VALUE, claudeUserSettingsPath, codexHooksPath, type ClaudeHookEvent } from '../bootstrap/host-specs.ts';
 import { applyClaudeSetup, claudeSetupPaths, inspectClaudeSetup, readSetupReceipt, type ClaudeSetupPlan } from './claude-code.ts';
 import { codexSetupPaths, readCodexSetupReceipt } from './codex.ts';
-import { hookLauncherInCommand, hookLauncherPath, hookLauncherState } from './hook-launcher.ts';
+import { ensureHookLauncher, hookLauncherInCommand, hookLauncherPath, hookLauncherState } from './hook-launcher.ts';
 import { localSetupRecords } from './local-receipts.ts';
 import { ownedEntryFingerprint } from '../bootstrap/adopted-connections.ts';
 import { launcherLaneFindings, setupRerunArgv } from './launcher-lanes.ts';
@@ -76,8 +77,11 @@ async function refreshSetup(log: (line: string) => void): Promise<void> {
         // Another install's hooks or MCP entry can share these files, so the home comes only from entries this receipt owns.
         const homeEnv = claudeHookEntries(paths.settingsPath).filter((e) => owned.has(hookEntryHash(e) ?? '')).map((e) => parseClaudeHookCommand(e.command as string)?.env.GBRAIN_HOME).find((h) => h !== undefined)
           ?? (receipt.mcp_plugin ? undefined : claudeMcpHome(paths.configPath, receipt.name, receipt.project_dir, [receipt.entry_hash, receipt.pending_entry_hash]));
-        const plan: ClaudeSetupPlan = { name: receipt.name, scope: receipt.scope, ...(receipt.project_dir ? { projectDir: receipt.project_dir } : {}), launcher: receipt.launcher, brainHome: receipt.gbrain_home, ...(homeEnv ? { gbrainHomeEnv: homeEnv } : {}),
+        const recorded: ClaudeSetupPlan = { name: receipt.name, scope: receipt.scope, ...(receipt.project_dir ? { projectDir: receipt.project_dir } : {}), launcher: receipt.launcher, brainHome: receipt.gbrain_home, ...(homeEnv ? { gbrainHomeEnv: homeEnv } : {}),
           sourceId: receipt.source_id, surface: receipt.surface, advertise: receipt.advertise ?? null, events: Object.keys({ ...receipt.hooks.owned, ...receipt.hooks.pending }) as ClaudeHookEvent[] };
+        // GST-363: the rewrite carries the entry's own --stdio-member forward and never adds one.
+        const carried = receipt.mcp_plugin ? undefined : inspectClaudeSetup(recorded).mcp.stdioMember;
+        const plan: ClaudeSetupPlan = carried ? { ...recorded, stdioMember: carried } : recorded;
         // An MCP entry still exactly what setup last wrote predates the launcher (#8426): setup's own rewrite moves it.
         const mcp = receipt.mcp_plugin ? 'plugin' : inspectClaudeSetup(plan).mcp.state;
         if (!ours.some(needsLauncher) && mcp !== 'owned') continue;
@@ -108,6 +112,12 @@ async function refreshSetup(log: (line: string) => void): Promise<void> {
 
 /** post-upgrade: move every gbrain-written hook this install can find onto the launcher. */
 export async function refreshHookLaunchers(log: (line: string) => void = console.log): Promise<void> {
+  // A launcher that predates the recorded Bun (GST-2784) is rewritten in place: every entry keeps its command, so Codex trust is untouched.
+  try {
+    const launcher = hookLauncherPath();
+    const before = hookLauncherState(launcher);
+    if (before.state === 'stale') { ensureHookLauncher(launcher); log(`Hook launcher: rewrote ${launcher} (${before.detail}).`); }
+  } catch (e) { log(`Hook launcher: ${hookLauncherPath()} was not refreshed (${(e as Error).message}); run gbrain doctor --only harness_wiring.`); }
   try { refreshTurnRule(log); } catch (e) { log(`Hook launcher: the turn-rule hooks were not refreshed (${(e as Error).message}); run gbrain doctor --only harness_wiring.`); }
   try { await refreshSetup(log); } catch (e) { log(`Hook launcher: setup's hooks were not refreshed (${(e as Error).message}); run gbrain doctor --only harness_wiring.`); }
   // The other lanes are named, never rewritten here: bootstrap's writers run from the workspace, and their Codex entries move trust.

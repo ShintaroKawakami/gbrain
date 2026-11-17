@@ -34,11 +34,14 @@ import type { BrainEngine } from '../core/engine.ts';
 import { buildToolDefs } from './tool-defs.ts';
 import { MCP_SERVER_DESCRIPTION, readInstructionContent, resolveMcpInstructions } from './instructions.ts';
 import { httpInstructionTools } from './initialize-context.ts';
-import { ambientOptsFrom } from '../core/facts/writeback-config.ts';
+import { ambientOptsFrom, writebackCaller } from '../core/facts/writeback-config.ts';
 import { resolveAgentWriteback } from '../core/facts/writeback-settings.ts';
+import { OWNER_MEMBER_KEY } from '../core/search/private-visibility.ts';
 import { operations, operationsByName, opAllowedForBoundClient } from '../core/operations.ts';
 import { scopeDeniedError } from '../core/ops/op-fix.ts';
 import { ON_BEHALF_OF_HEADER } from '../core/access/audience.ts';
+import { ROOM_HEADER } from '../core/access/room.ts';
+import { GUEST_HEADER } from '../core/guests/admission.ts';
 import { ACTOR_HEADER, QM_AUDIENCE_HEADER, withAttestRight } from '../core/access/actor-model.ts';
 import { parseAgentLabel, AGENT_LABEL_HEADER } from '../core/persistence/attribution.ts';
 import { qmMemoryToolResult } from '../core/ops/qm-memory.ts';
@@ -279,7 +282,7 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
       headers['Vary'] = 'Origin';
       if (preflight) {
         headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS';
-        headers['Access-Control-Allow-Headers'] = `Content-Type, Authorization, Accept, ${AGENT_LABEL_HEADER}`;
+        headers['Access-Control-Allow-Headers'] = `Content-Type, Authorization, Accept, ${AGENT_LABEL_HEADER}, ${GBRAIN_CLIENT_HEADER}`;
       }
     }
     return headers;
@@ -305,7 +308,7 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
       // on the legacy shape is converted on this read. Takes holders fail safe
       // to ['world']; #1336 honors the stored source grant.
       const grant = await resolveTokenGrant(sql, row);
-      const binding = await tokenMemberBinding(sql, row.member_id, row.may_act_for).catch(() => null); // GBRA-218 verify join
+      const binding = await tokenMemberBinding(sql, row, row.created_at).catch(() => null); // GBRA-218 verify join
       if (!binding) return { ok: false, code: 'access_member_disabled' };
       const allowList = grant.takesHolders ?? ['world'];
       const { sourceId, allowedSources, hasSourceGrant } = authSourcesFromGrant(grant);
@@ -473,7 +476,7 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
               capabilities: { tools: {}, resources: {} },
               // #4748: contract (+ opt-in writeback section) + deployment identity.
               instructions: resolveMcpInstructions(fileConfig, process.env, {
-                writeback: ambientOptsFrom(writeback, { remember: canWriteOp('remember'), extractFacts: canWriteOp('extract_facts') }),
+                writeback: ambientOptsFrom(writeback, { remember: canWriteOp('remember'), extractFacts: canWriteOp('extract_facts'), ...writebackCaller(auth.auth, writeback.enabled ? await engine.getConfig(OWNER_MEMBER_KEY).catch(() => null) : null) }),
                 tools: await httpInstructionTools(engine, fileConfig, { ops: surfacedOps, surface, auth: auth.auth!, allowedOps: surfaceAllowedOps }), // F1
                 ...await readInstructionContent(engine),
               }),
@@ -544,7 +547,7 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
           // Frozen v1 pair: `error: permission_denied` stays; `code: insufficient_scope`.
           const denial = scopeDeniedError({ op: toolName, required: [op.scope ?? 'read', ...(op.requiredScopes ?? [])], auth: auth.auth,
             transport: 'http', message: `Tool requires ${op.scope ?? 'read'} scope`, legacy_error: 'permission_denied' });
-          return Response.json({ jsonrpc: '2.0', id, result: qmMemoryToolResult(toolName, errorResult(denial, { remote: true, transport: 'http', auth: auth.auth }, { op: toolName })) },
+          return Response.json({ jsonrpc: '2.0', id, result: qmMemoryToolResult(toolName, errorResult(denial, { remote: true, transport: 'http', auth: auth.auth }, { op: toolName }), req.headers.get(ACTOR_HEADER) != null) },
             { headers: corsHeaders(origin) });
         }
         // v0.28: thread per-token takes-holder allow-list so takes_list /
@@ -569,7 +572,7 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
           transport: 'http', inboundFrameBytes: bodyCap,
           takesHoldersAllowList: auth.takesHoldersAllowList,
           sourceId: auth.sourceId, agentLabel: parseAgentLabel(req.headers.get(AGENT_LABEL_HEADER)),
-          ...(localFederated ? { localFederatedSourceIds: localFederated } : {}), onBehalfOf: { header: req.headers.get(ON_BEHALF_OF_HEADER) ?? undefined, requestMeta: params?._meta }, mcpCaller: { client: auth.auth?.clientName, userAgent: req.headers.get('user-agent') ?? undefined, meta: params?._meta },
+          ...(localFederated ? { localFederatedSourceIds: localFederated } : {}), onBehalfOf: { header: req.headers.get(ON_BEHALF_OF_HEADER) ?? undefined, requestMeta: params?._meta }, room: { header: req.headers.get(ROOM_HEADER) ?? undefined, requestMeta: params?._meta }, guest: { header: req.headers.get(GUEST_HEADER) ?? undefined, requestMeta: params?._meta }, mcpCaller: { client: auth.auth?.clientName, userAgent: req.headers.get('user-agent') ?? undefined, meta: params?._meta },
           actor: { header: req.headers.get(ACTOR_HEADER) ?? undefined, audience: req.headers.get(QM_AUDIENCE_HEADER) ?? undefined }, // #1336: thread the token's federated_read grant so read ops scope
           // to the operator-granted sources via sourceScopeOpts.
           auth: auth.auth,

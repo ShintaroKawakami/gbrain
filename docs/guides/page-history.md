@@ -114,7 +114,7 @@ A trusted local caller sees every stored reason. A remote caller (an MCP client)
 sees a version's reason only when both that version and the version that
 replaced it are world-visible. The reason for turning a page private, or for
 any change made while it was private, is therefore never shown remotely. When
-the replacing version was later pruned (large pages keep a few versions), its
+the replacing version was later pruned (large pages and holding pages keep a few versions), its
 visibility can no longer be checked and the reason is withheld from remote
 callers. Remote reasons go through the same text sanitizer as version bodies.
 
@@ -169,7 +169,8 @@ git log --first-parent --format='%H %(trailers:key=gbrain-reason,valueonly)' <ra
 ```
 
 A commit and file that a purge has tombstoned (below) never gives a reason
-again, not even on a full re-import.
+again, not even on a full re-import, or a sync that read the trailer before
+the purge and saved the page after it.
 
 A source with no Git checkout (a repo-less brain, or a folder imported with
 `gbrain import`) reads no trailers, prints none of these notices and marks no

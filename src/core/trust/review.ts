@@ -13,6 +13,8 @@
  *   and the paid conflict sweep alike; each carries supersede (accept), forget
  *   (the proposed fact), confirm (the proposed fact) and drop (reject) with the
  *   actor and consent of each;
+ * - agent-written pages the write gate flagged as instructions (#7116), the
+ *   pages proactive surfaces withhold until the owner confirms them;
  * - the owner's active allow rules (`a<id>`) and the kill-switch state.
  *
  * Items are grouped by day and page (many agent edits to one page are one
@@ -25,16 +27,17 @@ import { opError } from '../ops/contract.ts';
 import { currentHoldStore, trustKillSwitchState } from './owner-actions.ts';
 import { getTrustProposal, listTrustProposals, pendingTrustProposalsFor, trustProposalRef, type TrustProposalAction, type TrustProposalRow } from './proposals.ts';
 import { lowerPageState, readPageTrustState } from './page-handlers.ts';
+import { heldLabelsText } from './page-write.ts';
 import { TRUST_MARKER_REPAIR_COMMAND } from './marker-repair.ts';
 import { formatTrustRef, pageRef, parseTrustRef, resolvePageRef } from './refs.ts';
 import { compareTrust, OWNER_TIER_FLOOR, storedTrustTier, trustLabel, USER_SAID_ORIGIN_MARKER, type TrustTier } from './tier.ts';
 import { isUserSaid, trustFields, trustLabelWords } from '../eligibility/labels.ts';
-import { ACTIVATION_REASON_FAMILIES, ACTIVATION_TIER_CEILING } from '../eligibility/sql.ts';
+import { ACTIVATION_REASON_FAMILIES, ACTIVATION_TIER_CEILING, activationSuppressedSql } from '../eligibility/sql.ts';
 import { claimPendingSql, TRUST_CLAIM_RESUME_COMMAND } from './claim-state.ts';
 import { listTrustAllowRules, type TrustAllowRule } from './allow-rules.ts';
-import { isQuarantined } from '../quarantine.ts';
+import { isQuarantined, QUARANTINE_FILTER_FRAGMENT } from '../quarantine.ts';
 
-export const TRUST_REVIEW_KINDS = ['proposal', 'lowered_page', 'preference', 'hold', 'contradiction'] as const;
+export const TRUST_REVIEW_KINDS = ['proposal', 'lowered_page', 'preference', 'hold', 'contradiction', 'flagged_page'] as const;
 export type TrustReviewKind = typeof TRUST_REVIEW_KINDS[number];
 
 export interface TrustReviewItem {
@@ -55,6 +58,8 @@ export interface TrustReviewItem {
   commands: Partial<Record<TrustReviewCommand, string[]>>;
   /** Contradiction items: who runs each command, the consent it needs, whether it can be undone and how. */
   command_meta?: Partial<Record<TrustReviewCommand, TrustReviewCommandMeta>>;
+  /** A proposal whose target page the write gate flagged as an instruction: accepting it confirms that page, so accept-all skips it. */
+  flagged?: true;
 }
 
 export type TrustReviewCommand = 'confirm' | 'drop' | 'release' | 'revert' | 'repair' | 'explain' | 'supersede' | 'forget';
@@ -142,7 +147,8 @@ function proposalItem(p: TrustProposalRow, page: string | null, markerRepair = f
     return {
       ref, kind: 'lowered_page', detail: p.action, source_id: p.source_id, page, day: day(p.updated_at), created_at: p.created_at,
       tier: s.edited_tier, label: trustLabel(s.edited_tier),
-      summary: `An agent edit lowered ${page ?? `page ${p.target_id}`} from "${trustLabel(s.prior_tier)}" to "${trustLabel(s.edited_tier)}"`,
+      summary: `An agent edit lowered ${page ?? `page ${p.target_id}`} from "${trustLabel(s.prior_tier)}" to "${trustLabel(s.edited_tier)}"`
+        + (s.labels ? `; it asked to widen privacy labels (${heldLabelsText(s.labels)}), which stay as they were until you confirm` : ''),
       commands: { confirm: trust('confirm', ref), ...(s.version_id !== null ? { revert: trust('revert', ref) } : {}), drop: trust('drop', ref),
         ...(markerRepair ? { repair: [...TRUST_MARKER_REPAIR_COMMAND] } : {}), explain: trust('explain', ref) },
     };
@@ -180,6 +186,29 @@ async function standingPreferences(engine: BrainEngine, filter: TrustReviewFilte
       ref, kind: 'preference' as const, detail: r.kind, source_id: r.source_id, page: r.slug ? pageRef(r.source_id, r.slug) : null,
       day: day(created), created_at: created, tier, label: trustLabel(tier),
       summary: `Unconfirmed standing ${r.kind}: "${snippet(r.fact)}" (not used proactively until you confirm it)`,
+      commands: { confirm: trust('confirm', ref), explain: trust('explain', ref) },
+    };
+  });
+}
+
+/** Pages withheld from proactive surfaces until confirmed (eligibility/sql.ts), unless a pending proposal already lists them. */
+async function flaggedPages(engine: BrainEngine, filter: TrustReviewFilter): Promise<TrustReviewItem[]> {
+  const [table] = await engine.executeRaw<{ t: string | null }>(`SELECT to_regclass('write_gate_receipts')::text AS t`);
+  if (!table?.t) return [];
+  const rows = await engine.executeRaw<{ source_id: string; slug: string; title: string | null; trust_tier: string; updated_at: string }>(
+    `SELECT p.source_id, p.slug, p.title, p.trust_tier, p.updated_at FROM pages p
+      WHERE p.deleted_at IS NULL AND ${QUARANTINE_FILTER_FRAGMENT} AND ${activationSuppressedSql('pages', 'p')}
+        AND NOT (p.trust_tier = 'unknown' AND EXISTS (SELECT 1 FROM sources cs WHERE cs.id = p.source_id AND ${claimPendingSql('cs')}))
+        AND ($1::text IS NULL OR p.source_id = $1) AND ($2::timestamptz IS NULL OR p.updated_at >= $2)
+        AND NOT EXISTS (SELECT 1 FROM trust_proposals tp WHERE tp.status = 'pending' AND tp.target_table = 'pages' AND tp.target_id = p.id)
+      ORDER BY p.updated_at, p.id LIMIT 1000`, [filter.sourceId ?? null, filter.since?.toISOString() ?? null]);
+  return rows.map(r => {
+    const ref = pageRef(r.source_id, r.slug);
+    const tier = storedTrustTier(r.trust_tier);
+    const updated = new Date(r.updated_at).toISOString();
+    return {
+      ref, kind: 'flagged_page' as const, detail: 'instruction_flag', source_id: r.source_id, page: ref, day: day(updated), created_at: updated, tier, label: trustLabel(tier),
+      summary: `Unconfirmed page "${snippet(r.title || r.slug)}": the write gate flagged it as an instruction (not used proactively until you confirm it)`,
       commands: { confirm: trust('confirm', ref), explain: trust('explain', ref) },
     };
   });
@@ -235,14 +264,18 @@ export async function buildTrustReview(engine: BrainEngine, filter: TrustReviewF
   if (wants(filter, 'proposal') || wants(filter, 'lowered_page') || (filter.kind && PROPOSAL_ACTIONS.includes(filter.kind))) {
     const action = filter.kind && PROPOSAL_ACTIONS.includes(filter.kind) ? filter.kind as TrustProposalAction
       : filter.kind === 'lowered_page' ? 'lower_page' : undefined;
+    const [gate] = await engine.executeRaw<{ t: string | null }>(`SELECT to_regclass('write_gate_receipts')::text AS t`);
     for (const p of await listTrustProposals(engine, { status: 'pending', sourceId: filter.sourceId, action, since: filter.since, limit: 1000 })) {
       if (filter.kind === 'proposal' && p.action === 'lower_page') continue;
-      items.push(proposalItem(p, await pageOf(engine, p), p.action === 'lower_page' && await loweredByUnknownMarker(engine, p)));
+      const flagged = !!gate?.t && p.target_table === 'pages'
+        && (await engine.executeRaw(`SELECT 1 FROM pages p WHERE p.id = $1 AND ${activationSuppressedSql('pages', 'p')}`, [p.target_id])).length > 0;
+      items.push({ ...proposalItem(p, await pageOf(engine, p), p.action === 'lower_page' && await loweredByUnknownMarker(engine, p)), ...(flagged ? { flagged: true as const } : {}) });
     }
   }
   if (wants(filter, 'preference')) items.push(...await standingPreferences(engine, filter));
   if (wants(filter, 'hold')) items.push(...await holds(engine, filter));
   if (wants(filter, 'contradiction')) items.push(...await contradictions(engine, filter));
+  if (wants(filter, 'flagged_page')) items.push(...await flaggedPages(engine, filter));
   items.sort((a, b) => a.day.localeCompare(b.day) || (a.page ?? '').localeCompare(b.page ?? '') || a.created_at.localeCompare(b.created_at) || a.ref.localeCompare(b.ref));
   const groups: TrustReview['groups'] = [];
   for (const item of items) {
@@ -288,7 +321,7 @@ export function renderTrustReview(review: TrustReview): string {
   }
   const c = review.counts;
   if (review.items.length) {
-    lines.push('', `${review.items.length} item(s): ${c.proposal} proposal(s), ${c.lowered_page} lowered page(s), ${c.preference} unconfirmed preference(s), ${c.hold} held write(s)${c.contradiction ? `, ${c.contradiction} contradiction(s)` : ''}.`,
+    lines.push('', `${review.items.length} item(s): ${c.proposal} proposal(s), ${c.lowered_page} lowered page(s), ${c.preference} unconfirmed preference(s), ${c.hold} held write(s)${c.contradiction ? `, ${c.contradiction} contradiction(s)` : ''}, ${c.flagged_page} flagged page(s).`,
       'Confirming or releasing raises trust: run the command yourself in a terminal and type the token it asks for. Explain any item: gbrain trust explain <ref>.');
   }
   return lines.join('\n');

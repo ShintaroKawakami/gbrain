@@ -7,7 +7,7 @@
  *   skills.resolver.session_token_budget, skills.resolver.auto_rebuild
  *                                      (PR A's settings, src/core/skills/resolver/config.ts)
  *   skills.resolver.lane_payload_chars the hook lane's payload budget (500..10000, default 4000)
- *   skills.resolver.top_k, min_match, pinned, per_harness.<harness>.{top_k,min_match}
+ *   skills.resolver.top_k, min_match, top_gate, pinned, per_harness.<harness>.{top_k,min_match,top_gate,dirs}
  *                                      the hook lane's turn settings (src/core/skills/resolver/config.ts)
  *
  * A missing file is created with only these keys: no engine, no database, so
@@ -20,9 +20,10 @@ import { existsSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWriteTextFile } from '../bootstrap/atomic-write.ts';
 import { setCliExitVerdict } from '../cli-force-exit.ts';
-import { laneTurnSettings, validateMinMatch, validatePinned, validateSessionTokenBudget, validateTopK } from '../skills/resolver/config.ts';
+import { laneTurnSettings, validateMinMatch, validateOwnerSenders, validatePinned, validateSessionTokenBudget, validateSkillDirs, validateTopGate, validateTopK } from '../skills/resolver/config.ts';
 
 const CONFIG_CAP_BYTES = 1024 * 1024;
+const isPlainObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 
 /** A JSON object file, or null when it is missing, unreadable or not an object. */
 export function readJsonObjectSafe(path: string): Record<string, unknown> | null {
@@ -47,7 +48,7 @@ export function readResolverConfig(home: string): ResolverConfigRead {
   }
 }
 
-function resolverSection(doc: Record<string, unknown>): Record<string, unknown> {
+export function resolverSection(doc: Record<string, unknown>): Record<string, unknown> {
   const r = (doc.skills as { resolver?: unknown } | undefined)?.resolver;
   return r && typeof r === 'object' && !Array.isArray(r) ? r as Record<string, unknown> : {};
 }
@@ -88,8 +89,8 @@ export function setResolverHarness(read: Exclude<ResolverConfigRead, { state: 'u
 
 export const SKILL_RESOLVER_KEY_PREFIX = 'skills.resolver.';
 /** The leaves `gbrain config set|unset|get` accepts (harnesses is setup's: --skill-loading resolve|off). */
-export const SKILL_RESOLVER_CONFIG_LEAVES = ['enabled', 'session_token_budget', 'auto_rebuild', 'lane_payload_chars', 'top_k', 'min_match', 'pinned', 'per_harness.<harness>.top_k', 'per_harness.<harness>.min_match'] as const;
-const PER_HARNESS_LEAF = /^per_harness\.([a-z-]+)\.(top_k|min_match)$/;
+export const SKILL_RESOLVER_CONFIG_LEAVES = ['enabled', 'session_token_budget', 'auto_rebuild', 'lane_payload_chars', 'top_k', 'min_match', 'top_gate', 'pinned', 'per_harness.<harness>.top_k', 'per_harness.<harness>.min_match', 'per_harness.<harness>.top_gate', 'per_harness.<harness>.dirs', 'per_harness.hermes.owner_sender_ids'] as const;
+const PER_HARNESS_LEAF = /^per_harness\.([a-z-]+)\.(top_k|min_match|top_gate|dirs|owner_sender_ids)$/;
 
 function parseLeafValue(leaf: string, value: string): { ok: true; value: boolean | number | string | string[] } | { ok: false; error: string } {
   const turnKey = leaf.match(PER_HARNESS_LEAF)?.[2] ?? leaf;
@@ -97,7 +98,10 @@ function parseLeafValue(leaf: string, value: string): { ok: true; value: boolean
   try {
     if (turnKey === 'top_k') return { ok: true, value: validateTopK(/^\d+$/.test(value) ? Number(value) : NaN, key) };
     if (turnKey === 'min_match') return { ok: true, value: validateMinMatch(value, key) };
+    if (turnKey === 'top_gate') return { ok: true, value: validateTopGate(/^\d+(\.\d+)?$/.test(value) ? Number(value) : NaN, key) };
+    if (turnKey === 'dirs') return { ok: true, value: validateSkillDirs(value.split(',').map(s => s.trim()).filter(Boolean), key) };
     if (leaf === 'pinned') return { ok: true, value: validatePinned(value.split(',').map(s => s.trim()).filter(Boolean), key) };
+    if (turnKey === 'owner_sender_ids') return { ok: true, value: validateOwnerSenders(value.split(',').map(s => s.trim()).filter(Boolean), key) };
   } catch (e) { return { ok: false, error: (e as Error).message.slice(key.length + 1) }; }
   if (leaf === 'enabled' || leaf === 'auto_rebuild') {
     if (value === 'true' || value === 'false') return { ok: true, value: value === 'true' };
@@ -111,15 +115,17 @@ function parseLeafValue(leaf: string, value: string): { ok: true; value: boolean
 /**
  * `gbrain config set|unset|get skills.resolver.<leaf>`, engine-free (before
  * any brain connection, on a brainless install and on a thin client alike):
- * the file plane is the only plane these keys have. Returns false for a
- * key or action this does not own.
+ * the file plane is the only plane these keys have. A per_harness entry that
+ * is not an object (a hand-edited null, list or scalar) reads as unset, and
+ * set or unset replaces it with {}. Returns false for a key or action this
+ * does not own.
  */
 export function runSkillResolverConfigKey(args: string[], home: string): boolean {
   const [action, key, ...rest] = args;
   if (!key?.startsWith(SKILL_RESOLVER_KEY_PREFIX) || !['set', 'unset', 'get'].includes(action ?? '')) return false;
   const leaf = key.slice(SKILL_RESOLVER_KEY_PREFIX.length);
   const fail = (msg: string): true => { console.error(`[config] ${msg}`); setCliExitVerdict(1); return true; };
-  if (leaf === 'harnesses') return fail(`${key} is written by gbrain setup <claude-code|codex> --skill-loading resolve (and removed by --skill-loading off); nothing was written.`);
+  if (leaf === 'harnesses') return fail(`${key} is written by gbrain setup <claude-code|codex|hermes> --skill-loading resolve (and removed by --skill-loading off); nothing was written.`);
   const nested = leaf.match(PER_HARNESS_LEAF);
   if (!nested && !(SKILL_RESOLVER_CONFIG_LEAVES as readonly string[]).includes(leaf)) return fail(`Unknown config key "${key}". skills.resolver keys: ${SKILL_RESOLVER_CONFIG_LEAVES.join(', ')}. Nothing was written.`);
   const read = readResolverConfig(home);
@@ -127,7 +133,9 @@ export function runSkillResolverConfigKey(args: string[], home: string): boolean
   const doc = read.state === 'ok' ? structuredClone(read.doc) : {};
   const section = resolverSection(doc);
   const perHarness = (section.per_harness && typeof section.per_harness === 'object' && !Array.isArray(section.per_harness) ? section.per_harness : {}) as Record<string, Record<string, unknown>>;
-  const holder: Record<string, unknown> = nested ? (Object.hasOwn(perHarness, nested[1]!) ? perHarness[nested[1]!]! : (perHarness[nested[1]!] = {})) : section;
+  const stored: unknown = nested && Object.hasOwn(perHarness, nested[1]!) ? perHarness[nested[1]!] : undefined;
+  const replaced = !!nested && stored !== undefined && !isPlainObject(stored);
+  const holder: Record<string, unknown> = !nested ? section : isPlainObject(stored) ? stored : (perHarness[nested[1]!] = {});
   const field = nested ? nested[2]! : leaf;
   if (action === 'get') {
     if (holder[field] === undefined) return fail(`Config key not found: ${key}`);
@@ -135,7 +143,7 @@ export function runSkillResolverConfigKey(args: string[], home: string): boolean
     return true;
   }
   if (action === 'unset') {
-    if (!(field in holder)) return fail(`Config key not found: ${key}`);
+    if (!(field in holder) && !replaced) return fail(`Config key not found: ${key}`);
     delete holder[field];
   } else {
     const value = rest.find((a) => !a.startsWith('-'));
@@ -145,7 +153,7 @@ export function runSkillResolverConfigKey(args: string[], home: string): boolean
     holder[field] = parsed.value;
   }
   if (nested) {
-    for (const [h, o] of Object.entries(perHarness)) if (Object.keys(o).length === 0) delete perHarness[h];
+    for (const [h, o] of Object.entries(perHarness)) if (isPlainObject(o) && Object.keys(o).length === 0) delete perHarness[h];
     if (Object.keys(perHarness).length) section.per_harness = perHarness; else delete section.per_harness;
     try { laneTurnSettings(section, nested[1]!); } catch (e) { return fail(`${(e as Error).message} Nothing was written.`); }
   }

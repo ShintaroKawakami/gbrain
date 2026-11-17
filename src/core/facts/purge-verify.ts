@@ -23,9 +23,9 @@ import { getCode } from '../retry-matcher.ts';
 import { CLAIM_FORMS_BATCH, claimTextForms, escapeFenceCell } from '../fence-shared.ts';
 import { gbrainPath } from '../config.ts';
 import type { WriteRequest } from '../persistence/model.ts';
-import { DELETION_INVENTORY, OUT_OF_REACH_RESIDUALS, type InventoryEntry } from '../deletion-inventory.ts';
+import { DELETION_INVENTORY, DELETION_INVENTORY_BY_TABLE, OUT_OF_REACH_RESIDUALS, type InventoryEntry } from '../deletion-inventory.ts';
 import type { PurgePlan, PurgeTarget } from './purge.ts';
-import { gitChildEnv } from '../git-env.ts';
+import { gitChildEnv, literalPathspecs } from '../git-env.ts';
 import { segmentedBodyContains } from '../page-body/segment-rewrite.ts';
 import { derivationAfterSql, derivationBatchRows, derivationNeedles, derivationPurgeState, recordDerivationStatement,
   type DerivationKey, type DerivationPendingReason, type DerivationStallReason, type DerivationSweepState } from '../page-body/segment-derive.ts';
@@ -35,6 +35,7 @@ import { claimForms, quotes, type LedgerPurgeReport } from '../belief/purge.ts';
 import { CARRYING_FIELDS } from '../belief/keys.ts';
 import { relationExists } from '../persistence/rebuildable-cache.ts';
 import { canonicalChangeReason } from '../persistence/change-reason.ts';
+import { outcomeMarkerSql } from './audit-sources.ts';
 
 export type StoreCount = Record<string, number>;
 export type StoreStatus = 'deleted' | 'would_remove' | 'retained_inactive' | 'unverified' | 'out_of_reach' | 'out_of_scope' | 'not_present' | 'incomplete';
@@ -405,7 +406,7 @@ export async function gitResidualCommits(root: string, paths: readonly string[],
   if (!paths.length || !existsSync(join(root, '.git'))) return { store: 'git_history', status: 'out_of_reach', reason: 'no_repository', detail: 'No brain repository is recorded for these pages.' };
   const needles = [escapeFenceCell(claim).toLowerCase(), claim.toLowerCase()];
   return new Promise(resolve => {
-    const child = spawn('git', ['-C', root, '--literal-pathspecs', 'log', '--all', '--format=commit %H %cI', '-p', '--no-color', '--no-ext-diff', '--', ...paths],
+    const child = spawn('git', ['-C', root, 'log', '--all', '--format=commit %H %cI', '-p', '--no-color', '--no-ext-diff', '--', ...literalPathspecs(paths)],
       { stdio: ['ignore', 'pipe', 'ignore'], env: gitChildEnv({ GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1' }) });
     const commits: Array<{ commit: string; committed_at: string }> = [];
     let current: { commit: string; committed_at: string } | null = null, bytes = 0, tail = '', bounded: string | null = null;
@@ -499,7 +500,7 @@ export async function verifyFactPurge(engine: BrainEngine, input: { target: Purg
     else if (result.count) stores.push({ store, removed: removedCount ?? 0, remaining: result.count, ...onRemaining });
     else stores.push({ store, status: removedCount ? 'deleted' : 'not_present', removed: removedCount ?? 0 });
   };
-  await swept('facts', `SELECT 1 FROM facts WHERE source_id=$1 AND visibility=$2 AND gbrain_fact_fingerprint(fact)=$3 AND ($4='*' OR entity_slug=$4)`,
+  await swept('facts', `SELECT 1 FROM facts WHERE source_id=$1 AND visibility=$2 AND gbrain_fact_fingerprint(fact)=$3 AND ($4='*' OR entity_slug=$4) AND NOT ${outcomeMarkerSql('facts')}`,
     [src, target.visibility, target.fact_hash, plan.subject], plan.factIds.length, removed.facts);
   await swept('takes', `SELECT 1 FROM takes k JOIN pages p ON p.id=k.page_id WHERE p.source_id=$1 AND gbrain_fact_fingerprint(k.claim)=$2 AND ($3='*' OR p.slug=$3)`,
     [src, target.fact_hash, plan.subject], plan.takes.length, removed.takes);
@@ -541,13 +542,17 @@ export async function verifyFactPurge(engine: BrainEngine, input: { target: Purg
     stores.push(...await ledgerReports(engine, src, [claim], input.ledger, deadline));
     stores.push(await effectPayloadReport(engine, src, [...new Set([claim, canonicalChangeReason(claim) ?? claim])], deadline, removed.persistence_effects ?? 0));
   }
+  // #9068: only a page purge sweeps the name stores, so a row there holding the claim is another page's name or volunteer pointer.
+  for (const [table, probe] of [['context_volunteer_events', ['rationale']], ['mention_gazetteer_entries', ['name_norm']]] as const) {
+    stores.push(await probeInventoryStore(engine, { ...DELETION_INVENTORY_BY_TABLE.get(table)!, probe }, src, [claim], deadline));
+  }
   stores.push(...await sweptInventoryReports(engine, new Set(stores.map(s => s.store)), src, [claim], removed, deadline, dryRun));
   for (const entry of DELETION_INVENTORY) {
     if (entry.class !== 'out_of_scope' || entry.reason !== 'probed_reported') continue;
     stores.push(await probeInventoryStore(engine, entry, src, [claim], deadline));
   }
   const [other] = await engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM facts WHERE source_id=$1 AND gbrain_fact_fingerprint(fact)=$2
-    AND NOT (visibility=$3 AND ($4='*' OR entity_slug=$4))`, [src, target.fact_hash, target.visibility, plan.subject]);
+    AND NOT (visibility=$3 AND ($4='*' OR entity_slug=$4)) AND NOT ${outcomeMarkerSql('facts')}`, [src, target.fact_hash, target.visibility, plan.subject]);
   const files = await pageFilePaths(engine, src, plan.pages.map(page => page.page_id));
   stores.push(...onDiskReports(files.files, claim, dryRun));
   let vacuumed: string | null = null;
@@ -614,6 +619,15 @@ export async function verifyPagePurge(engine: BrainEngine, input: { sourceId: st
   await keyed('core_edit_notices', 'SELECT 1 FROM core_edit_notices WHERE source_id=$1 AND slug=$2', [src, slug]);
   await keyed('page_aliases', 'SELECT 1 FROM page_aliases WHERE source_id=$1 AND slug=$2', [src, slug]);
   await keyed('slug_aliases', 'SELECT 1 FROM slug_aliases WHERE source_id=$1 AND canonical_slug=$2', [src, slug]);
+  const edgeNames = (key: string) => `(starts_with(${key}, $2 || '|') OR right(${key}, length($2) + 1) = '|' || $2)`;
+  await keyed('retrieval_event_pages', 'SELECT 1 FROM retrieval_event_pages WHERE source_id=$1 AND slug=$2', [src, slug]);
+  await keyed('retrieval_event_links', `SELECT 1 FROM retrieval_event_links WHERE source_id=$1 AND (to_slug=$2 OR ${edgeNames('edge_key')})`, [src, slug]);
+  for (const table of ['retrieval_feedback', 'retrieval_weights']) await keyed(table, `SELECT 1 FROM ${table} WHERE source_id=$1
+    AND ((element_kind='page' AND element_key=$2) OR (element_kind='link' AND ${edgeNames('element_key')}))`, [src, slug]);
+  await keyed('eval_candidates.retrieved_slugs', `SELECT 1 FROM eval_candidates WHERE $1 = ANY(source_ids) AND $2 = ANY(retrieved_slugs)
+    AND NOT EXISTS (SELECT 1 FROM pages po WHERE po.slug = $2 AND po.source_id = ANY(eval_candidates.source_ids) AND po.source_id <> $1)`, [src, slug]);
+  await keyed('context_volunteer_events', 'SELECT 1 FROM context_volunteer_events WHERE source_id=$1 AND slug=$2', [src, slug]);
+  await keyed('mention_gazetteer_entries', 'SELECT 1 FROM mention_gazetteer_entries WHERE source_id=$1 AND target_slug=$2', [src, slug]);
   await keyed('files', 'SELECT 1 FROM files WHERE page_id IS NULL AND page_slug=$2 AND (source_id=$1 OR source_id IS NULL)', [src, slug]);
   await keyed('write_gate_holds', 'SELECT 1 FROM write_gate_holds WHERE source_id=$1 AND slug=$2', [src, slug]);
   if (!await relationExists(engine, 'query_cache')) stores.push(missingCache('query_cache'));
@@ -733,7 +747,7 @@ export async function purgeCompletion(engine: BrainEngine, row: Pick<WriteReques
   let fingerprint: Record<string, number> | undefined;
   if (purge?.fact_hash) {
     const [probe] = await engine.executeRaw<{ facts: number; takes: number }>(`SELECT
-      (SELECT count(*)::int FROM facts WHERE source_id=$1 AND gbrain_fact_fingerprint(fact)=$2 AND ($3='*' OR entity_slug=$3)) AS facts,
+      (SELECT count(*)::int FROM facts WHERE source_id=$1 AND gbrain_fact_fingerprint(fact)=$2 AND ($3='*' OR entity_slug=$3) AND NOT ${outcomeMarkerSql('facts')}) AS facts,
       (SELECT count(*)::int FROM takes k JOIN pages p ON p.id=k.page_id WHERE p.source_id=$1 AND gbrain_fact_fingerprint(k.claim)=$2 AND ($3='*' OR p.slug=$3)) AS takes`,
     [row.source_id, purge.fact_hash, purge.subject ?? '*']);
     fingerprint = { facts: Number(probe?.facts ?? 0), takes: Number(probe?.takes ?? 0) };

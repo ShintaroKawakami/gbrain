@@ -12,7 +12,9 @@
  * refuses with skill_resolver_config_unreadable; a brainless install stays
  * brainless (no engine inferred from the file) and a later init, a thin client
  * and removal keep the keys' engine boundary; doctor stays silent until the
- * resolver is configured.
+ * resolver is configured, and warns on an install that predates the
+ * SessionStart compaction entry; a hand-edited per_harness entry that is not
+ * an object reads as unset and is replaced on set or unset.
  */
 import { afterAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -22,6 +24,7 @@ import { runCli } from './helpers/cli-spawn.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { loadConfig } from '../src/core/config.ts';
 import { SKILL_RESOLVER_MARKER } from '../src/core/setup/skill-resolver-lane.ts';
+import { laneTurnSettings } from '../src/core/skills/resolver/config.ts';
 
 setDefaultTimeout(60_000);
 const CLI = join(import.meta.dir, '..', 'src', 'cli.ts');
@@ -255,4 +258,147 @@ describe('doctor', () => {
     const unreadable = (await doctor()).checks.find((c: any) => c.name === 'skill_resolver');
     expect(unreadable).toMatchObject({ status: 'warn', details: { code: 'skill_resolver_config_unreadable' } });
   });
+});
+
+describe('doctor: an install from before the SessionStart entry', () => {
+  for (const harness of ['claude-code', 'codex'] as H[]) {
+    test(`${harness}: only the UserPromptSubmit hook warns as outdated with the setup fix, and setup repairs it`, async () => {
+      const b = box();
+      skill(HARNESS[harness].skills(b), 'deploy-widget', 'Deploy the widget service.');
+      expect((await setup(b, harness, ['--skill-loading', 'resolve'])).exitCode).toBe(0);
+      const doctor = async () => JSON.parse((await runCli(['doctor', '--only', 'skill_resolver', '--json'], { env: b.env, cwd: b.project })).stdout).checks.find((c: any) => c.name === 'skill_resolver');
+      expect((await doctor()).status).toBe('ok');
+      const file = HARNESS[harness].hookFile(b);
+      const doc = JSON.parse(read(file)!);
+      doc.hooks.SessionStart = doc.hooks.SessionStart.filter((g: any) => !JSON.stringify(g).includes('skill-resolver'));
+      if (doc.hooks.SessionStart.length === 0) delete doc.hooks.SessionStart;
+      writeFileSync(file, JSON.stringify(doc));
+      const outdated = await doctor();
+      expect(outdated.status).toBe('warn');
+      expect(outdated.details.harnesses[0]).toMatchObject({ harness, hook: 'outdated' });
+      expect(outdated.message).toContain('SessionStart');
+      expect(outdated.message).toContain(`gbrain setup ${harness} --skill-loading resolve`);
+      expect(outdated.fix.argv).toEqual(['gbrain', 'setup', harness, '--skill-loading', 'resolve']);
+      const repair = await setup(b, harness, ['--skill-loading', 'resolve', '--json']);
+      expect(repair.exitCode, repair.stderr).toBe(0);
+      expect(repair.doc.skill_resolver.steps.find((s: any) => s.step === 'hook').action).toBe('write');
+      expect(await doctor()).toMatchObject({ status: 'ok', details: { harnesses: [{ harness, hook: 'wired' }] } });
+    });
+  }
+});
+
+describe('per_harness.<harness>.dirs: extra skill directories setup keeps', () => {
+  const run = (b: Box, ...args: string[]) => runCli(['config', ...args], { env: b.env, cwd: b.project });
+  const receipt = (b: Box) => JSON.parse(readFileSync(join(gb(b), 'skill-index', 'claude-code-user', 'receipt.json'), 'utf8'));
+  test('setup builds the user catalog from the default dir plus the configured ones; a re-run keeps them; unset drops them', async () => {
+    const b = box();
+    skill(HARNESS['claude-code'].skills(b), 'deploy-widget', 'Deploy the widget service.');
+    const extra = join(b.root, 'shared-skills');
+    skill(extra, 'citation-fixer', 'Fix broken citations across brain pages.');
+    const set = await run(b, 'set', 'skills.resolver.per_harness.claude-code.dirs', `${extra},${join(b.root, 'not-there')}`);
+    expect(set.exitCode, set.stderr).toBe(0);
+    expect((await setup(b, 'claude-code', ['--skill-loading', 'resolve'])).exitCode).toBe(0);
+    expect(receipt(b).catalog.source.dirs).toEqual([HARNESS['claude-code'].skills(b), extra]);
+    expect(receipt(b).catalog.skill_count).toBe(2);
+    expect(receipt(b).build.rebuild_argv).toContain(extra);
+    const again = await setup(b, 'claude-code', ['--skill-loading', 'resolve']);
+    expect(again.stdout).toMatch(/keep\s+resolver catalog: 2 skills/);
+    const hit = await runCli(['skills', 'resolve', '--catalog', 'claude-code-user', '--text', 'fix the broken citations', '--json'], { env: b.env, cwd: b.project });
+    expect(JSON.parse(hit.stdout).suggestions[0].id).toBe('citation-fixer');
+    expect((await run(b, 'unset', 'skills.resolver.per_harness.claude-code.dirs')).exitCode).toBe(0);
+    expect((await setup(b, 'claude-code', ['--skill-loading', 'resolve'])).exitCode).toBe(0);
+    expect(receipt(b).catalog.source.dirs).toEqual([HARNESS['claude-code'].skills(b)]);
+  });
+
+  test('unsetting the last configured dir when the default dir is missing drops the user catalog; the plugin catalog keeps working', async () => {
+    const b = box();
+    const claude = join(b.home, '.claude');
+    const p = join(claude, 'plugins', 'cache', 'market-a', 'acme', '1.0.0');
+    mkdirSync(join(p, '.claude-plugin'), { recursive: true });
+    writeFileSync(join(p, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'acme-tools' }));
+    skill(join(p, 'skills'), 'deploy', 'Deploy a service with the acme rollout.');
+    writeFileSync(join(claude, 'plugins', 'installed_plugins.json'), JSON.stringify({ version: 2, plugins: { 'acme@market-a': [{ scope: 'user', installPath: p }] } }));
+    writeFileSync(join(claude, 'settings.json'), JSON.stringify({ enabledPlugins: { 'acme@market-a': true } }));
+    const extra = join(b.root, 'shared-skills');
+    skill(extra, 'citation-fixer', 'Fix broken citations across brain pages.');
+    expect((await run(b, 'set', 'skills.resolver.per_harness.claude-code.dirs', extra)).exitCode).toBe(0);
+    expect((await setup(b, 'claude-code', ['--skill-loading', 'resolve'])).exitCode).toBe(0);
+    expect(catalogs(b).sort()).toEqual(['claude-code-plugins', 'claude-code-user']);
+    expect((await run(b, 'unset', 'skills.resolver.per_harness.claude-code.dirs')).exitCode).toBe(0);
+    const off = await setup(b, 'claude-code', ['--skill-loading', 'resolve']);
+    expect(off.exitCode, off.stderr).toBe(0);
+    expect(off.stdout).toMatch(/remove\s+resolver catalog/);
+    expect(catalogs(b)).toEqual(['claude-code-plugins']);
+    const hit = await runCli(['skills', 'resolve', '--text', 'fix the broken citations', '--json'], { env: b.env, cwd: b.project });
+    expect(JSON.parse(hit.stdout).suggestions.map((s: { id: string }) => s.id)).not.toContain('citation-fixer');
+  });
+
+  test('a hand-edited dir with a trailing or doubled slash is the same directory: one source dir, and a re-run keeps the catalog', async () => {
+    const b = box();
+    skill(HARNESS['claude-code'].skills(b), 'deploy-widget', 'Deploy the widget service.');
+    const extra = join(b.root, 'shared-skills');
+    skill(extra, 'citation-fixer', 'Fix broken citations across brain pages.');
+    mkdirSync(gb(b), { recursive: true });
+    writeFileSync(configPath(b), JSON.stringify({ skills: { resolver: { per_harness: { 'claude-code': { dirs: [`${extra}/`, extra.replace('/shared-skills', '//shared-skills')] } } } } }));
+    expect((await setup(b, 'claude-code', ['--skill-loading', 'resolve'])).exitCode).toBe(0);
+    expect(receipt(b).catalog.source.dirs).toEqual([HARNESS['claude-code'].skills(b), extra]);
+    const again = await setup(b, 'claude-code', ['--skill-loading', 'resolve']);
+    expect(again.stdout).toMatch(/keep\s+resolver catalog: 2 skills/);
+  });
+
+  test('refused: a relative or .. path, more than 32 dirs, and a harness setup does not build a catalog for', async () => {
+    const b = box();
+    for (const [key, value, needle] of [
+      ['skills.resolver.per_harness.codex.dirs', 'skills/mine', 'absolute directory paths'],
+      ['skills.resolver.per_harness.codex.dirs', '/a/../b', 'absolute directory paths'],
+      ['skills.resolver.per_harness.codex.dirs', Array.from({ length: 33 }, (_, i) => `/d${i}`).join(','), 'at most 32'],
+      ['skills.resolver.per_harness.pi.dirs', '/opt/skills', 'applies only to claude-code and codex'],
+    ]) {
+      const r = await run(b, 'set', key!, value!);
+      expect({ key, code: r.exitCode === 0, has: r.stderr.includes(needle!) }).toEqual({ key, code: false, has: true });
+    }
+    expect(read(configPath(b))).toBeNull();
+  });
+
+  test('a hand-edited bad dirs value stops setup before it writes anything of the resolver', async () => {
+    const b = box();
+    skill(HARNESS.codex.skills(b), 'deploy-widget', 'Deploy the widget service.');
+    mkdirSync(gb(b), { recursive: true });
+    writeFileSync(configPath(b), JSON.stringify({ skills: { resolver: { per_harness: { codex: { dirs: 'not-a-list' } } } } }));
+    const r = await setup(b, 'codex', ['--skill-loading', 'resolve', '--json']);
+    expect(r.exitCode).not.toBe(0);
+    expect(`${r.stdout}${r.stderr}`).toContain('skills.resolver.per_harness.codex.dirs must be a list');
+    expect(catalogs(b)).toEqual([]);
+  });
+});
+
+describe('per_harness entries that are not objects', () => {
+  for (const bad of [null, [1], 'fast', 3]) {
+    test(`config get, set and unset treat per_harness.codex = ${JSON.stringify(bad)} as unset and replace it`, async () => {
+      const b = box();
+      const run = (...args: string[]) => runCli(['config', ...args], { env: b.env, cwd: b.project });
+      const seed = () => { mkdirSync(gb(b), { recursive: true }); writeFileSync(configPath(b), JSON.stringify({ skills: { resolver: { top_k: 3, per_harness: { codex: bad } } } })); };
+      seed();
+      const get = await run('get', 'skills.resolver.per_harness.codex.top_k');
+      expect(get.exitCode).not.toBe(0);
+      expect(get.stderr).toContain('Config key not found');
+      expect(get.stderr).not.toContain('TypeError');
+      const set = await run('set', 'skills.resolver.per_harness.codex.top_k', '2');
+      expect(set.exitCode, set.stderr).toBe(0);
+      expect(JSON.parse(read(configPath(b))!).skills.resolver.per_harness).toEqual({ codex: { top_k: 2 } });
+      seed();
+      const unset = await run('unset', 'skills.resolver.per_harness.codex.top_k');
+      expect(unset.exitCode, unset.stderr).toBe(0);
+      expect(JSON.parse(read(configPath(b))!).skills.resolver).toEqual({ top_k: 3 });
+      const inherited = await run('set', 'skills.resolver.per_harness.constructor.top_k', '2');
+      expect(inherited.exitCode).not.toBe(0);
+      expect(inherited.stderr).toContain('names no harness');
+    });
+
+    test(`laneTurnSettings falls back to the global keys for per_harness.codex = ${JSON.stringify(bad)}`, () => {
+      const section = { top_k: 3, min_match: 'description', per_harness: { codex: bad, 'claude-code': { top_k: 1 } } };
+      expect(laneTurnSettings(section, 'codex')).toEqual({ top_k: 3, min_match_strength: 'description' });
+      expect(laneTurnSettings(section, 'claude-code')).toEqual({ top_k: 1, min_match_strength: 'description' });
+    });
+  }
 });

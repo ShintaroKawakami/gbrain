@@ -10,15 +10,25 @@
  * worker (exit 0, no output, no dedupe commit); a brainless install stays
  * brainless; an unreadable config fails open with its code; a block over the
  * payload budget is dropped whole and counted; one owner per event; the
- * project catalog is built out of the turn and merged at rank time; with the
- * lane off it prints and writes nothing.
+ * project catalog (Claude Code's .claude/skills, Codex's .agents/skills from the
+ * project root down to cwd) is built out of the turn and merged at rank time;
+ * a built claude-code-plugins catalog is searched; no built catalog ends the
+ * turn as no_catalog; Hermes reads extra.user_message from a stream of any size
+ * and answers {"context"}, starts a session fresh on its first turn or when
+ * its history shrinks (in-place compaction), and honours
+ * per_harness.hermes.owner_sender_ids; with the lane off it prints and writes
+ * nothing.
  */
 import { afterAll, describe, expect, setDefaultTimeout, test } from 'bun:test';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { runCli } from './helpers/cli-spawn.ts';
-import { LANE_DEADLINE_MS, projectCatalogPrefix, WORKER_SRC_PATH } from '../src/core/skills/resolver/hook-lane.ts';
+import { CLAUDE_PLUGINS_CATALOG, LANE_DEADLINE_MS, projectCatalogPrefix, WORKER_SRC_PATH } from '../src/core/skills/resolver/hook-lane.ts';
+import { HOOK_FIELD_CAP, readHookFields, readJsonFields } from '../src/core/skills/resolver/hook-input.ts';
+import { historyShrank, sessionKey } from '../src/core/skills/resolver/session.ts';
+import { MESSAGE_CAP_BYTES } from '../src/core/skills/resolver/resolve.ts';
 import { dailyLogFile, LANE_LOG } from '../src/core/skills/resolver/daily-log.ts';
 
 setDefaultTimeout(60_000);
@@ -74,11 +84,12 @@ function wired(b: Box, harness: 'claude-code' | 'codex', event: 'UserPromptSubmi
 
 interface Run { stdout: string; stderr: string; exitCode: number; wallMs: number }
 /** Run a hook command the way the harness does: sh -c, the event JSON on stdin. Wall time is measured outside the process. */
-async function hook(b: Box, command: string, payload: Record<string, unknown>, env: Record<string, string | undefined> = {}): Promise<Run> {
+async function hook(b: Box, command: string, payload: Record<string, unknown> | string, env: Record<string, string | undefined> = {}, cwd = b.project): Promise<Run> {
   const merged: Record<string, string> = {};
   for (const [k, v] of Object.entries({ ...process.env, ...b.env, GBRAIN_SKIP_STARTUP_HOOKS: '1', ...env })) if (v !== undefined) merged[k] = v;
   const t0 = performance.now();
-  const proc = Bun.spawn(['sh', '-c', command], { env: merged, cwd: b.project, stdin: new TextEncoder().encode(JSON.stringify({ cwd: b.project, ...payload })), stdout: 'pipe', stderr: 'pipe' });
+  const stdin = new TextEncoder().encode(typeof payload === 'string' ? payload : JSON.stringify({ cwd, ...payload }));
+  const proc = Bun.spawn(['sh', '-c', command], { env: merged, cwd, stdin, stdout: 'pipe', stderr: 'pipe' });
   const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
   return { stdout, stderr, exitCode, wallMs: performance.now() - t0 };
 }
@@ -216,6 +227,7 @@ describe('skill-resolver lane: turn settings from config', () => {
     await setup(b, 'claude-code');
     await setup(b, 'codex');
     const claude = wired(b, 'claude-code'), codex = wired(b, 'codex');
+    expect((await config(b, 'set', 'skills.resolver.top_gate', '0')).exitCode).toBe(0);
     const ids = (r: Run) => [...contextOf(r).matchAll(/id: "([^"]+)"/g)].map((m) => m[1]);
     const ask = (cmd: string, s: string) => hook(b, cmd, { prompt: 'deploy the widget service', session_id: s, hook_event_name: 'UserPromptSubmit' }, WIDE);
     expect(ids(await ask(claude, 'd1')).length).toBeGreaterThanOrEqual(3);
@@ -245,6 +257,65 @@ describe('skill-resolver lane: turn settings from config', () => {
     const invalid = await ask(claude, 'd5');
     expect([invalid.exitCode, invalid.stdout]).toEqual([0, '']);
     expect(laneLog(b).at(-1)).toMatchObject({ outcome: 'error', code: 'skill_resolver_config_invalid' });
+  });
+});
+
+describe('skill-resolver lane: top_gate from config', () => {
+  test('a gate above every score empties the block; per_harness 0 turns it off for one harness; a bad value is refused', async () => {
+    const b = box();
+    seedSkills(claudeSkills(b));
+    await setup(b, 'claude-code');
+    const cmd = wired(b, 'claude-code');
+    const config = (...args: string[]) => runCli(['config', ...args], { env: b.env, cwd: b.project });
+    const ask = (s: string) => hook(b, cmd, { prompt: 'please deploy the widget to staging', session_id: s }, WIDE);
+    expect((await config('set', 'skills.resolver.top_gate', '100')).exitCode).toBe(0);
+    const gated = await ask('tg1');
+    expect([gated.exitCode, gated.stdout]).toEqual([0, '']);
+    expect(laneLog(b).at(-1)).toMatchObject({ outcome: 'empty' });
+    expect((await config('set', 'skills.resolver.per_harness.claude-code.top_gate', '0')).exitCode).toBe(0);
+    expect(contextOf(await ask('tg2'))).toContain('deploy-widget');
+    for (const bad of ['high', '101']) {
+      const r = await config('set', 'skills.resolver.top_gate', bad);
+      expect(r.exitCode, bad).not.toBe(0);
+      expect(r.stderr).toContain('must be a number from 0 to 100');
+    }
+    expect((await config('set', 'skills.resolver.top_gate', '-1')).exitCode).not.toBe(0);
+    expect(JSON.parse(readFileSync(join(b.home, '.gbrain', 'config.json'), 'utf8')).skills.resolver).toMatchObject({ top_gate: 100, per_harness: { 'claude-code': { top_gate: 0 } } });
+  });
+});
+
+describe('skill-resolver lane: session GC before the process exits', () => {
+  test('a delivered turn deletes idle session files and stamps the pass; a turn within the interval leaves new ones', async () => {
+    const b = box();
+    seedSkills(claudeSkills(b));
+    await setup(b, 'claude-code');
+    const cmd = wired(b, 'claude-code');
+    const dir = join(b.home, '.gbrain', 'skill-index', 'sessions');
+    mkdirSync(dir, { recursive: true });
+    const old = (Date.now() - 8 * 86_400_000) / 1000;
+    const plant = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => { const p = join(dir, `${prefix}${String(i).padStart(63, '0')}.json`); writeFileSync(p, '{}'); utimesSync(p, old, old); return p; });
+    const idle = plant('a', 40);
+    const r = await hook(b, cmd, { prompt: 'please deploy the widget to staging', session_id: 'gc-a' }, WIDE);
+    expect(contextOf(r)).toContain('deploy-widget');
+    expect(idle.filter((p) => existsSync(p))).toEqual([]);
+    expect(existsSync(join(b.home, '.gbrain', 'skill-index', 'logs', 'session-gc.stamp'))).toBe(true);
+    const later = plant('b', 3);
+    await hook(b, cmd, { prompt: 'write a changelog entry for the release', session_id: 'gc-b' }, WIDE);
+    expect(later.filter((p) => existsSync(p))).toHaveLength(3);
+  });
+});
+
+describe('skill-resolver lane: a deadline during the session GC pass', () => {
+  test('the delivered turn is logged as delivered, the process still exits at the deadline, and the commit landed', async () => {
+    const b = box();
+    seedSkills(claudeSkills(b));
+    await setup(b, 'claude-code');
+    const cmd = wired(b, 'claude-code');
+    const r = await hook(b, cmd, { prompt: 'please deploy the widget to staging', session_id: 'sess-gc-stall' }, { GBRAIN_TEST_SKILL_LANE_STALL: 'gc', GBRAIN_TEST_SKILL_LANE_DEADLINE_MS: '3000' });
+    expect(r.exitCode).toBe(0);
+    expect(contextOf(r)).toContain('id: "deploy-widget"');
+    expect(laneLog(b).at(-1)).toMatchObject({ outcome: 'delivered' });
+    expect(sessions(b).filter((s) => s.endsWith('.json'))).toHaveLength(1);
   });
 });
 
@@ -327,6 +398,7 @@ describe('skill-resolver lane: fail open', () => {
     await setup(b, 'claude-code');
     const set = await runCli(['config', 'set', 'skills.resolver.lane_payload_chars', '500'], { env: b.env, cwd: b.project });
     expect(set.exitCode, set.stderr).toBe(0);
+    expect((await runCli(['config', 'set', 'skills.resolver.top_gate', '0'], { env: b.env, cwd: b.project })).exitCode).toBe(0);
     const r = await hook(b, wired(b, 'claude-code'), { prompt: 'deploy the widget please', session_id: 's' }, WIDE);
     expect(r).toMatchObject({ exitCode: 0, stdout: '' });
     const last = laneLog(b).at(-1);
@@ -417,5 +489,282 @@ describe('skill-resolver lane: project catalog', () => {
     await hook(b, wired(b, 'claude-code'), { prompt: 'rotate the fixture files', session_id: 's' }, { ...WIDE, GBRAIN_SKILLS_NO_AUTOREBUILD: '1' });
     await Bun.sleep(1500);
     expect(readdirSync(join(b.home, '.gbrain', 'skill-index')).filter((n) => n.startsWith('claude-code-project-'))).toEqual([]);
+  });
+});
+
+const catalogRoot = (b: Box) => join(b.home, '.gbrain', 'skill-index');
+async function waitForCatalog(b: Box, prefix: string): Promise<string | undefined> {
+  for (let i = 0; i < 100; i++) {
+    const built = readdirSync(catalogRoot(b)).find((n) => n.startsWith(prefix) && existsSync(join(catalogRoot(b), n, 'receipt.json')));
+    if (built) return built;
+    await Bun.sleep(100);
+  }
+  return undefined;
+}
+const spawnStamps = (b: Box) => { const d = join(catalogRoot(b), 'logs'); return existsSync(d) ? readdirSync(d).filter((n) => n.startsWith('spawn-')) : []; };
+async function buildCatalog(b: Box, catalog: string, dir: string, harness: string) {
+  const r = await runCli(['skills', 'index', 'build', '--catalog', catalog, '--dir', dir, '--harness', harness], { env: b.env, cwd: b.project });
+  expect(r.exitCode, r.stderr).toBe(0);
+}
+
+describe('skill-resolver lane: codex project catalog', () => {
+  test("a repo's .agents/skills at the root and in a subdir get one catalog over both, root first, keyed by the dir list", async () => {
+    const b = box();
+    seedSkills(codexSkills(b));
+    mkdirSync(join(b.project, '.git'));
+    const sub = join(b.project, 'packages', 'widget');
+    skill(join(b.project, '.agents', 'skills'), 'rotate-fixtures', 'Rotate the fixture files for the nightly widget run.');
+    skill(join(sub, '.agents', 'skills'), 'bump-widget-schema', 'Bump the widget schema version.');
+    await setup(b, 'codex');
+    const cmd = wired(b, 'codex');
+    const turn = { prompt: 'rotate the fixture files and bump the widget schema', hook_event_name: 'UserPromptSubmit' };
+    expect((await hook(b, cmd, { ...turn, session_id: 'cp1' }, WIDE, sub)).exitCode).toBe(0);
+    const built = await waitForCatalog(b, projectCatalogPrefix('codex'));
+    expect(built).toMatch(/^codex-project-[0-9a-f]{16}$/);
+    const receipt = readJson(join(catalogRoot(b), built!, 'receipt.json'));
+    expect(receipt.catalog).toMatchObject({ source: { dirs: [join(b.project, '.agents', 'skills'), join(sub, '.agents', 'skills')] }, scope: 'project', harness: 'codex' });
+    const block = contextOf(await hook(b, cmd, { ...turn, session_id: 'cp2' }, WIDE, sub));
+    expect(block).toContain('id: "rotate-fixtures"');
+    expect(block).toContain('id: "bump-widget-schema"');
+    expect(block).toContain(CODEX_LOAD);
+    expect(laneLog(b).at(-1).catalogs).toEqual(['codex-user', built]);
+  });
+
+  test('no .agents/skills below the project root, or only the home directory\'s own, means no project catalog', async () => {
+    const b = box();
+    seedSkills(codexSkills(b));
+    mkdirSync(join(b.project, '.git'));
+    await setup(b, 'codex');
+    const cmd = wired(b, 'codex');
+    const turn = { prompt: 'write the changelog for this release', hook_event_name: 'UserPromptSubmit' };
+    expect(contextOf(await hook(b, cmd, { ...turn, session_id: 'cn1' }, WIDE))).toContain('write-changelog');
+    mkdirSync(join(b.home, '.git'));
+    const fromHome = await hook(b, cmd, { ...turn, session_id: 'cn2' }, WIDE, b.home);
+    expect(contextOf(fromHome)).toContain('write-changelog');
+    expect(laneLog(b).map((l) => l.catalogs)).toEqual([['codex-user'], ['codex-user']]);
+    expect(spawnStamps(b)).toEqual([]);
+  });
+});
+
+describe('skill-resolver lane: built catalogs only', () => {
+  test('claude-code: a built claude-code-plugins catalog is searched, between the user and the project catalog', async () => {
+    const b = box();
+    seedSkills(claudeSkills(b));
+    await setup(b, 'claude-code');
+    expect(CLAUDE_PLUGINS_CATALOG).toBe('claude-code-plugins');
+    const plugins = join(b.root, 'plugin-fixtures');
+    skill(plugins, 'audit-widget-licenses', 'Audit the widget dependency licenses.');
+    await buildCatalog(b, CLAUDE_PLUGINS_CATALOG, plugins, 'claude-code');
+    const r = await hook(b, wired(b, 'claude-code'), { prompt: 'audit the widget licenses', session_id: 'pl1' }, WIDE);
+    expect(contextOf(r)).toContain('id: "audit-widget-licenses"');
+    expect(laneLog(b).at(-1).catalogs).toEqual(['claude-code-user', CLAUDE_PLUGINS_CATALOG]);
+  });
+
+  test('claude-code with only plugin skills: the plugins catalog alone delivers', async () => {
+    const b = box();
+    seedSkills(claudeSkills(b));
+    await setup(b, 'claude-code');
+    rmSync(join(catalogRoot(b), 'claude-code-user'), { recursive: true });
+    const plugins = join(b.root, 'plugin-fixtures');
+    skill(plugins, 'audit-widget-licenses', 'Audit the widget dependency licenses.');
+    await buildCatalog(b, CLAUDE_PLUGINS_CATALOG, plugins, 'claude-code');
+    const r = await hook(b, wired(b, 'claude-code'), { prompt: 'audit the widget licenses', session_id: 'pl2' }, WIDE);
+    expect(contextOf(r)).toContain('id: "audit-widget-licenses"');
+    expect(laneLog(b).at(-1)).toMatchObject({ outcome: 'delivered', catalogs: [CLAUDE_PLUGINS_CATALOG] });
+  });
+
+  for (const harness of ['claude-code', 'codex'] as const) {
+    test(`${harness}: no built catalog ends the turn with no output and outcome no_catalog, never skill_index_missing`, async () => {
+      const b = box();
+      seedSkills(harness === 'codex' ? codexSkills(b) : claudeSkills(b));
+      await setup(b, harness);
+      rmSync(join(catalogRoot(b), `${harness}-user`), { recursive: true });
+      const r = await hook(b, wired(b, harness), { prompt: 'please deploy the widget to staging', session_id: 'nc', hook_event_name: 'UserPromptSubmit' }, WIDE);
+      expect(r).toMatchObject({ exitCode: 0, stdout: '' });
+      const last = laneLog(b).at(-1);
+      expect(last.outcome).toBe('no_catalog');
+      expect(last.code).toBeUndefined();
+    });
+  }
+});
+
+describe('skill-resolver lane: hermes', () => {
+  const HERMES_LOAD = 'To use one, load it with skill_view(name) using its id before acting.';
+  const hermesCmd = (b: Box) => `env GBRAIN_HOOK_LANE=skill-resolver GBRAIN_HOME='${b.home}' '${b.bin}' hook user-prompt --harness hermes`;
+  async function hermesBox(extra: Record<string, unknown> = {}): Promise<Box> {
+    const b = box();
+    const dir = join(b.home, '.hermes', 'skills');
+    seedSkills(dir);
+    await buildCatalog(b, 'hermes-user', dir, 'hermes');
+    writeFileSync(join(b.home, '.gbrain', 'config.json'), JSON.stringify({ skills: { resolver: { enabled: true, harnesses: ['hermes'], ...extra } } }));
+    return b;
+  }
+  const history = (bytes: number) => {
+    const turns: unknown[] = [];
+    const item = { role: 'user', content: 'An earlier turn with "quotes", a \\ backslash, \u00e9t\u00e9 and \ud83d\ude80, plus a decoy.', user_message: 'decoy: rotate the fixtures' };
+    const size = JSON.stringify(item).length + 1;
+    for (let n = 0; n * size < bytes; n++) turns.push(item);
+    return turns;
+  };
+
+  test('without --harness the turn is never routed to hermes, even with a stray hermes argument', async () => {
+    const b = await hermesBox();
+    const cmd = `env GBRAIN_HOOK_LANE=skill-resolver GBRAIN_HOME='${b.home}' '${b.bin}' hook user-prompt hermes`;
+    const r = await hook(b, cmd, { session_id: 'h0', extra: { user_message: 'please deploy the widget to staging' } }, WIDE);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe('');
+    expect(laneLog(b).filter((l) => l.harness === 'hermes')).toEqual([]);
+    expect(sessions(b)).toEqual([]);
+  });
+
+  test('a pre_llm_call turn reads extra.user_message and answers {"context": block}; a repeat in the session is deduped', async () => {
+    const b = await hermesBox();
+    const turn = { session_id: 'h1', extra: { user_message: 'please deploy the widget to staging', conversation_history: [] } };
+    const r = await hook(b, hermesCmd(b), turn, WIDE);
+    expect(r.exitCode).toBe(0);
+    const out = JSON.parse(r.stdout);
+    expect(Object.keys(out)).toEqual(['context']);
+    expect(out.context).toContain('id: "deploy-widget"');
+    expect(out.context).toContain(HERMES_LOAD);
+    expect((await hook(b, hermesCmd(b), turn, WIDE)).stdout).toBe('');
+    expect(laneLog(b).map((l) => [l.harness, l.outcome])).toEqual([['hermes', 'delivered'], ['hermes', 'empty']]);
+  });
+
+  test('a 5 MB conversation_history before and after user_message is read, never refused, and still delivers within a turn budget', async () => {
+    const b = await hermesBox();
+    const before = history(2.5e6), after = history(2.5e6);
+    const smallMs: number[] = [], bigMs: number[] = [];
+    for (let n = 0; n < 3; n++) {
+      const small = await hook(b, hermesCmd(b), { session_id: `h2a-${n}`, extra: { user_message: 'please deploy the widget to staging' } }, WIDE);
+      expect(JSON.parse(small.stdout).context).toContain('id: "deploy-widget"');
+      smallMs.push(laneLog(b).at(-1).ms);
+      const turn = { session_id: `h2-${n}`, extra: { conversation_history: before, user_message: 'please deploy the widget to staging', later_history: after } };
+      expect(JSON.stringify(turn).length).toBeGreaterThan(5e6);
+      const r = await hook(b, hermesCmd(b), turn, WIDE);
+      expect(r.exitCode).toBe(0);
+      expect(JSON.parse(r.stdout).context).toContain('id: "deploy-widget"');
+      const big = laneLog(b).at(-1);
+      expect(big).toMatchObject({ outcome: 'delivered' });
+      bigMs.push(big.ms);
+    }
+    // Reading 5 MB adds less than one lane deadline to a small turn; a buffering or quadratic reader would not.
+    // Each side's fastest of three runs, so one turn a busy machine descheduled cannot decide it.
+    expect(Math.min(...bigMs) - Math.min(...smallMs)).toBeLessThan(LANE_DEADLINE_MS);
+  });
+
+  test('malformed Hermes JSON fails open: exit 0, no stdout, skill_resolve_no_input', async () => {
+    const b = await hermesBox();
+    for (const raw of ['{"session_id": "h3", "extra": {"user_message": "deploy the widget"', '{"extra": {"user_message": "deploy the widget"}} trailing', '[1, 2]', '']) {
+      const r = await hook(b, hermesCmd(b), raw, WIDE);
+      expect(r).toMatchObject({ exitCode: 0, stdout: '' });
+      expect(laneLog(b).at(-1)).toMatchObject({ outcome: 'error', code: 'skill_resolve_no_input' });
+    }
+  });
+
+  test('in-place compaction: a history shorter than the last turn saw offers a deduped skill again; a longer or unknown one does not', async () => {
+    const b = await hermesBox();
+    const ask = (n: number | null) => hook(b, hermesCmd(b), { session_id: 'h5', extra: { user_message: 'please deploy the widget to staging', ...(n === null ? {} : { conversation_history: history(n * 200).slice(0, n) }) } }, WIDE);
+    expect(JSON.parse((await ask(4)).stdout).context).toContain('id: "deploy-widget"');
+    expect((await ask(6)).stdout).toBe('');
+    expect((await ask(null)).stdout).toBe('');
+    expect(JSON.parse((await ask(2)).stdout).context).toContain('id: "deploy-widget"');
+    expect((await ask(3)).stdout).toBe('');
+  });
+
+  test('is_first_turn starts the session fresh even when the history did not shrink', async () => {
+    const b = await hermesBox();
+    const turn = (first: boolean) => ({ session_id: 'h6', extra: { user_message: 'please deploy the widget to staging', conversation_history: [], is_first_turn: first } });
+    expect(JSON.parse((await hook(b, hermesCmd(b), turn(true), WIDE)).stdout).context).toContain('id: "deploy-widget"');
+    expect((await hook(b, hermesCmd(b), turn(false), WIDE)).stdout).toBe('');
+    expect(JSON.parse((await hook(b, hermesCmd(b), turn(true), WIDE)).stdout).context).toContain('id: "deploy-widget"');
+  });
+
+  test('owner_sender_ids: a listed sender gets the block; an unlisted, empty or missing sender gets none, as in the OpenClaw plugin', async () => {
+    const b = await hermesBox({ per_harness: { hermes: { owner_sender_ids: ['alice-example'] } } });
+    const ask = (id: string, sender?: string) => hook(b, hermesCmd(b), { session_id: id, extra: { user_message: 'please deploy the widget to staging', ...(sender === undefined ? {} : { sender_id: sender }) } }, WIDE);
+    expect((await ask('h7a', '')).stdout).toBe('');
+    expect((await ask('h7b')).stdout).toBe('');
+    expect((await ask('h7c', 'bob-example')).stdout).toBe('');
+    expect(laneLog(b).map((l) => l.outcome)).toEqual(['skipped_sender', 'skipped_sender', 'skipped_sender']);
+    expect(sessions(b)).toEqual([]);
+    expect(JSON.parse((await ask('h7d', 'alice-example')).stdout).context).toContain('id: "deploy-widget"');
+    const open = await hermesBox({ per_harness: { hermes: { owner_sender_ids: [] } } });
+    expect(JSON.parse((await hook(open, hermesCmd(open), { session_id: 'h7e', extra: { user_message: 'please deploy the widget to staging', sender_id: '' } }, WIDE)).stdout).context).toContain('id: "deploy-widget"');
+  });
+
+  test('a stored session from before the history field, or a turn with no history, never resets', async () => {
+    const b = await hermesBox();
+    const home = join(b.home, '.gbrain');
+    const key = sessionKey('on', 'hermes', 'h8');
+    mkdirSync(join(b.home, '.gbrain', 'skill-index', 'sessions'), { recursive: true });
+    writeFileSync(join(b.home, '.gbrain', 'skill-index', 'sessions', key + '.json'), JSON.stringify({ v: 1, turn: 3, spent: 10, last: { 'deploy-widget': 3 }, again: {} }));
+    expect(await historyShrank(home, key, 0)).toBe(false);
+    expect(await historyShrank(home, key, undefined)).toBe(false);
+    expect(await historyShrank(home, sessionKey('on', 'hermes', 'none-yet'), 0)).toBe(false);
+    writeFileSync(join(b.home, '.gbrain', 'skill-index', 'sessions', key + '.json'), JSON.stringify({ v: 1, turn: 3, spent: 10, last: {}, again: {}, history: 5 }));
+    expect(await historyShrank(home, key, 4)).toBe(true);
+    expect(await historyShrank(home, key, 5)).toBe(false);
+  });
+
+  test('skills.resolver.lane_payload_chars caps the Hermes JSON too', async () => {
+    const b = await hermesBox({ lane_payload_chars: 500 });
+    const r = await hook(b, hermesCmd(b), { session_id: 'h4', extra: { user_message: 'deploy the widget, write the changelog and triage the bug' } }, WIDE);
+    expect(r).toMatchObject({ exitCode: 0, stdout: '' });
+    expect(laneLog(b).at(-1).outcome).toBe('payload_dropped');
+  });
+});
+
+describe('readJsonFields: the bounded streaming hook reader', () => {
+  const chunks = (text: string, size: number) => { const bytes = Buffer.from(text); return Readable.from(Array.from({ length: Math.ceil(bytes.length / size) }, (_, i) => bytes.subarray(i * size, (i + 1) * size))); };
+  const PATHS = ['session_id', 'cwd', 'extra.user_message'];
+
+  test('keeps only the string values at the paths, decoding escapes across any chunk boundary; nested decoys do not match', async () => {
+    const doc = { cwd: '/w/acme-example', extra: { conversation_history: [{ user_message: 'decoy', extra: { user_message: 'decoy' } }], user_message: 'say "hi" \\ \u00e9 \ud83d\ude80\n', n: -1.5e3, ok: [true, false, null] }, session_id: 's-1', user_message: 'top-level decoy' };
+    const text = JSON.stringify(doc);
+    for (const size of [1, 3, 7, 64 * 1024]) {
+      expect(await readJsonFields(chunks(text, size), PATHS, HOOK_FIELD_CAP)).toEqual({ cwd: '/w/acme-example', 'extra.user_message': doc.extra.user_message, session_id: 's-1' });
+    }
+  });
+
+  test('caps each kept value and refuses no payload size', async () => {
+    expect(HOOK_FIELD_CAP).toBe(MESSAGE_CAP_BYTES);
+    const text = JSON.stringify({ extra: { conversation_history: 'x'.repeat(6e6), user_message: 'y'.repeat(20_000) } });
+    const got = await readJsonFields(chunks(text, 64 * 1024), PATHS, 100);
+    expect(got).toEqual({ 'extra.user_message': 'y'.repeat(100) });
+    const escaped = `{"session_id":"a${'\\u00e9'.repeat(200)}"}`;
+    expect(await readJsonFields(chunks(escaped, 5), PATHS, 100)).toEqual({ session_id: `a${'\u00e9'.repeat(99)}` });
+  });
+
+  test('null for malformed JSON (a kept string fully checked, discarded ones for nesting and ends), a non-object document; a non-string value is skipped', async () => {
+    for (const bad of ['', '{', '{"a":}', '{"a":1,}', '{"session_id":"\\x"}', '{"cwd":"\\u12"}', '{"extra":{"user_message":"line\nbreak"}}', '{"a":01}', '{"a":tru}', '{} {}', '"x"', '[]', '{"a":[{"b":"x"]}', '{"a":"open}']) {
+      expect(await readJsonFields(chunks(bad, 2), PATHS, 100)).toBeNull();
+    }
+    expect(await readJsonFields(chunks('{"session_id": 7, "extra": {"user_message": ["x"]}}', 4), PATHS, 100)).toEqual({});
+  });
+});
+
+describe('readHookFields: counts and flags in the same streaming pass', () => {
+  const chunks = (text: string, size: number) => { const bytes = Buffer.from(text); return Readable.from(Array.from({ length: Math.ceil(bytes.length / size) }, (_, i) => bytes.subarray(i * size, (i + 1) * size))); };
+  const SPEC = { strings: ['extra.user_message'], counts: ['extra.conversation_history'], flags: ['extra.is_first_turn'] };
+
+  test('counts top-level items only (nested arrays and commas inside strings do not count) across any chunk boundary, and reads booleans', async () => {
+    const history = [{ role: 'user', content: 'a, b, [c], {d}' }, [1, [2, 3]], 'x,y', 4, null, { content: '\\",' }];
+    const text = JSON.stringify({ extra: { conversation_history: history, is_first_turn: false, user_message: 'hi' } });
+    for (const size of [1, 2, 5, 64 * 1024]) {
+      expect(await readHookFields(chunks(text, size), SPEC, 100)).toEqual({ strings: { 'extra.user_message': 'hi' }, counts: { 'extra.conversation_history': history.length }, flags: { 'extra.is_first_turn': false } });
+    }
+    for (const [doc, n] of [['[]', 0], ['[ ]', 0], [' [5]', 1], ['[{}]', 1], ['["",""]', 2]] as const) {
+      expect((await readHookFields(chunks('{"extra":{"conversation_history":' + doc + '}}', 1), SPEC, 100))?.counts).toEqual({ 'extra.conversation_history': n });
+    }
+  });
+
+  test('a 5 MB history is counted; a stream cut off inside it yields null; a non-array or non-boolean value is left out', async () => {
+    const item = { role: 'user', content: 'An earlier turn, with "quotes" and a , comma.' };
+    const big = Array.from({ length: Math.ceil(5e6 / JSON.stringify(item).length) }, () => item);
+    const text = JSON.stringify({ extra: { conversation_history: big, user_message: 'deploy', is_first_turn: true } });
+    expect(text.length).toBeGreaterThan(5e6);
+    expect(await readHookFields(chunks(text, 64 * 1024), SPEC, 100)).toEqual({ strings: { 'extra.user_message': 'deploy' }, counts: { 'extra.conversation_history': big.length }, flags: { 'extra.is_first_turn': true } });
+    expect(await readHookFields(chunks(text.slice(0, 3e6), 64 * 1024), SPEC, 100)).toBeNull();
+    expect(await readHookFields(chunks('{"extra":{"conversation_history":"many","is_first_turn":1}}', 3), SPEC, 100)).toEqual({ strings: {}, counts: {}, flags: {} });
   });
 });
