@@ -528,6 +528,7 @@ async function callMcpTool(ctx: ServeHttpContext, state: McpRequestState, reques
     return errorResult(e, { remote: true, transport: 'http', auth: authInfo, surface, ...(surfaceAllowedOps ? { allowedOps: surfaceAllowedOps } : {}) }, { op: name });
   }
 
+  toolResult = (await import("../mcp/jtt-jst-times.ts")).withJstTimeFields(toolResult); // JTT fork: Japan-time *_jst siblings (off unless GBRAIN_JST_FIELDS=1)
   return recordMcpToolResult(ctx, state, name, toolResult, logParamsObj, broadcastParams);
 }
 
