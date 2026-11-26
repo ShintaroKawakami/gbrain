@@ -85,6 +85,11 @@ writer list. Every `init` previews first and writes nothing without `--yes`.
    gbrain guests init --writer oauth_client:<client id> --yes
    ```
 
+   An `oauth_client` writer must name a client registered on this brain
+   (`gbrain auth clients --json` lists them). An unknown or deleted id is
+   refused with `client_not_found` and nothing is written; `sources writers
+   --add` checks the same way.
+
 Plain `gbrain auth rescope --client <client id>` prints the client's operations
 and slug prefixes but not who it may act for. `gbrain auth rescope --client
 <client id> --json` prints the whole grant, and `gbrain access check --client
@@ -207,6 +212,10 @@ appends `Uses outside-guest notes: <slugs> (not the owner's words, not verified)
 itself; the model never writes that line. Text inside the note cannot change
 the mark: it comes from `guest_marks`, not from the page. Servers that do this
 list the `guest_marker_v1` capability.
+
+`gbrain get` prints the same warning line above a guest page's frontmatter. If
+you save that output and run `gbrain publish` on it, publish drops the warning
+line and strips the frontmatter, so neither reaches the shared file.
 
 ## What is stored
 

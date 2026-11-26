@@ -10,6 +10,7 @@
 import type { BrainEngine } from '../core/engine.ts';
 import type { CallerAccess } from '../core/search/private-visibility.ts';
 import { ACCESS_ID_RE } from '../core/access/principals.ts';
+import { normalizeSlug } from '../core/utils.ts';
 import { opError } from '../core/ops/contract.ts';
 import { writeCliError } from './cli-error.ts';
 import { CLI_COMMAND_CLASSES, OPERATION_CLASSES, OPERATION_SUBCOMMANDS, enforcedClassOf, type EnforcedClass } from './enforced-member-classes.ts';
@@ -302,7 +303,11 @@ function syncSourceArg(command: string, args: readonly string[]): string | null 
   return source ?? '';
 }
 
-export interface EnforcedScope { sourceId?: string; localFederatedSourceIds?: string[]; config?: import('../core/config.ts').GBrainConfig }
+export interface EnforcedScope {
+  sourceId?: string; localFederatedSourceIds?: string[]; config?: import('../core/config.ts').GBrainConfig;
+  /** Receives the dispatch's `_meta.retrieval`, when it set one, so the CLI can read what the lookup reported (entity_lookup_failed). */
+  retrieval?: (meta: unknown) => void;
+}
 
 /**
  * A read answered as the in-process stdio MCP server bound to the member would answer it, unpacked to the operation's
@@ -325,6 +330,7 @@ export async function enforcedRead(engine: BrainEngine, command: string, opName:
     ...(federated ? { localFederatedSourceIds: federated } : {}),
   });
   const text = out.content?.[0]?.text ?? '';
+  if (out._meta?.retrieval !== undefined) scope.retrieval?.(out._meta.retrieval);
   let parsed: unknown;
   try { parsed = JSON.parse(text); } catch { parsed = text; }
   if (out.isError) {
@@ -365,7 +371,7 @@ export async function memberPageView(engine: BrainEngine, ea: EnforcedAccess, so
   const { access } = ea;
   const labelled = access.labelledOnly ? ' AND ' + labelledOnlyForSql('p', [access.identity], access.satisfiedRuleIds) : '';
   let view: PageView = 'missing';
-  for (const candidate of [...new Set([slug, slug.toLowerCase()])]) {
+  for (const candidate of [...new Set([slug, slug.toLowerCase(), normalizeSlug(slug)])]) { // the op writes normalizeSlug(slug)
     const policy = withCallerAccess(access, () => readPolicyFragment('p', access.identity, true, access.satisfiedRuleIds)) + labelled;
     const [row] = await engine.executeRaw<{ ok: boolean }>('SELECT (' + policy + ') AS ok FROM pages p WHERE p.source_id = $1 AND p.slug = $2 LIMIT 1', [sourceId, candidate]);
     if (row) { if (!row.ok) return 'hidden'; view = 'readable'; continue; }
@@ -418,7 +424,7 @@ export async function markdownLabels(content: string | null, slug: string): Prom
 /** The stored page a label check compares against; a segmented page (no body string) refuses, so the check never reads an empty body as no labels. */
 async function storedPage(engine: BrainEngine, sourceId: string, slug: string) {
   const [row] = await engine.executeRaw<{ type: string | null; frontmatter: unknown; compiled_truth: string | null; timeline: string | null; body_storage: 'inline' | 'segmented' | null; body_bytes: number | null }>(
-    'SELECT type, frontmatter, compiled_truth, timeline, body_storage, body_bytes FROM pages WHERE source_id = $1 AND slug = $2 LIMIT 1', [sourceId, slug.toLowerCase()]);
+    'SELECT type, frontmatter, compiled_truth, timeline, body_storage, body_bytes FROM pages WHERE source_id = $1 AND slug = $2 LIMIT 1', [sourceId, normalizeSlug(slug)]);
   if (row) (await import('../core/page-body/page-shape.ts')).assertInlineBody({ ...row, slug, source_id: sourceId }, 'enforced_member_label_check');
   return row ? { ...row, frontmatter: typeof row.frontmatter === 'string' ? JSON.parse(row.frontmatter) : row.frontmatter } : null;
 }
@@ -432,7 +438,9 @@ function writeTargets(opName: string, p: Record<string, unknown>): string[] {
 /**
  * The checks a write-checked operation passes before it runs as a trusted local write: its source and every target page
  * readable by the member, and no label change. remember: one fact on --entity, the exact slug of a page the member reads,
- * nothing inferred and no visibility or share label (params.infer_entity is set to false).
+ * nothing inferred and no visibility or share label (params.infer_entity is set to false). A put_page or edit_page is
+ * sent with keep_hidden_rows (GST-2891): the member read the page without its held rows, so the put keeps them and the
+ * edit diff leaves them out, as for a remote writer.
  */
 export async function checkEnforcedWrite(engine: BrainEngine, command: string, opName: string, params: Record<string, unknown>, sourceId: string | undefined): Promise<void> {
   const ea = await enforcedAccess(engine, command);
@@ -450,6 +458,7 @@ export async function checkEnforcedWrite(engine: BrainEngine, command: string, o
   if (opName === 'put_page') {
     const content = typeof params.content === 'string' ? params.content : '';
     if (await pageLabels(await storedPage(engine, source, slug)) !== await markdownLabels(content, slug)) return refuseEnforced(command, 'label_change', { engine });
+    params.keep_hidden_rows = true;
   }
   if (opName === 'add_timeline_entry' && [params.summary, params.detail, params.source].some(t => typeof t === 'string' && FENCE_MARKER_RE.test(t))) {
     return refuseEnforced(command, 'label_change', { engine });
@@ -459,6 +468,7 @@ export async function checkEnforcedWrite(engine: BrainEngine, command: string, o
     const stored = await storedPage(engine, source, slug);
     const hidden = stored ? await hiddenResidue(stored.compiled_truth) + await hiddenResidue(stored.timeline) : '';
     if (hidden !== '' || texts.some(t => typeof t === 'string' && LABEL_TEXT_RE.test(t))) return refuseEnforced(command, 'label_change', { engine });
+    if (opName === 'edit_page') params.keep_hidden_rows = true;
   }
 }
 

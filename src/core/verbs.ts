@@ -201,6 +201,13 @@ const remember: Operation = {
     // GST-2346 D1: the brain owner speaking for itself is not refused; its "world" is saved shared.
     if (p.share !== true && p.visibility === 'world' && ctx.attestedOp !== 'memory_write' && memberFacts.memberFactPage(ctx) && !memberFacts.ownerSpeaksForItself(ctx)) {
       if (attested) throw memberFacts.attestedShareRefused(verbError);
+      // GST-2897 B: a fact about another member is never pointed at share: true, which holds it for the brain owner.
+      const subject = typeof p.entity === 'string' ? await memberFacts.otherMemberSubject(ctx.engine, p.entity.trim()) : null;
+      if (subject) {
+        throw Object.assign(verbError('invalid_params', 'remember: a member credential cannot save a fact with visibility "world"; nothing was saved.',
+          `${p.entity} is about member ${subject}. Retry with no visibility to keep the fact on your own member page; a shared fact about another member is held private until the brain owner confirms it.`),
+          { reason: 'member_share_required' });
+      }
       throw Object.assign(verbError('invalid_params', 'remember: a member credential shares a fact with share: true, not visibility "world"; nothing was saved.',
         'Retry the same call with share: true in place of visibility "world" to share a fact about the team\'s work with everyone who reads this source, or with no visibility to keep a fact about a person on your own member page. A member shares only this way: pass share: true, never visibility "world".'),
         { reason: 'member_share_required' });
@@ -290,13 +297,17 @@ const entity: Operation = {
           `Pass either name: "Alice Example" for one full card, or names: ["Alice Example", "WGCO"] (up to ${ENTITY_NAMES_MAX}) for compact rows.`);
       }
       const t0 = Date.now();
-      const out = await lookupEntityNames(ctx.engine, walk.home, names, { remote: ctx.remote !== false, sources: walk.sources, surfaceCeiling: ctx.surfaceCeiling, variants: p.variants !== false,
+      const { degraded, ...out } = await lookupEntityNames(ctx.engine, walk.home, names, { remote: ctx.remote !== false, sources: walk.sources, surfaceCeiling: ctx.surfaceCeiling, variants: p.variants !== false,
         emitNotice: n => ctx.emitNotice?.(n) });
+      // A failed lookup read is marked degraded (the shape search uses), never left as a clean found:false row.
+      if (degraded?.length) ctx.emitResponseMeta?.('retrieval', { degraded });
       ambientMiss(out.results.map(r => ({ name: r.name, ...(r.found ? { foundIn: r.source_id } : {}) })));
       return { protocol_version: 1, latency_ms: Date.now() - t0, ...out };
     }
     const name = typeof p.name === 'string' ? p.name.trim() : '';
     if (!name) {
+      const slug = typeof p.slug === 'string' ? p.slug.trim() : '';
+      if (slug) throw verbError('invalid_params', 'entity takes name, not slug.', `Pass the slug as name: entity {name: ${JSON.stringify(slug)}}.`);
       throw verbError(
         'invalid_params',
         'name must be a non-empty string.',
@@ -310,6 +321,9 @@ const entity: Operation = {
       omitQuarantined: ctx.remote !== false, // #5575: like get_page, a remote reader never gets a quarantined page's card
       emitNotice: n => ctx.emitNotice?.(n),
     });
+    // A failed lookup read rides _meta.retrieval.degraded: the call is marked `[gbrain degraded: entity_lookup_failed]`
+    // (MCP `_meta.degraded`, CLI `degraded` key or stderr line), and the body stays the unchanged found:false shape.
+    if (result.degraded?.length) ctx.emitResponseMeta?.('retrieval', { degraded: result.degraded });
     const coverage = result.card?.coverage ?? result.coverage;
     if (coverage) {
       const { mentionCoverageNotice } = await import('./mentions/coverage.ts');
@@ -364,7 +378,7 @@ const synthesize: Operation = {
   verb: true,
   annotations: { title: 'synthesize (slow, costly — LLM-backed)', readOnlyHint: true },
   handler: async (ctx, p) => {
-    const [{ verbError }, { sourceScopeOpts }] = await Promise.all([import('./ops/contract.ts'), import('./ops/context.ts')]);
+    const [{ verbError }, { sourceScopeOpts, readHolders }] = await Promise.all([import('./ops/contract.ts'), import('./ops/context.ts')]);
     const question = typeof p.question === 'string' ? p.question.trim() : '';
     if (!question) {
       throw verbError(
@@ -382,7 +396,7 @@ const synthesize: Operation = {
       question,
       since: p.since ? String(p.since) : undefined,
       until: p.until ? String(p.until) : undefined,
-      takesHoldersAllowList: ctx.takesHoldersAllowList,
+      takesHoldersAllowList: readHolders(ctx),
       ...(scope.sourceId !== undefined ? { sourceId: scope.sourceId } : {}),
       ...(scope.sourceIds !== undefined ? { allowedSources: scope.sourceIds } : {}),
       // Fail-closed: only a context that explicitly says local gets local.

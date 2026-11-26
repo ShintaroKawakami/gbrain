@@ -231,15 +231,30 @@ describe('.github/nightly-known-red.tsv', () => {
   });
 });
 
+/**
+ * Scheduled workflows that are not test scopes and so are not watched. Each
+ * entry names why a red run needs no nightly-red issue; watching it would start
+ * a nightly-watch runner after every run.
+ */
+const UNWATCHED_SCHEDULED: Record<string, string> = {
+  'Vorflux notify': 'a notifier, not a test scope: its 30-minute digest run shows red on its own, and the next run re-reads the window it missed',
+};
+
 describe('nightly-watch coverage ratchet', () => {
+  const dir = join(ROOT, '.github/workflows');
+  const scheduled = readdirSync(dir).filter(f => f.endsWith('.yml')).map(f => loadYaml(readFileSync(join(dir, f), 'utf8')) as { name: string; on?: { schedule?: unknown } })
+    .filter(w => w.on && typeof w.on === 'object' && 'schedule' in w.on).map(w => w.name);
+
   test('every workflow with a schedule trigger is watched', () => {
-    const dir = join(ROOT, '.github/workflows');
     const watch = loadYaml(readFileSync(join(dir, 'nightly-watch.yml'), 'utf8')) as { on: { workflow_run: { workflows: string[] } } };
-    const scheduled = readdirSync(dir).filter(f => f.endsWith('.yml')).map(f => loadYaml(readFileSync(join(dir, f), 'utf8')) as { name: string; on?: { schedule?: unknown } })
-      .filter(w => w.on && typeof w.on === 'object' && 'schedule' in w.on).map(w => w.name);
     expect(scheduled.length).toBeGreaterThan(5);
-    const missing = scheduled.filter(name => !watch.on.workflow_run.workflows.includes(name));
+    const missing = scheduled.filter(name => !watch.on.workflow_run.workflows.includes(name) && !(name in UNWATCHED_SCHEDULED));
     expect(missing, `Add ${missing.join(', ')} to .github/workflows/nightly-watch.yml on.workflow_run.workflows`).toEqual([]);
+  });
+
+  test('every unwatched exemption names a workflow that still exists and still has a schedule', () => {
+    const stale = Object.keys(UNWATCHED_SCHEDULED).filter(name => !scheduled.includes(name));
+    expect(stale, `Remove ${stale.join(', ')} from UNWATCHED_SCHEDULED: no scheduled workflow has that name`).toEqual([]);
   });
 });
 
@@ -631,6 +646,16 @@ describe('master-red: push-to-master runs', () => {
       expect([name, state.evidence!.complete]).toEqual([name, false]);
       expect([name, state.evidence!.problems.join(' | ')]).toEqual([name, expect.stringContaining(problem)]);
     }
+  });
+
+  test('a reused run whose source passed files only on a re-run of failed jobs keeps the incident open', async () => {
+    const src = mr<CiManifest>('ci-manifest-39170735990.json');
+    const rerun = { ...src, attempts: [1, 2], files: src.files.map((f, i) => (i === 0 ? { ...f, rerun: true as const } : f)) };
+    const { incident } = await reuseWatch(w => { w.manifests.set(`${RU.dispatch10224.id}/1`, rerun); });
+    expect(incident.state).toBe('open');
+    const state = mrState(incident);
+    expect(state.evidence!.complete).toBe(false);
+    expect(state.evidence!.problems.join(' | ')).toContain(`re-ran only failed jobs (attempts 1, 2); 1 file(s) passed only on that re-run (${src.files[0]!.file})`);
   });
 
   test('a green run where a previously failing job did not run keeps the issue open and names the manual-close step', async () => {

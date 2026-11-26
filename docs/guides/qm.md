@@ -106,8 +106,12 @@ their audience (the reads above, unless the client is `--attest-read person`) re
 no personal source, not even the speaker's own, so a room never reads a DM. A hidden
 source named in `source_id` or `source_ids` is refused exactly like a source outside
 the grant (`permission_denied`). Binding only hides inside the grant: a source the
-credential is not granted stays unreadable. Unattested calls and member-bound
-credentials are unchanged. `gbrain access member source remove <member> <source>`
+credential is not granted stays unreadable. A key bound to a member other than the
+owner that has no source list (it reads `default` and the federated sources) reads
+that set minus every personal source bound to someone else, and so does a stdio
+server bound to such a member; `gbrain <read> --as <member>` previews the same view.
+The owner's keys lose nothing, and a source list that names a personal source keeps
+it (`gbrain access check --token <name>` shows what a key reads). `gbrain access member source remove <member> <source>`
 previews first and says whether the source stays personal; `--yes` applies. Bindings
 are database state, so a repo-less brain works the same.
 
@@ -201,7 +205,8 @@ add it to a read grant, so its memory is read only by naming it in `memory_recal
 credential. A person read (no sources named) never reads a scope source. A source others already read,
 `default`, a federated source and the credential's own write source cannot be listed; a credential with
 scope sources keeps its attested ops within `forget,forget_fact,get_write_request,memory_recall,memory_write` and cannot
-hold `--private-pages granted-sources`. A leaked scope credential secret reads and writes every listed scope:
+hold `--private-pages granted-sources` or `--private-facts granted-sources` (and a credential holding either cannot
+list scope sources). A leaked scope credential secret reads and writes every listed scope:
 restrict it with `--operations` to the memory tools. Remote writes to `memory/scope` other than a scope
 `memory_write` are refused, and a `memory/scope` page that names readers, is private or sits under a folder
 rule takes no scope fact (`scope_page_not_shared`). On a repo-backed scope source, anyone who can push to its

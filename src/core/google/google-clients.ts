@@ -358,7 +358,10 @@ export function extractBody(part: RawGmailPart | undefined): { text: string; isH
       continue;
     }
     if (p.mimeType === 'text/plain' && p.body?.data) {
-      return { text: decodeB64Url(p.body.data), isHtml: false };
+      const plain = decodeB64Url(p.body.data);
+      // A text/plain part that is itself an HTML document is markup: flag it so
+      // the caller strips it instead of storing raw tags and CSS as the body.
+      return { text: plain, isHtml: /^\s*(<!doctype\s|<html[\s>]|<head[\s>])/i.test(plain) };
     }
     if (p.mimeType === 'text/html' && p.body?.data && html === null) {
       html = decodeB64Url(p.body.data);
@@ -411,6 +414,9 @@ export function extractCalendarMethod(part: RawGmailPart | undefined): string | 
 }
 
 export class GmailClient extends GoogleApiClient {
+  /** history.list is available: the sweep follows the change feed (gbrainio-gmail.ts has none). */
+  readonly supportsHistory: boolean = true;
+
   async getProfile(opts: { signal?: AbortSignal } = {}): Promise<{ emailAddress: string; historyId: string }> {
     return this.fetchJSON(`${GMAIL_BASE}/users/me/profile`, 'gmail', opts);
   }
@@ -864,3 +870,8 @@ export class PeopleClient extends GoogleApiClient {
     return { names, complete: !morePages };
   }
 }
+
+/** What the Gmail sweep reads: the Gmail API client, or a reader such as GbrainioGmailReader with no change feed. */
+export type GmailReader = Pick<GmailClient, 'getProfile' | 'getLabels' | 'listMessageIds' | 'listHistoryThreadIds' | 'getThread'> & {
+  readonly supportsHistory: boolean;
+};

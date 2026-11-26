@@ -304,7 +304,10 @@ Save ONE fact with mandatory attribution.
   operator set `facts.default_visibility` to private; a save never lands wider
   than the page it is written into. In gbrain, a remote credential bound to
   one member saves `private` on its own member page unless it passes
-  `share: true`, and its `visibility: "world"` is refused; the brain owner's
+  `share: true`, and its `visibility: "world"` is refused; a `share: true`
+  fact about another enabled member (`people/<member>`) is saved `private` with
+  a pending proposal the brain owner confirms (`gbrain trust confirm tp<N>`),
+  and the reply carries a `held` field naming it; the brain owner's
   own credential saves as above (shared by default, `private` on its member
   page when it asks or the page or default keeps facts private). The response
   names the `page` and `visibility` the fact got. Facts saved `private` before
@@ -491,7 +494,21 @@ note/conversation containers;
 most-recently-touched breaks ties within the same match shape. A non-entity
 exact-title page remains a valid fallback. Multi-hit ⇒ best match's card +
 runners-up in `suggestions`. Miss ⇒ `found: false` + keyword near-misses with
-`create_safety` hints.
+`create_safety` hints. A miss is an answer only when every lookup read ran: when
+a page-lookup read fails (the alias, exact title / slug, alias-hydrate or name-variant read, or a name-variant
+candidate's retirement or redirect-target read),
+the call still answers (`found: false` with whatever the other reads found, or
+the best hit they found) and is marked degraded with the stage
+`entity_lookup_failed` (reason `timeout` or `provider_error`) in
+`_meta.retrieval.degraded`, so MCP carries `_meta.degraded` and the
+`[gbrain degraded: entity_lookup_failed]` text block and the CLI carries a
+`degraded` key (`--json`) or the same line on stderr. Exit code stays 0, as for
+every degraded result; `GBRAIN_FAIL_ON_EMPTY=1` does not turn a failed lookup
+into `no_results`, also under `GBRAIN_ENFORCED_MEMBER`. A failed lookup is never "the entity does not exist": retry
+or run `gbrain doctor`. A brain without the `page_aliases` table (before its
+migration) is not degraded: the alias arm is empty by design. An engine that
+refuses raw reads ends the call on its typed `engine_capability_missing`
+refusal instead.
 
 Response: `{ protocol_version, found, latency_ms, card?, suggestions? }`.
 Card: `{ entity{slug,title,type}, aka[], summary, last_touched{updated_at,
@@ -788,8 +805,8 @@ says to keep them, or to forget them first to withdraw the claim everywhere.
 A forget never withdraws an active fact the caller cannot read; when one
 would be reached, the refusal keeps the `claim_linked:` prefix and names no fact.
 In gbrain, a credential bound to one member withdraws only facts on its own
-member page (another fact it reads is refused naming the brain host); the
-brain owner's own credential also withdraws a shared fact it reads, and any
+member page, and a shared fact about itself (another fact it reads is refused
+naming the brain host); the brain owner's own credential also withdraws a shared fact it reads, and any
 other fact it reads on a page that credential can write, such as a page whose
 `readable_by` names the owner.
 
@@ -820,7 +837,8 @@ provider for comparison.
 The response carries `similar_active`: `{ state, candidates, semantic_review,
 next }`. `state` is `checked`, `not_checked_no_embedding` or
 `not_checked_pending`. `candidates` lists up to five other active facts about
-the same entity, with the same visibility (world only for remote callers),
+the same entity, with the same visibility (world only for remote callers
+other than the brain owner),
 whose embedding is at cosine 0.80 or higher to the withdrawn claim, as
 `{ fact_id, similarity }` (no stored text; zero model calls). `semantic_review`
 is `scheduled`, `off`, `unavailable` or `opted_out`; `next` tells the agent
@@ -1022,7 +1040,8 @@ source and `scope_entity` match an accepted card's `(source_id, slug)`.
 
 `entity_facts[]` holds the packed entities' own facts: up to 5 per card, newest
 first, read in the card's own source with the card's visibility (world-only
-unless a trusted-local caller passed `include_private`) and eligibility. Each
+unless a trusted-local caller passed `include_private` or the caller is the
+brain owner's own remote credential) and eligibility. Each
 row is `{ source_id, slug, fact_id, fact, kind, entity_slug, valid_from?,
 context, confidence, attributed_to, provenance, trust_tier?, origin? }`, where
 `(source_id, slug)` names the card. `facts[]` is unchanged hot memory, so a

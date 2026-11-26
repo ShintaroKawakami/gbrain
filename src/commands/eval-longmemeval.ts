@@ -43,7 +43,7 @@
 import { homedir } from 'os';
 import { join } from 'path';
 import { execFileSync } from '../core/spawn.ts';
-import { brainRecycler, createBenchmarkBrain, LME_BRAIN_RECYCLE_EVERY, resetTables } from '../eval/longmemeval/harness.ts';
+import { type BenchmarkEngineKind, brainRecycler, createBenchmarkBrain, LME_BRAIN_RECYCLE_EVERY, openFirstBenchmarkBrain, parseBenchmarkEngineKind, resetTables } from '../eval/longmemeval/harness.ts';
 export { LME_BRAIN_RECYCLE_EVERY };
 import { haystackToPages, normalizeSessions } from '../eval/longmemeval/adapter.ts';
 import {
@@ -140,7 +140,7 @@ import { resolveModel } from '../core/model-config.ts';
 import type { ThinkLLMClient } from '../core/think/index.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
-import type { PGLiteEngine } from '../core/pglite-engine.ts';
+import type { BrainEngine } from '../core/engine.ts';
 import type { HybridSearchMeta, SearchResult } from '../core/types.ts';
 import { classifyIntent, type Intent } from '../eval/longmemeval/intent.ts';
 import { makeGatewayThinkClient } from '../eval/longmemeval/gateway-client.ts';
@@ -171,6 +171,8 @@ type FloorMetric = 'recall_all' | 'recall_any';
 
 interface ParsedArgs {
   help: boolean;
+  /** `--engine pglite|rust`: the engine the benchmark brain is built on (default pglite). */
+  engine: BenchmarkEngineKind;
   datasetPath?: string;
   limit?: number;
   model?: string;
@@ -240,6 +242,10 @@ function parseOnOff(flag: string, v: string): boolean {
  * surface and the help text can never drift from the parser.
  */
 const LME_FLAGS: LmeFlag[] = [
+  { name: '--engine', arg: 'pglite|rust', help: [
+      'Engine the benchmark brain is built on (default: pglite, in memory). rust needs the',
+      'Rust engine addon; without it the run stops with rust_engine_addon_missing.'],
+    apply: (o, v) => { o.engine = parseBenchmarkEngineKind('--engine', v); } },
   { name: '--limit', arg: 'N', help: ['Run only the first N questions (after --question-ids filtering).'],
     apply: (o, v) => { o.limit = Number(v); if (!Number.isInteger(o.limit) || o.limit < 1) throw new Error(`--limit must be a positive integer (got: ${v})`); } },
   { name: '--model', arg: 'M', help: ['Override answer-generation model (default: resolveModel).'],
@@ -408,6 +414,7 @@ const LME_FLAGS: LmeFlag[] = [
 function parseArgs(args: string[]): ParsedArgs {
   const out: ParsedArgs = {
     help: false,
+    engine: 'pglite',
     retrievalOnly: false,
     keywordOnly: false,
     expansion: false,
@@ -509,10 +516,10 @@ export interface RunOpts {
    * call (tests amortize the PGLite cold-create across many runs). MUST be
    * the result of createBenchmarkBrain(); the caller owns lifecycle.
    */
-  engine?: PGLiteEngine;
+  engine?: BrainEngine;
   /** #5092 test seams: brain recycle interval and factory (harness-owned brain only). */
   brainRecycleEvery?: number;
-  createBrain?: () => Promise<PGLiteEngine>;
+  createBrain?: () => Promise<BrainEngine>;
   /**
    * Live nightly-probe search-mode/reranker settings copied into the isolated
    * benchmark brain (#3676). Explicit pin flags (--mode/--reranker/--autocut/
@@ -528,7 +535,7 @@ export interface RunOpts {
    */
   embedTransport?: EmbedTransportFn | null;
   /** Test seam: reranker readiness probe behind `--reranker on` (default rerankerReadinessForEngine). */
-  rerankerReadiness?: (engine: PGLiteEngine, model: string) => Promise<EngineReadiness>;
+  rerankerReadiness?: (engine: BrainEngine, model: string) => Promise<EngineReadiness>;
   /** Test seam: directory for the `--record` ledger (default <repo>/.gbrain-evals/). */
   recordDir?: string;
   /** Test seam: the judge chat client behind `--judge` (default: the gateway `chat`). */
@@ -609,6 +616,7 @@ function resolvePins(opts: ParsedArgs, runOpts: RunOpts, trajectoryEnabled: bool
     top_k: opts.topK,
     trajectory: trajectoryEnabled,
     ...(searchPins ? { search_pins: searchPins } : {}),
+    ...(opts.engine === 'rust' ? { engine: 'rust' as const } : {}),
     ...(opts.evalPoolDepth ? { eval_pool_depth: opts.evalPoolDepth } : {}), ...(decide ? { decide: decide.runConfig } : {}),
     ...retrievalArms.armPins(opts.arms), ...viaOperation.viaOperationPins(opts.viaOp),
   };
@@ -1145,7 +1153,7 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
     embedTxn: (fn) => fn(),
   };
 
-  const configureBrain = async (engine: PGLiteEngine): Promise<void> => {
+  const configureBrain = async (engine: BrainEngine): Promise<void> => {
     // #3676: nightly probe callers may copy audited live search config into
     // this isolated engine. Data tables stay hermetic.
     for (const [key, value] of Object.entries(runOpts.searchConfigSnapshot ?? {})) {
@@ -1167,7 +1175,7 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
     if (decideRun) await decideLane.configureDecideBrain(engine, decideRun);
   };
 
-  const work = async (engine: PGLiteEngine): Promise<void> => {
+  const work = async (engine: BrainEngine): Promise<void> => {
     await configureBrain(engine);
 
     // Resolved reranker pin on (flag, --search-pin, snapshot or bundle):
@@ -1216,7 +1224,7 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
     const emitter = makeEmitter(opts.outputPath, appendOutput);
     // #5092: a harness-owned brain is replaced on a fixed cadence (see brainRecycler).
     const brains = brainRecycler(engine, runOpts.engine ? 0 : (runOpts.brainRecycleEvery ?? LME_BRAIN_RECYCLE_EVERY),
-      runOpts.createBrain ?? createBenchmarkBrain, configureBrain);
+      runOpts.createBrain ?? (() => createBenchmarkBrain(opts.engine)), configureBrain);
     progress.start('eval.longmemeval', backfill.length + questions.length);
     try {
       // Judge-only backfill first (prior rows, no reader call), then re-emit
@@ -1335,7 +1343,8 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
     // Caller owns engine lifecycle (typically a test beforeAll/afterAll).
     await work(runOpts.engine);
   } else {
-    const first = await (runOpts.createBrain ?? createBenchmarkBrain)();
+    const first = await openFirstBenchmarkBrain(runOpts.createBrain ?? (() => createBenchmarkBrain(opts.engine)), 'longmemeval');
+    if (!first) return fail(2);
     try {
       await work(first);
     } finally {
@@ -1362,7 +1371,7 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
 
 
 async function runOneQuestion(
-  engine: PGLiteEngine,
+  engine: BrainEngine,
   q: DatasetQuestion,
   ctx: RunContext,
 ): Promise<QuestionOutcome> {

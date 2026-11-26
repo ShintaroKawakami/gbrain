@@ -111,8 +111,8 @@ brain recognizes in your source:
 | State | Meaning | What to do |
 |---|---|---|
 | `complete` | Every page is scanned at its current content. | Nothing. |
-| `pending` | Pages were written since the last pass, or no pass ran yet. | `gbrain extract --stale --catch-up` (free). |
-| `failed` | The last pass could not build the name index. | Read `gbrain doctor --only links_extraction_lag --json`, fix, rerun. |
+| `pending` | Pages were written since the last pass, no pass ran yet, or the entity name list changed and pages have not been checked against it yet. | `gbrain extract --stale --catch-up` (free). |
+| `failed` | The last pass could not build the name index, or stopped on an error (the status error names the step). | Read `gbrain doctor --only links_extraction_lag --json`, fix, rerun. |
 | `disabled` | `auto_link` or `mentions.auto_link` is `false`. | The user's choice; `gbrain config set mentions.auto_link true` reverses it. |
 | `type_not_linkable` | Nothing links to this page type by name. | `gbrain config set mentions.entity_types +<type>`. |
 
@@ -128,12 +128,22 @@ agent never reads a short list as "nothing else exists".
 - Put the name in the title, or after a prefix: `CRM record: Acme Example`.
 - Declare other names in the body (see [How gbrain learns an alias](#how-gbrain-learns-an-alias)).
 - Or list names in frontmatter `aliases: [Acme, Acme Inc]`.
+- Put a person's X handle in frontmatter `x_handle:` (or `twitter:`,
+  `twitter_handle:` or `x:`; an `x.com/<handle>` URL works too): text that
+  writes `@handle` links to that page. `unknown`, `0` and other placeholders
+  are ignored.
+
+A frontmatter alias or handle outranks a page of the same kind that is only
+titled with that name: when `people/alice-example` declares `x_handle:
+alicetweets`, a thin `people/alicetweets` page stops collecting the mentions
+and they link to `people/alice-example`. The thin page itself is not changed.
 
 Names are never linked when they are shorter than 4 characters, a generic word
 ("Will", "Team"), the first word of a longer entity name ("Quormiro" alone when
-"Quormiro Capital" and "Quormiro Labs" both exist), claimed by two unrelated
-pages, or inside a private facts or takes fence. Contracts and other non-entity
-pages that repeat a code do not claim it.
+"Quormiro Capital" and "Quormiro Labs" both exist; a one-word person page
+titled "Alice" when "Alice Example" exists), claimed by two unrelated pages, or
+inside a private facts or takes fence. Contracts and other non-entity pages
+that repeat a code do not claim it.
 
 ## How gbrain learns an alias
 

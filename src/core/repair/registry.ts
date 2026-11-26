@@ -58,6 +58,7 @@ import { atomFenceRowsRepair } from './atom-fence-rows.ts';
 import { extractorFactsRepair } from './extractor-facts.ts';
 import { unwithdrawnFactsRepair } from './unwithdrawn-facts.ts';
 import { purgedPageFactsRepair } from './purged-page-facts.ts';
+import { purgedChangeReasonsRepair } from './purged-change-reasons.ts';
 import { conversationLabelsRepair } from './conversation-labels.ts';
 import { capturedFactsRepair } from './captured-facts.ts';
 import { agentSessionFactsRepair, agentSessionFlagArgs } from './agent-session-facts.ts';
@@ -85,6 +86,7 @@ import { movedPagesRepair, MOVED_PAGES_CONSENT_TEXT, MOVED_PAGES_PURGE_FUSE_HOUR
 import { receiptCompactionRepair } from './receipt-compaction.ts';
 import { aliasesRepair } from './aliases.ts';
 import { renameIdentityRepair, RENAME_IDENTITY_CONSENT_TEXT } from './rename-identity.ts';
+import { slugSpellingRepair, SLUG_SPELLING_CONSENT_TEXT } from './slug-spelling.ts';
 import { overwrittenEditsRepair } from './overwritten-edits.ts';
 import { missingTablesRepair } from './missing-tables.ts';
 import { urlCloneFencesRepair } from './url-clone-fences.ts';
@@ -272,6 +274,20 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'exists. Rows of a page the purge ledger records are evidenced; rows of a page gone with no purge record (a retention purge, or a rename that did '
       + 'not carry its facts) are retired only with --include-ambiguous; withdrawn, superseded and referenced rows are never touched. Preview-bound: '
       + '--apply --expect <hash> --yes expires exactly the previewed rows; a row that changed since reports changed_since_preview. Database-only; runs only when named.',
+  },
+  'purged-change-reasons': {
+    handler: purgedChangeReasonsRepair, embeds: 'none', checks: [], explicit_only: true, preview_bound: true, consent: 'destructive',
+    consentText: {
+      what: "Set the previewed page-history change reasons that quote a purged claim to '[purged]'",
+      why: 'The preview listed each stored change reason whose text is the Git reason of a (commit, path) a fact purge tombstoned; applying it redacts exactly those rows.',
+      risk: "Database rows only: page_versions.change_reason becomes '[purged]', as the purge itself writes; no page, file or Git commit changes. "
+        + 'A row whose reason changed since the preview is kept. The old text is not kept anywhere by this repair.',
+      user_message: "Redact the previewed page-history change reasons that still quote a purged claim? They become '[purged]'; pages, files and Git history are unchanged.",
+    },
+    summary: 'Redact change reasons that a sync stored after a fact purge tombstoned them (before the #8635 fix): a page version in a source whose '
+      + 'change_reason equals the Git reason trailer of a tombstoned (commit, path), re-read from the checkout. Rows whose source_path is that path are '
+      + 'evidenced; the same text under another path is kept unless --include-ambiguous. Preview-bound: --apply --expect <hash> --yes sets exactly the '
+      + "previewed rows to '[purged]'; a row that changed since reports changed_since_preview. Repo-less sources have nothing to check. Database-only; runs only when named.",
   },
   'conversation-labels': {
     handler: conversationLabelsRepair, embeds: 'none', checks: ['conversation_label_facts'], explicit_only: true, consent: 'destructive',
@@ -491,7 +507,7 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'writes each resolved result to a private artifact; --apply --expect <hash> applies exactly that set with request ids derived from the hash, '
       + 'resumable, per page repaired, refused or changed_since_preview. Backups are reconcile\'s own. A selected page whose canonical file is gone from the '
       + 'last commit: --prefer database recreates the file from the page, --prefer file soft-deletes exactly that page (mass-delete valve applies); a file '
-      + 'deleted only in the worktree is listed deletion_uncommitted and routed to committing the deletion or repair ghost-pages. --held [--side both|unknown|deleted '
+      + 'deleted only in the worktree is listed deletion_uncommitted and routed to restoring it (git checkout HEAD -- <path>) or committing the deletion and syncing. --held [--side both|unknown|deleted '
       + '[--state tombstone_edited|purged_differs|file_gone]] selects the source\'s held file_drift pages of one Decision (several sides or states are refused; '
       + '--side deleted needs --state): a deleted page whose file changed is restored and imported (--prefer file) or keeps its deletion while the file is '
       + 'removed by a coordinated commit (--prefer database); a purged page\'s file is imported as a new page or removed. --prefer database never overwrites a file '
@@ -588,6 +604,15 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
       + 'imports the new file onto it as an edit, retires the provisional page purge-style (soft-deleted, nothing hard-deleted) and records the '
       + 'old -> new redirect; fence rows that would collide refuse fact_rows_collide before anything is written. --close releases the purge hold and '
       + 'moves nothing. Carry is classic-only: on a managed source the preview states managed_remedy_unavailable, an apply refuses with it, and --close is the remedy. Runs only when named.',
+  },
+  'slug-spelling': {
+    handler: slugSpellingRepair, embeds: 'none', checks: ['legacy_slug_spellings'], explicit_only: true, preview_bound: true, consent: 'destructive',
+    consentText: SLUG_SPELLING_CONSENT_TEXT,
+    summary: 'Move pages stored under an older spelling of their name (capitals, or a decomposed Unicode name) to the normal slug, so a put and an import of the page work again. '
+      + 'Needs --source. The preview lists each page as move, needs_human (a page already holds the normal slug, or two stored spellings share it) or rename_file_first '
+      + '(the page\'s file in a checkout is not at the normal path: git mv it, then sync). --apply --expect <hash> --yes moves each movable page in its own transaction, '
+      + 'keeping its id, versions, tags, timeline, links, facts and attachments; the old spelling keeps resolving through an alias. A change since the preview refuses '
+      + 'changed_since_preview. Classic brains only: a managed brain refuses managed_remedy_unavailable and needs a person. Runs only when named.',
   },
   'overwritten-edits': {
     handler: overwrittenEditsRepair, embeds: 'effect', checks: ['sync_overwritten_db_edits'], explicit_only: true, preview_bound: true,

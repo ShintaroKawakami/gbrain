@@ -46,7 +46,7 @@ export const EXACT_DEFAULT_SECONDS = 30;
 export const EXACT_MAX_SECONDS = 120;
 export const EXACT_MAX_PHRASE_CHARS = 500;
 export const EXACT_SNIPPETS_PER_PAGE = 3;
-const SNIPPET_CONTEXT = 80;
+export const EXACT_SNIPPET_CONTEXT = 80;
 const BATCH_PAGES = 2000;
 const GAP_SAMPLE = 20;
 
@@ -59,6 +59,8 @@ export interface ExactScanOpts {
   sourceIds?: string[];
   types?: string[];
   slugPrefix?: string;
+  /** More prefixes searched with `slugPrefix` (one name stored under another spelling). */
+  slugPrefixAlso?: string[];
   excludeSlugPrefixes: string[];
   excludePrivate: boolean;
   remote: boolean;
@@ -119,7 +121,7 @@ export function buildExactBatchStatement(opts: ExactScanOpts, after: number, bat
   const limitP = add(batchPages);
   const flags = opts.caseSensitive ? "''" : "'i'";
   const re = add(pattern.regex);
-  const snippetRe = add('.{0,' + SNIPPET_CONTEXT + '}' + pattern.regex + '.{0,' + SNIPPET_CONTEXT + '}');
+  const snippetRe = add('.{0,' + EXACT_SNIPPET_CONTEXT + '}' + pattern.regex + '.{0,' + EXACT_SNIPPET_CONTEXT + '}');
   const like = add('%' + escapeLikePattern(pattern.longest) + '%');
   const op = opts.caseSensitive ? '~' : '~*';
   const likeOp = opts.caseSensitive ? 'LIKE' : 'ILIKE';
@@ -133,7 +135,8 @@ export function buildExactBatchStatement(opts: ExactScanOpts, after: number, bat
   if (opts.sourceIds?.length) pageFilters.push('p.source_id = ANY(' + add(opts.sourceIds) + '::text[])');
   else if (opts.sourceId) pageFilters.push('p.source_id = ' + add(opts.sourceId));
   if (opts.types?.length) pageFilters.push('p.type = ANY(' + add(opts.types) + '::text[])');
-  if (opts.slugPrefix) pageFilters.push('p.slug LIKE ' + add(escapeLikePattern(opts.slugPrefix) + '%') + " ESCAPE '\\'");
+  if (opts.slugPrefix && opts.slugPrefixAlso?.length) pageFilters.push('p.slug LIKE ANY(' + add([opts.slugPrefix, ...opts.slugPrefixAlso].map(prefix => escapeLikePattern(prefix) + '%')) + '::text[])');
+  else if (opts.slugPrefix) pageFilters.push('p.slug LIKE ' + add(escapeLikePattern(opts.slugPrefix) + '%') + " ESCAPE '\\'");
   if (opts.excludePrivate) pageFilters.push(privatePagesFilterForCaller('p'));
   if (opts.minTrust) pageFilters.push(pageEligibleSql('p', { floor: opts.minTrust }));
   const hardExclude = buildHardExcludeClause('p.slug', opts.excludeSlugPrefixes);

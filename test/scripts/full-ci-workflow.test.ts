@@ -45,7 +45,7 @@ const step = (job: Job, name: string) => job.steps!.find(s => s.name === name)!;
 const bash = (script: string, env: Record<string, string>, cwd = root) =>
   spawnSync('bash', ['-c', script], { cwd, encoding: 'utf8', env: { PATH: process.env.PATH, ...env } });
 
-const CHEAP = ['changes', 'cheap-tier', 'dependency-audit', 'enumeration-census-tests', 'executed-receipts', 'gitleaks', 'security-regressions', 'stress-changed-tests', 'typecheck', 'verify'];
+const CHEAP = ['changes', 'cheap-tier', 'dependency-audit', 'enumeration-census-tests', 'executed-receipts', 'gitleaks', 'security-regressions', 'stress-changed-tests', 'typecheck', 'unit-suite-gate', 'verify'];
 const FULL_ONLY = ['serial-tests', 'slow-brainbench-e2e', 'brainbench', 'slow-entity-resolve-perf', 'test', 'admin-browser',
   'shared-skills-compatibility', 'coverage-report', 'test-status', 'full-suite'];
 
@@ -79,7 +79,7 @@ describe('full CI on pull requests', () => {
   // waits for its other needs to succeed.
   test('Dynamic CI skips a gated pull-request lane only on an exact false verdict and never filters another event', () => {
     const gated = Object.keys(unit.jobs['dynamic-ci']!.outputs!).sort();
-    expect(gated).toEqual(['enumeration-census-tests', 'native-locks', 'persistence-validation', 'security-regressions', 'stress-changed-tests']);
+    expect(gated).toEqual(['enumeration-census-tests', 'native-locks', 'security-regressions', 'stress-changed-tests']);
     const selected = { 'native-scope': 'primary', convergence: 'run' };
     const all = runs(unit, { event: 'pull_request', outputs: selected });
     for (const verdict of ['', 'true']) {
@@ -96,6 +96,30 @@ describe('full CI on pull requests', () => {
       expect(runs(unit, { event: 'push', changes: 'failure' }), job).not.toContain(job);
       expect(runs(unit, { event: 'pull_request', outputs: selected, changes: 'failure' }), job).not.toContain(job);
     }
+  });
+
+  // persistence-validation.yml and tla-spec.yml carry their own filter jobs: in Learning mode (an empty or 'true'
+  // verdict) every lane runs, only an exact 'false' skips one lane, and every other event skips the filter and runs every lane.
+  test('the persistence and TLA+ workflows gate each lane on its own verdict and never filter another event', () => {
+    for (const [name, gated] of [['persistence-validation.yml', ['convergence', 'crash-robot']], ['tla-spec.yml', ['tla']]] as const) {
+      const w = workflow(name);
+      expect(Object.keys(w.jobs['dynamic-ci']!.outputs!).sort(), name).toEqual([...gated]);
+      const all = runs(w, { event: 'pull_request' });
+      for (const job of gated) expect(all, name + ': ' + job).toContain(job);
+      for (const verdict of ['', 'true']) expect(runs(w, { event: 'pull_request', verdicts: Object.fromEntries(gated.map(job => [job, verdict])) }), name + ' ' + verdict).toEqual(all);
+      for (const job of gated) expect(runs(w, { event: 'pull_request', verdicts: { [job]: 'false' } }), name + ': ' + job).toEqual(all.filter(n => n !== job));
+      for (const event of ['push', 'schedule', 'workflow_dispatch']) {
+        expect(Boolean(evaluate(w.jobs['dynamic-ci']!.if!, { event })), name + ' ' + event).toBe(false);
+        for (const job of gated) expect(runs(w, { event }), name + ' ' + event + ': ' + job).toContain(job);
+      }
+    }
+    expect(runs(workflow('persistence-validation.yml'), { event: 'pull_request', inputs: { convergence: 'skip' } })).not.toContain('convergence');
+    expect(Object.keys(workflow('harness-check.yml').jobs)).not.toContain('dynamic-ci');
+    const caller = unit.jobs['persistence-validation'] as Job & { secrets?: Record<string, string> };
+    expect(caller.needs).not.toContain('dynamic-ci');
+    expect(caller.secrets).toEqual({ TRUNK_API_TOKEN: '${{ secrets.TRUNK_API_TOKEN }}' });
+    expect(step(unit.jobs['cheap-tier']!, 'Aggregate the cheap tier').env!).not.toHaveProperty('DCI_PERSISTENCE');
+    expect(workflow('persistence-validation.yml').jobs['dynamic-ci']).toMatchObject({ 'continue-on-error': true });
   });
 
   test('a pull-request run never reports test-status or full-suite under any name', () => {
@@ -134,6 +158,11 @@ describe('full CI on pull requests', () => {
         tree: git('rev-parse', 'HEAD^{tree}').stdout.trim(), sha: git('rev-parse', 'HEAD').stdout.trim(),
         workflow: 'Test', event: 'workflow_dispatch', run_id: 42, run_attempt: 2, profile: 'full',
       });
+      // On a runner, tree.json records RUNNER_OS: a run profile with `os` refuses a run that records none.
+      const onRunner = bash(`bash ${join(root, 'scripts/ci-full-suite-tree.sh')}`,
+        { ARTIFACT_DIR: out, RUN_ID: '42', RUN_ATTEMPT: '2', WORKFLOW: 'Test', EVENT: 'workflow_dispatch', RUNNER_OS: 'Linux', GITHUB_STEP_SUMMARY: join(dir, 'summary.md') }, dir);
+      expect(onRunner.status, onRunner.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(join(out, 'tree.json'), 'utf8')).os).toBe('Linux');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -211,7 +240,7 @@ describe('full CI on pull requests', () => {
     expect(dispatcher.on.pull_request).toEqual({ branches: ['master'], types: ['labeled', 'synchronize', 'reopened'] });
     expect(dispatcher.permissions).toEqual({});
     const job = dispatcher.jobs.dispatch!;
-    expect(job.permissions).toEqual({ actions: 'write', contents: 'read' });
+    expect(job.permissions).toEqual({ actions: 'write', contents: 'read', 'pull-requests': 'write' });
     const own = { head: { repo: { full_name: 'acme-example/gbrain' } } };
     const fork = { head: { repo: { full_name: 'fork-a/gbrain' } } };
     const labels = (...names: string[]) => names.map(name => ({ name }));
@@ -229,6 +258,66 @@ describe('full CI on pull requests', () => {
     expect(run).toContain('gh workflow run test.yml -R "$REPO" --ref "$BRANCH"');
     expect(run).toContain('gh workflow run e2e.yml -R "$REPO" --ref "$BRANCH"');
     expect(run.indexOf('"$current" != "$HEAD_SHA"')).toBeLessThan(run.indexOf('gh workflow run'));
+  });
+
+  // The label is a per-head request: it comes off once both dispatches were accepted, stays on (visibly) when either was
+  // refused, and a maintainer adding it again at a later head fires again.
+  describe('full-ci label lifetime', () => {
+    const job = dispatcher.jobs.dispatch!;
+    const own = { head: { repo: { full_name: 'acme-example/gbrain' } } };
+    const dispatch = (opts: { refuse?: string; moved?: boolean; removal?: number } = {}) => {
+      const dir = mkdtempSync(join(tmpdir(), 'gbrain-full-ci-'));
+      try {
+        const log = join(dir, 'gh.log');
+        writeFileSync(join(dir, 'gh'), [
+          '#!/usr/bin/env bash',
+          `echo "$*" >> ${log}`,
+          `if [ "$1 $2" = "api repos/acme-example/gbrain/commits/heads/feature" ]; then echo ${opts.moved ? 'b'.repeat(40) : 'a'.repeat(40)}; exit 0; fi`,
+          `if [ "$1 $2 $3" = "workflow run ${opts.refuse ?? 'none'}" ]; then echo "HTTP 422: refused" >&2; exit 1; fi`,
+          ...(opts.removal ? [`if [ "$1 $2 $3" = "api -X DELETE" ]; then echo "gh: refused (HTTP ${opts.removal})" >&2; exit 1; fi`] : []),
+          'exit 0',
+        ].join('\n'), { mode: 0o755 });
+        const result = spawnSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', job.steps![0]!.run!], { encoding: 'utf8', env: {
+          PATH: `${dir}:${process.env.PATH}`, GH_TOKEN: 'x', REPO: 'acme-example/gbrain', BRANCH: 'feature', HEAD_SHA: 'a'.repeat(40), PR: '42',
+          GITHUB_STEP_SUMMARY: join(dir, 'summary.md') } });
+        return { status: result.status, calls: readFileSync(log, 'utf8').trim().split('\n') };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const removal = 'api -X DELETE repos/acme-example/gbrain/issues/42/labels/full-ci --silent';
+
+    test('the label comes off only after both Test and E2E dispatches were accepted', () => {
+      const ok = dispatch();
+      expect(ok.status).toBe(0);
+      expect(ok.calls.slice(1)).toEqual(['workflow run test.yml -R acme-example/gbrain --ref feature', 'workflow run e2e.yml -R acme-example/gbrain --ref feature', removal]);
+    });
+
+    test.each(['test.yml', 'e2e.yml'])('a refused %s dispatch fails the job and leaves the label on', workflow => {
+      const refused = dispatch({ refuse: workflow });
+      expect(refused.status).not.toBe(0);
+      expect(refused.calls).not.toContain(removal);
+    });
+
+    test('a label already removed (404) leaves the job green; any other removal error fails it', () => {
+      const gone = dispatch({ removal: 404 });
+      expect(gone.status).toBe(0);
+      expect(gone.calls).toContain(removal);
+      expect(dispatch({ removal: 403 }).status).not.toBe(0);
+    });
+
+    test('a head that moved after the event dispatches nothing and keeps the label for the push that moved it', () => {
+      const moved = dispatch({ moved: true });
+      expect(moved.status).toBe(0);
+      expect(moved.calls).toHaveLength(1);
+    });
+
+    test('once removed, a later push does not fire; the label added again at a later head does', () => {
+      const labels = (...names: string[]) => names.map(name => ({ name }));
+      expect(Boolean(evaluate(job.if!, { event: 'pull_request', action: 'synchronize', pr: { ...own, labels: labels() } }))).toBe(false);
+      expect(Boolean(evaluate(job.if!, { event: 'pull_request', action: 'labeled', label: 'full-ci', pr: { ...own, labels: labels('full-ci') } }))).toBe(true);
+      expect(dispatch().calls).toContain(removal);
+    });
   });
 
   describe('cheap-tier aggregator', () => {
@@ -268,8 +357,7 @@ describe('full CI on pull requests', () => {
       expect(aggregate({ ...green, PERSISTENCE: 'cancelled' }).status).toBe(1);
     });
 
-    test.each([['SECURITY', 'DCI_SECURITY', {}], ['STRESS', 'DCI_STRESS', {}], ['NATIVE', 'DCI_NATIVE', { NATIVE_SCOPE: 'primary' }],
-      ['PERSISTENCE', 'DCI_PERSISTENCE', { CONVERGENCE: 'run' }]] as const)('%s may skip only when Trunk Dynamic CI said false', (lane, verdict, selected) => {
+    test.each([['SECURITY', 'DCI_SECURITY', {}], ['STRESS', 'DCI_STRESS', {}], ['NATIVE', 'DCI_NATIVE', { NATIVE_SCOPE: 'primary' }]] as const)('%s may skip only when Trunk Dynamic CI said false', (lane, verdict, selected) => {
       expect(aggregate({ ...green, ...selected, [lane]: 'skipped', [verdict]: 'false' }).status).toBe(0);
       for (const other of ['', 'true']) expect(aggregate({ ...green, ...selected, [lane]: 'skipped', [verdict]: other }).status, other).toBe(1);
       expect(aggregate({ ...green, ...selected, [lane]: 'failure', [verdict]: 'false' }).status).toBe(1);
@@ -277,7 +365,7 @@ describe('full CI on pull requests', () => {
 
     test('a failed changes job fails the tier even when Trunk said false for every gated lane', () => {
       expect(aggregate({ ...green, CHANGES: 'failure', NATIVE: 'skipped', NATIVE_SCOPE: '', PERSISTENCE: 'skipped', CONVERGENCE: '',
-        DCI_NATIVE: 'false', DCI_PERSISTENCE: 'false', SECURITY: 'skipped', DCI_SECURITY: 'false', STRESS: 'skipped', DCI_STRESS: 'false' }).status).toBe(1);
+        DCI_NATIVE: 'false', SECURITY: 'skipped', DCI_SECURITY: 'false', STRESS: 'skipped', DCI_STRESS: 'false' }).status).toBe(1);
     });
   });
 });

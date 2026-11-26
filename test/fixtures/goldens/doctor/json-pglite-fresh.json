@@ -220,7 +220,7 @@
           "details": {
             "audience": "personal",
             "audience_reasons": [
-              "no shared declaration; 0 non-automation client(s) active in 30d"
+              "no shared declaration; 0 non-automation client(s) active in 30d, 0 people (0 member(s), 0 unbound client(s))"
             ],
             "backstop_visibility": "private",
             "capture_lanes": {
@@ -344,7 +344,7 @@
             },
             "why": "Read-only: lists every gbrain process on this host with the restart each one needs and the steps the upgrade cannot take."
           },
-          "message": "gbrain upgrade refuses on this host: serve pid 17125 (build not recorded) runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: move the install at /Users/shintaro/mcp-servers/gbrain-mcp (v0.60.641.0) to the release being installed: for a git clone, `git -C /Users/shintaro/mcp-servers/gbrain-mcp fetch --tags origin && git -C /Users/shintaro/mcp-servers/gbrain-mcp checkout vpending && bun install --cwd /Users/shintaro/mcp-servers/gbrain-mcp`; otherwise start this process from the upgraded install instead; then run the upgrade again. worker pid 81831 (build not recorded) runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: move the install at /Users/shintaro/mcp-servers/gbrain-mcp (v0.60.641.0) to the release being installed: for a git clone, `git -C /Users/shintaro/mcp-servers/gbrain-mcp fetch --tags origin && git -C /Users/shintaro/mcp-servers/gbrain-mcp checkout vpending && bun install --cwd /Users/shintaro/mcp-servers/gbrain-mcp`; otherwise start this process from the upgraded install instead; then run the upgrade again. (mode=notify; channel=stable (config)).",
+          "message": "gbrain upgrade refuses on this host: serve pid 16140 (build not recorded) runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: move the install at /Users/shintaro/mcp-servers/gbrain-mcp (v0.60.734.0) to the release being installed: for a git clone, `git -C /Users/shintaro/mcp-servers/gbrain-mcp fetch --tags origin && git -C /Users/shintaro/mcp-servers/gbrain-mcp checkout vpending && bun install --cwd /Users/shintaro/mcp-servers/gbrain-mcp`; otherwise start this process from the upgraded install instead; then run the upgrade again. worker pid 40090 (build not recorded) runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: move the install at /Users/shintaro/mcp-servers/gbrain-mcp (v0.60.734.0) to the release being installed: for a git clone, `git -C /Users/shintaro/mcp-servers/gbrain-mcp fetch --tags origin && git -C /Users/shintaro/mcp-servers/gbrain-mcp checkout vpending && bun install --cwd /Users/shintaro/mcp-servers/gbrain-mcp`; otherwise start this process from the upgraded install instead; then run the upgrade again. (mode=notify; channel=stable (config)).",
           "name": "self_upgrade_health",
           "status": "warn"
         },
@@ -509,6 +509,15 @@
           "elapsed_ms": "<volatile>",
           "message": "No agent dead ends in the last 7 days (0 non-success event(s) logged).",
           "name": "agent_contract",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
+          "elapsed_ms": "<volatile>",
+          "message": "Not applicable: Rust engine shadow mode is off for this brain.",
+          "name": "rust_engine_addon",
+          "readiness_state": "not_applicable",
+          "severity": "info",
           "status": "ok"
         },
         {
@@ -1239,6 +1248,34 @@
         {
           "category": "brain",
           "elapsed_ms": "<volatile>",
+          "message": "Not applicable: this brain has no members (gbrain access member add <id>).",
+          "name": "access_pages_read_by_nobody",
+          "readiness_state": "not_applicable",
+          "severity": "info",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "elapsed_ms": "<volatile>",
+          "message": "Not applicable: this brain serves one person, so no source has to be shared with members.",
+          "name": "access_shared_source_unread",
+          "readiness_state": "not_applicable",
+          "severity": "info",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "count": 0
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No live token or OAuth client is bound to a disabled or removed member.",
+          "name": "access_disabled_member_credentials",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "elapsed_ms": "<volatile>",
           "message": "Not applicable: no attest credential reads named sources as the person (--attest-read person).",
           "name": "attest_read_shared_scope",
           "readiness_state": "not_applicable",
@@ -1271,6 +1308,23 @@
         {
           "category": "ops",
           "elapsed_ms": "<volatile>",
+          "message": "Skipped (PGLite has no row-level security, so every guard reads its ledgers in full)",
+          "name": "guard_ledger_checks",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
+          "details": {
+            "closed": false
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "Every owner-only delete trigger exists, so rows derived from a removed owner-only source stay owner-only",
+          "name": "owner_only_marks_triggers",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
+          "elapsed_ms": "<volatile>",
           "message": "Skipped (PGLite is always UTF8)",
           "name": "database_encoding",
           "status": "ok"
@@ -1285,14 +1339,14 @@
         {
           "category": "meta",
           "elapsed_ms": "<volatile>",
-          "message": "1394 column(s) verified against live schema",
+          "message": "1411 column(s) verified against live schema",
           "name": "schema_columns",
           "status": "ok"
         },
         {
           "category": "meta",
           "elapsed_ms": "<volatile>",
-          "message": "All 186 table(s) the applied migrations create exist.",
+          "message": "All 196 table(s) the applied migrations create exist.",
           "name": "schema_missing_tables",
           "status": "ok"
         },
@@ -2500,6 +2554,7 @@
             "behind": [],
             "docs": "docs/guides/conversation-archive.md#doctor",
             "enabled": true,
+            "enabled_by": "default",
             "harnesses": [
               {
                 "harness": "claude-code",
@@ -2545,6 +2600,7 @@
               }
             ],
             "held": [],
+            "reason": "on by default on a personal brain",
             "source_id": "conversations",
             "stale_days": 2
           },
@@ -2740,21 +2796,20 @@
             "actor": "agent",
             "argv": [
               "gbrain",
-              "export",
-              "--source",
-              "default",
-              "--dir",
-              "<BACKUP_DIR>/default",
+              "backup",
+              "create",
+              "--output",
+              "<BACKUP_FILE>",
               "--brain",
               "host"
             ],
-            "command": "gbrain export --source default --dir '<BACKUP_DIR>/default' --brain host",
+            "command": "gbrain backup create --output '<BACKUP_FILE>' --brain host",
             "consent": [],
-            "docs": "https://github.com/garrytan/gbrain/blob/master/docs/operations/backup-check.md",
+            "docs": "https://github.com/garrytan/gbrain/blob/master/docs/guides/in-agent-setup.md#6-back-up-the-complete-local-database",
             "inputs": [
               {
-                "how": "Ask the user where backups should live (a directory outside the brain, ideally synced or on another disk).",
-                "name": "BACKUP_DIR"
+                "how": "Ask the user for an absolute path to a new archive file, in an existing private directory outside the brain (ideally another disk).",
+                "name": "BACKUP_FILE"
               }
             ],
             "next": "run",
@@ -2770,7 +2825,7 @@
                 "host"
               ]
             },
-            "why": "Writes a Markdown copy of 'default' (pages and facts) to a directory outside the brain so it survives losing the database."
+            "why": "Writes a full snapshot of this PGLite brain (every source, page, fact, member, token and rule) to one archive outside the brain."
           },
           "message": "Not urgent yet: the brain holds 0 page(s)+fact(s) and is under 7 days old (backup coaching starts at 25 items or 7 days). 1 knowledge asset(s) lack verified recovery: default (not_a_git_repo). A source repo with a pushed git remote restores its Markdown files only, never DB-only pages, facts, config or credentials. Run `gbrain backup status` for each asset's fix command.",
           "name": "backup_coverage",
@@ -2904,6 +2959,13 @@
           "elapsed_ms": "<volatile>",
           "message": "System One is off (every decide slot is off; nothing is sent).",
           "name": "decide_health",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "elapsed_ms": "<volatile>",
+          "message": "The nightly cycle has not recorded anything it learned yet.",
+          "name": "learning_note",
           "status": "ok"
         },
         {
@@ -3442,6 +3504,36 @@
         {
           "category": "brain",
           "details": {
+            "items": [],
+            "total": 0
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "Every held write is tied to one page, or waits for its page to be created.",
+          "name": "write_gate_hold_ambiguous",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "by_source": {},
+            "complete": true,
+            "items": [],
+            "items_truncated": false,
+            "row_budget": 5000,
+            "scanned": 0,
+            "stranded": {
+              "no_page": 0,
+              "page_deleted": 0
+            }
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No held write is without a live page (0 held write(s) read).",
+          "name": "write_gate_holds_stranded",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
             "bad_config": [],
             "chars_limit": 4000,
             "chars_used": 0,
@@ -3644,6 +3736,19 @@
           "elapsed_ms": "<volatile>",
           "message": "No rename that lost its page identity is waiting for a disposition.",
           "name": "rename_identity_downgrades",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "by_source": [],
+            "count": 0,
+            "docs": "docs/guides/repair.md#slug-spelling",
+            "truncated": false
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No page is stored under an older spelling of its name.",
+          "name": "legacy_slug_spellings",
           "status": "ok"
         },
         {
@@ -3853,6 +3958,32 @@
         {
           "category": "brain",
           "details": {
+            "counts": {
+              "by_class": {
+                "clean": 0,
+                "conflict": 0,
+                "likely": 0,
+                "thin": 0,
+                "weak": 0
+              },
+              "by_kind": {
+                "conflict": 0,
+                "cross_source": 0,
+                "in_source": 0,
+                "thin": 0
+              },
+              "crowded_key_values": 0
+            },
+            "groups": []
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No likely duplicate person or company pages.",
+          "name": "entity_duplicates",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
             "docs": "docs/guides/write-refusals.md#file_database_drift",
             "sources": []
           },
@@ -3951,6 +4082,53 @@
           "elapsed_ms": "<volatile>",
           "message": "Every fact line on 0 facts page(s) carries a date.",
           "name": "facts_undated_lines",
+          "status": "ok"
+        },
+        {
+          "category": "brain",
+          "details": {
+            "backup": {
+              "backend": false,
+              "carried_by": "database_backup",
+              "last_failure": null,
+              "last_success": null
+            },
+            "by_rule": {},
+            "checkouts": [],
+            "docs": "docs/guides/secret-store.md#health-and-backups",
+            "entries": 0,
+            "keys": {
+              "current": null,
+              "escrow_exported": [],
+              "in_use": [],
+              "missing": [],
+              "origin": "none",
+              "present": []
+            },
+            "occurrences": 0,
+            "spooled": 0,
+            "unreferenced": 0
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "The secret store holds no entries.",
+          "name": "secret_store",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
+          "details": {
+            "entity_basis": "reserved_page",
+            "identifier_kinds": [],
+            "identifier_shared": 0,
+            "identifiers": 0,
+            "owner_member_set": false,
+            "person_types_unavailable": false,
+            "several_pages": false,
+            "unbound_google_sources": 0
+          },
+          "elapsed_ms": "<volatile>",
+          "message": "No owner identifier yet: set the owner member's email (gbrain access member set <id> --email <addr>) or connect a Google source. The owner page is memory/owner.",
+          "name": "owner_identity",
           "status": "ok"
         },
         {
@@ -4200,7 +4378,7 @@
           "category": "meta",
           "details": {
             "counts": {
-              "global": 18,
+              "global": 19,
               "mixed": 2,
               "source": 12
             },
@@ -4223,6 +4401,7 @@
               "facts_drain": "global",
               "fence_repair": "global",
               "grade_takes": "global",
+              "learning_derive": "global",
               "lint": "source",
               "orphans": "global",
               "patterns": "mixed",
@@ -4240,7 +4419,7 @@
             }
           },
           "elapsed_ms": "<volatile>",
-          "message": "Phase taxonomy: 12 source-scoped, 18 brain-global, 2 mixed. Source-safe: [lint, backlinks, sync, extract, extract_facts, extract_atoms, recompute_emotional_weight, consolidate, propose_takes, conversation_facts_backfill, enrich_thin, schema-suggest]. Brain-global: [fence_repair, content_repair, unindexed_files, resolve_symbol_edges, synthesize_concepts, grade_takes, calibration_profile, edge_contradictions, claim_conflicts, drift, standing_questions, chronicle, facts_drain, skillopt, embed, orphans, purge, bookkeeping_gc]. Mixed: [synthesize, patterns].",
+          "message": "Phase taxonomy: 12 source-scoped, 19 brain-global, 2 mixed. Source-safe: [lint, backlinks, sync, extract, extract_facts, extract_atoms, recompute_emotional_weight, consolidate, propose_takes, conversation_facts_backfill, enrich_thin, schema-suggest]. Brain-global: [fence_repair, content_repair, unindexed_files, resolve_symbol_edges, synthesize_concepts, grade_takes, calibration_profile, edge_contradictions, claim_conflicts, drift, standing_questions, chronicle, facts_drain, skillopt, embed, orphans, learning_derive, purge, bookkeeping_gc]. Mixed: [synthesize, patterns].",
           "name": "cycle_phase_scope",
           "status": "ok"
         },
@@ -4409,7 +4588,7 @@
             },
             "why": "Read-only: lists every gbrain process on this host with the restart each one needs and the steps the upgrade cannot take."
           },
-          "fix": "gbrain upgrade refuses on this host: serve pid 17125 (build not recorded) runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: move the install at /Users/shintaro/mcp-servers/gbrain-mcp (v0.60.641.0) to the release being installed: for a git clone, `git -C /Users/shintaro/mcp-servers/gbrain-mcp fetch --tags origin && git -C /Users/shintaro/mcp-servers/gbrain-mcp checkout vpending && bun install --cwd /Users/shintaro/mcp-servers/gbrain-mcp`; otherwise start this process from the upgraded install instead; then run the upgrade again. worker pid 81831 (build not recorded) runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: move the install at /Users/shintaro/mcp-servers/gbrain-mcp (v0.60.641.0) to the release being installed: for a git clone, `git -C /Users/shintaro/mcp-servers/gbrain-mcp fetch --tags origin && git -C /Users/shintaro/mcp-servers/gbrain-mcp checkout vpending && bun install --cwd /Users/shintaro/mcp-servers/gbrain-mcp`; otherwise start this process from the upgraded install instead; then run the upgrade again. (mode=notify; channel=stable (config)).",
+          "fix": "gbrain upgrade refuses on this host: serve pid 16140 (build not recorded) runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: move the install at /Users/shintaro/mcp-servers/gbrain-mcp (v0.60.734.0) to the release being installed: for a git clone, `git -C /Users/shintaro/mcp-servers/gbrain-mcp fetch --tags origin && git -C /Users/shintaro/mcp-servers/gbrain-mcp checkout vpending && bun install --cwd /Users/shintaro/mcp-servers/gbrain-mcp`; otherwise start this process from the upgraded install instead; then run the upgrade again. worker pid 40090 (build not recorded) runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: move the install at /Users/shintaro/mcp-servers/gbrain-mcp (v0.60.734.0) to the release being installed: for a git clone, `git -C /Users/shintaro/mcp-servers/gbrain-mcp fetch --tags origin && git -C /Users/shintaro/mcp-servers/gbrain-mcp checkout vpending && bun install --cwd /Users/shintaro/mcp-servers/gbrain-mcp`; otherwise start this process from the upgraded install instead; then run the upgrade again. (mode=notify; channel=stable (config)).",
           "name": "self_upgrade_health",
           "status": "warn",
           "tier": "symptom"

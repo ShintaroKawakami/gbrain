@@ -365,7 +365,8 @@ function hash12(value: string): string {
 
 /** Minimal config slice the engine-uniform path resolvers key on (loadConfig's shape). */
 export interface IpcPathConfig {
-  engine?: 'postgres' | 'pglite';
+  /** `rust` keys like PGLite: one store directory, sockets inside it (rust-engine/owner-ipc/). */
+  engine?: 'postgres' | 'pglite' | 'rust';
   database_path?: string;
   database_url?: string;
 }
@@ -531,8 +532,9 @@ function secretMatches(candidate: unknown, expected: string): boolean {
 export async function resolveViaIpc(
   socketPath: string,
   req: ResolveRequest,
+  opts: { timeoutMs?: number } = {},
 ): Promise<PointerBlock | null | typeof IPC_UNAVAILABLE> {
-  const resp = await roundTrip(socketPath, JSON.stringify(req), CLIENT_TIMEOUT_MS);
+  const resp = await roundTrip(socketPath, JSON.stringify(req), opts.timeoutMs ?? CLIENT_TIMEOUT_MS);
   if (resp === IPC_UNAVAILABLE) return IPC_UNAVAILABLE;
   if (resp && (resp as ResolveResponse).ok) return (resp as ResolveResponse).block ?? null;
   return IPC_UNAVAILABLE;

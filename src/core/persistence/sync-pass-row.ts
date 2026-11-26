@@ -56,6 +56,8 @@ export interface PassConverged {
    * any an earlier stamp carried that has not committed). Until each effect commits the source is not idle; absent: none.
    */
   writeback?: string[];
+  /** LC-1: committed-mode paths a delete's uncommitted removal settled, with their disk stat; null overflowed (no idle). Absent: none. */
+  removal_pending?: Array<{ path: string; stat: string }> | null;
   parser_fp: string;
   pack: string | null;
   selection_fp: string;
@@ -129,6 +131,8 @@ export interface ManagedSyncPassValue {
      * step ends; status names it for a pass that stopped there.
      */
     step?: { name: 'level_read' | 'drift_history'; at: string; done?: number; total?: number };
+    /** GST-3534: the commits the pass's rounds read, and how many rounds read `I⋈P` whole or patched the previous read. */
+    levels?: { heads: number; whole: number; patched: number };
   };
 }
 
@@ -164,9 +168,11 @@ export const passReadClock = (row: PassRow): number => row.read_at ? Date.parse(
 /**
  * #7982: a pass that ended on a transient stop (`unrecordedStop`: a statement timeout, a lost connection, write back-pressure, a refresh fence).
  * One that recurs every pass stops every pass, so these endings build the abandoned streak as a pass left open does.
+ * GST-2869: so does a pass a termination signal stopped (`terminated`), as it did when it was left open, in every reader:
+ * the next pin's carry, abandonedPasses and sync-blocked.
  */
 export const transientEnding = (telemetry: Pick<ManagedSyncPassValue['telemetry'], 'outcome' | 'stop_reason'>): boolean =>
-  telemetry.outcome === 'resumable' && telemetry.stop_reason === 'transient';
+  telemetry.outcome === 'resumable' && (telemetry.stop_reason === 'transient' || telemetry.stop_reason === 'terminated');
 
 type Exec = Pick<BrainEngine, 'executeRaw'>;
 const iso = (value: Date | string) => new Date(value).toISOString();

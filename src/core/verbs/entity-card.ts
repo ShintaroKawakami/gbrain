@@ -12,9 +12,12 @@
  * transcript/note containers; otherwise ties break on GREATEST(updated_at,
  * last_retrieved_at) — "last_touched" is the card's OUTPUT name, not a
  * column. Multi-hit → best match wins, runners-up land in `suggestions`.
- * Miss → `found: false` + keyword near-misses with create_safety hints. NEVER
- * throws for data reasons; each arm is guarded so a pre-page_aliases brain
- * still resolves via arm 2 (same posture as the shipped reflex).
+ * Miss → `found: false` + keyword near-misses with create_safety hints. A
+ * missing name never throws; a pre-page_aliases brain still resolves via arm 2
+ * (same posture as the shipped reflex). A lookup read that FAILS is never read
+ * as a miss: it reports `entity_lookup_failed` (a DegradedStageEntry, the
+ * shape search uses) beside whatever the remaining arms found, and the Rust
+ * engine's typed capability refusal passes through untouched.
  *
  * Privacy: `summary` runs through safeSynopsis (the get_page fence boundary);
  * facts respect visibility for remote callers (world-only).
@@ -27,17 +30,19 @@ import type { ReadEligibility } from '../eligibility/policy.ts';
 import { trustFields } from '../eligibility/labels.ts';
 import { isQuarantined } from '../quarantine.ts';
 import { loadPageTrust } from '../eligibility/stamp.ts';
+import { storedEdge, worldLinkContexts } from '../eligibility/fence-overlay.ts';
 import { projectionEligibleSql } from '../eligibility/sql.ts';
 import { loadRelationshipNotes, relationshipNoteKey } from '../link-relationship-notes.ts';
 import { normalizeAlias } from '../search/alias-normalize.ts';
 import { isIdentityEntity, slugify } from '../entities/resolve.ts';
-import { nameVariantsEnabled, readPossibleDuplicates, resolveNameVariant, type PossibleDuplicate } from './entity-variants.ts';
+import { lookupReadFailed, nameVariantsEnabled, readPossibleDuplicates, resolveNameVariant, type PossibleDuplicate } from './entity-variants.ts';
 import { readTextMentions, type TextMentions } from './entity-text-mentions.ts';
 import type { NameMatchKind } from '../entities/name-variants.ts';
 import { exactMatchPreference } from '../entities/exact-match-preference.ts';
 import { safeSynopsis } from '../context/retrieval-reflex.ts';
 import { stampEvidence, markKeywordHits } from '../search/evidence.ts';
-import type { Link, SearchResult } from '../types.ts';
+import type { DegradedStageEntry, Link, SearchResult } from '../types.ts';
+import { isMissingSchemaObject } from '../utils.ts';
 import type { NewerMentions } from '../mentions/newer-mentions.ts';
 import { linkableTypesFor, loadLinkableTypes, loadSourcePack, readMentionPolicy, type MentionPolicy, type PackTypes } from '../mentions/policy.ts';
 import { readMentionCoverage, type MentionCoverage } from '../mentions/coverage.ts';
@@ -46,7 +51,9 @@ import { readRowReferences, referencesUnavailableNotice, type RecordGroupView, t
 import type { Notice } from '../agent-output.ts';
 import { readCardIdentity, type CardIdentity } from './entity-card-identity.ts';
 import { factEntitySlugs } from '../mentions/siblings.ts';
+import { applySlotEnds } from '../search/slot-ends.ts';
 import { boundedBodyPrefixSql, overlaidBoundedRows } from '../page-window/bounded-lead.ts';
+import { rethrowCapabilityRefusal } from '../engine-capability-refusal.ts';
 
 const EDGE_CAP = 10;
 const OPEN_THREADS_CAP = 3;
@@ -195,6 +202,8 @@ export interface EntityCardResult {
   ambiguous?: true;
   /** #6723: the source of the resolved page (absent on a miss). */
   source_id?: string;
+  /** A lookup read failed (`entity_lookup_failed`): a miss or a hit here is not proof the entity is absent or the best match. */
+  degraded?: DegradedStageEntry[];
   /**
    * #6724: the full fact rows the card read (newest first, visibility and
    * eligibility already applied), for context_pack's `entity_facts`. Never part
@@ -205,6 +214,11 @@ export interface EntityCardResult {
 
 export interface EntityCardOpts {
   remote: boolean;
+  /**
+   * GST-2957: the reader's OperationContext.remote, for the edges' stored link contexts (worldLinkContexts). context_pack
+   * builds cards with `remote` set for any caller without include_private; absent, `remote` stands for it.
+   */
+  readerRemote?: boolean;
   /**
    * #6723: the sources to resolve the name in, probed in this order (home
    * first); the first source with a hit owns the card and every read behind
@@ -299,13 +313,13 @@ export type EntityCandidates =
   | { kind: 'miss'; suggestions: EntitySuggestion[]; ambiguous?: true }
   | { kind: 'withheld' };
 
-/** Resolve a trimmed, non-empty name to its candidates. Every arm is fail-soft. */
+/** Resolve a trimmed, non-empty name to its candidates. A failed read is reported through `opts.degraded`, never as a miss. */
 export async function selectEntityCandidates(
   engine: BrainEngine,
   sourceId: string,
   trimmed: string,
   scope: EntityLookupScope,
-  opts: { omitQuarantined?: boolean; suggest?: boolean; variants?: boolean } = {},
+  opts: { omitQuarantined?: boolean; suggest?: boolean; variants?: boolean; degraded?: DegradedStageEntry[] } = {},
 ): Promise<EntityCandidates> {
   const { privatePagesFilterForCaller } = await import('../search/private-visibility.ts');
   // Predicate text lives ONCE (private-visibility.ts) — both card queries
@@ -333,8 +347,12 @@ export async function selectEntityCandidates(
     try {
       const aliasMap = await engine.resolveAliases([norm], { sourceId });
       for (const hit of aliasMap.get(norm) ?? []) consider(hit.slug, ARM_ALIAS);
-    } catch {
-      /* no page_aliases table — degrade to arm 2 [E3] */
+    } catch (err) {
+      // An engine that cannot serve the read refuses the lookup; degrading would print "not found".
+      rethrowCapabilityRefusal(err);
+      // Only the pre-migration brain (no page_aliases table yet) has an empty alias arm by design [E3]; any other
+      // failure leaves the alias arm unread and says so.
+      if (!isMissingSchemaObject(err, 'table', 'page_aliases')) lookupReadFailed(err, opts.degraded);
     }
   }
 
@@ -352,7 +370,9 @@ export async function selectEntityCandidates(
              OR slug LIKE $4 )${privatePredicate}`,
       [sourceId, titleLc, exactSlugs, `%/${slug || trimmed}`],
     );
-  } catch {
+  } catch (err) {
+    rethrowCapabilityRefusal(err);
+    lookupReadFailed(err, opts.degraded);
     rows = [];
   }
   const rowBySlug = new Map<string, CardPageRow>();
@@ -373,8 +393,10 @@ export async function selectEntityCandidates(
         [sourceId, missing],
       );
       for (const r of extra) rowBySlug.set(r.slug, r);
-    } catch {
-      /* stale alias rows — drop */
+    } catch (err) {
+      rethrowCapabilityRefusal(err);
+      // A stale alias row hydrates to no page (zero rows, no error, dropped above); a read that throws is a failure.
+      lookupReadFailed(err, opts.degraded);
     }
   }
 
@@ -404,7 +426,7 @@ export async function selectEntityCandidates(
     const variants = opts.variants && await nameVariantsEnabled(engine)
       ? await resolveNameVariant<CardPageRow>(engine, sourceId, trimmed, {
         selectColumns: CARD_ROW_COLUMNS, privatePredicate, entityTypes: scope.entityTypes, omitQuarantined: opts.omitQuarantined,
-        retirementPrivacy: scope.excludePrivate ? ` AND ${privatePagesFilterForCaller('p')}` : '' })
+        retirementPrivacy: scope.excludePrivate ? ` AND ${privatePagesFilterForCaller('p')}` : '', degraded: opts.degraded })
       : { matches: [] };
     const variantSuggestions = (matches: typeof variants.matches): EntitySuggestion[] => matches.map(m => ({
       slug: m.row.slug, title: m.row.title ?? m.row.slug, create_safety: 'exists', source_id: sourceId }));
@@ -449,7 +471,7 @@ export async function selectAcrossSources(
   sources: readonly string[],
   trimmed: string,
   remote: boolean,
-  opts: { omitQuarantined?: boolean; scopes?: Map<string, Promise<EntityLookupScope>>; variants?: boolean } = {},
+  opts: { omitQuarantined?: boolean; scopes?: Map<string, Promise<EntityLookupScope>>; variants?: boolean; degraded?: DegradedStageEntry[] } = {},
 ): Promise<{ sourceId: string; scope: EntityLookupScope; selected: EntityCandidates }> {
   let first: { sourceId: string; scope: EntityLookupScope; selected: EntityCandidates } | undefined;
   const variantHits: Array<{ sourceId: string; scope: EntityLookupScope; selected: Extract<EntityCandidates, { kind: 'hit' }> }> = [];
@@ -457,7 +479,7 @@ export async function selectAcrossSources(
   for (const sourceId of sources) {
     if (opts.scopes && !opts.scopes.has(sourceId)) opts.scopes.set(sourceId, entityLookupScope(engine, sourceId, remote));
     const scope = await (opts.scopes?.get(sourceId) ?? entityLookupScope(engine, sourceId, remote));
-    const selected = await selectEntityCandidates(engine, sourceId, trimmed, scope, { omitQuarantined: opts.omitQuarantined, suggest: first === undefined, variants: opts.variants });
+    const selected = await selectEntityCandidates(engine, sourceId, trimmed, scope, { omitQuarantined: opts.omitQuarantined, suggest: first === undefined, variants: opts.variants, degraded: opts.degraded });
     // #7160: an exact hit in any source beats a name-variant guess, and a guess must be unique across every source read.
     if (selected.kind === 'hit' && !selected.match) return { sourceId, scope, selected };
     if (selected.kind === 'hit') variantHits.push({ sourceId, scope, selected });
@@ -485,26 +507,30 @@ export async function buildEntityCard(
   // Covers entity, context_pack, and delta (all route through buildEntityCard).
   // #6723: the source with the hit owns the card; every read below uses it.
   const sources = opts.sources?.length ? opts.sources : [sourceId];
-  const { sourceId: hitSource, scope, selected } = await selectAcrossSources(engine, sources, trimmed, opts.remote, { omitQuarantined: opts.omitQuarantined, variants: opts.variants });
-  if (selected.kind === 'withheld') return { found: false, suggestions: [] };
+  const lookupDegraded: DegradedStageEntry[] = [];
+  const { sourceId: hitSource, scope, selected } = await selectAcrossSources(engine, sources, trimmed, opts.remote, { omitQuarantined: opts.omitQuarantined, variants: opts.variants, degraded: lookupDegraded });
+  // A failed lookup read rides every outcome below: the caller must not read a miss (or the best of what was read) as final.
+  const degraded = lookupDegraded.length ? { degraded: lookupDegraded } : {};
+  if (selected.kind === 'withheld') return { found: false, suggestions: [], ...degraded };
   if (selected.kind === 'miss') {
     const ambiguous = selected.ambiguous ? { ambiguous: selected.ambiguous } : {};
-    if (!opts.includeReferences) return { found: false, suggestions: selected.suggestions, ...ambiguous };
+    if (!opts.includeReferences) return { found: false, suggestions: selected.suggestions, ...ambiguous, ...degraded };
     const textMentions = await readTextMentions(engine, sources, trimmed, { remote: opts.remote, excludePrivate: scope.excludePrivate, omitQuarantined: opts.omitQuarantined });
     return {
       found: false, suggestions: selected.suggestions,
       coverage: await readMentionCoverage(engine, [...sources]).catch(() => undefined),
       ...(textMentions?.total || textMentions?.unread ? { text_mentions: textMentions } : {}),
       ...ambiguous,
+      ...degraded,
     };
   }
 
   const { row, runnersUp, match } = selected;
-  const { card, facts: factRows } = await assembleCard(engine, hitSource, row, opts.remote, scope.excludePrivate, opts.eligibility ?? {});
+  const { card, facts: factRows } = await assembleCard(engine, hitSource, row, opts.remote, scope.excludePrivate, opts.eligibility ?? {}, opts.readerRemote ?? opts.remote);
   if (match) card.match = match;
   if (opts.includeReferences) {
     Object.assign(card, await cardReferences(engine, hitSource, row, opts, scope.excludePrivate, scope.entityTypes),
-      await readCardIdentity(engine, hitSource, row, { excludePrivate: scope.excludePrivate, excludeQuarantined: opts.omitQuarantined === true, surfaceCeiling: opts.surfaceCeiling, aka: card.aka }));
+      await readCardIdentity(engine, hitSource, row, { excludePrivate: scope.excludePrivate, excludeQuarantined: opts.omitQuarantined === true, surfaceCeiling: opts.surfaceCeiling, aka: card.aka, hideHeld: (await import('../search/private-visibility.ts')).worldOnlyFacts(opts.remote) }));
     await attachCardRecords(engine, hitSource, card, opts, scope.excludePrivate);
     if (await nameVariantsEnabled(engine)) {
       const { privatePagesFilterForCaller } = await import('../search/private-visibility.ts');
@@ -527,6 +553,7 @@ export async function buildEntityCard(
     source_id: hitSource,
     factRows,
     ...(runnersUp.length ? { suggestions: runnersUp } : {}),
+    ...degraded,
   };
 }
 
@@ -579,12 +606,14 @@ async function assembleCard(
   remote: boolean,
   excludePrivate: boolean,
   eligibility: ReadEligibility,
+  readerRemote: boolean,
 ): Promise<{ card: EntityCard; facts: FactRow[] }> {
   const pageSlug = row.slug;
-  const visibility = remote ? (['world'] as ('private' | 'world')[]) : undefined;
+  const { privatePagesFilterForCaller, privateLinkOriginFilterForCaller, privateFactFilterForReader, worldOnlyFacts } = await import('../search/private-visibility.ts');
+  const worldOnly = worldOnlyFacts(remote);
+  const visibility = worldOnly ? (['world'] as ('private' | 'world')[]) : undefined;
   // Facts saved about this entity may sit under a sibling page or the bare subject slug (siblings.ts).
   const factSlugs = await factEntitySlugs(engine, sourceId, pageSlug, { excludePrivate }).catch(() => [pageSlug]);
-  const { privatePagesFilterForCaller, privateLinkOriginFilterForCaller, privateFactFilterForCaller } = await import('../search/private-visibility.ts');
   const inboundPrivacy = (excludePrivate
     ? ` AND ${privatePagesFilterForCaller('f')} AND ${privateLinkOriginFilterForCaller('l')}`
     : '') + ` AND (l.origin_page_id IS NULL OR EXISTS (SELECT 1 FROM pages lo WHERE lo.id = l.origin_page_id AND lo.deleted_at IS NULL${remote ? ' AND lo.source_id = $2' : ''}))`;
@@ -607,6 +636,7 @@ async function assembleCard(
   // applies, so a private or derived page never surfaces its slug, its
   // links.context sentence, or a count. An edge whose origin page is deleted
   // (or, for an untrusted caller, in another source) is left out the same way.
+  let endedFacts = 0;
   const [aka, outLinks, inEdges, backlinkCount, timeline, facts, activeFactCount] = await Promise.all([
     readAka(engine, sourceId, pageSlug),
     engine.getLinks(pageSlug, { ...(remote ? { sourceIds: [sourceId] } : { sourceId }), excludePrivate, temporal: { status: 'all' } }).catch(() => []),
@@ -645,6 +675,13 @@ async function assembleCard(
       eligibility,
     })))
       .then(lists => lists.flat().sort((a, b) => factTime(b) - factTime(a)).slice(0, FACT_FETCH_CAP))
+      // GST-3170: a slot value a later one ended at read time is no longer current (slot-ends.ts).
+      .then(async rows => {
+        const current = await applySlotEnds(engine, { sourceId, worldOnly, excludePrivate, minTrust: eligibility.floor, suppressFlagged: eligibility.suppressFlagged }, rows,
+          { activeOnly: true, entities: [{ source_id: sourceId, slugs: factSlugs }] });
+        endedFacts = rows.length - current.length;
+        return current;
+      })
       .catch(() => [] as FactRow[]),
     // Exact active-fact count: the payload fetch above is capped at
     // FACT_FETCH_CAP, so facts.length silently reports the cap for bigger
@@ -656,7 +693,7 @@ async function assembleCard(
         `SELECT COUNT(*) AS n
            FROM facts
           WHERE source_id = $1 AND entity_slug = ANY($2::text[])
-            AND expired_at IS NULL${remote ? ` AND visibility = 'world'` : ''}${excludePrivate ? ` AND ${privateFactFilterForCaller('facts')}` : ''}
+            AND expired_at IS NULL${worldOnly ? ` AND visibility = 'world'` : ''}${excludePrivate ? ` AND ${privateFactFilterForReader('facts')}` : ''}
             AND ${projectionEligibleSql('facts', 'facts', eligibility)}`,
         [sourceId, factSlugs],
       )
@@ -675,10 +712,11 @@ async function assembleCard(
       ...(last ? { since: last.from, until: last.until } : {}),
     };
   };
-  const outCandidates = (outLinks as Array<Link & Partial<TemporalAnnotation>>)
-    .filter(l => l.link_source !== 'mentions')
+  const outCandidates = (await worldLinkContexts(engine, readerRemote, (outLinks as Array<Link & Partial<TemporalAnnotation>>)
+    .filter(l => l.link_source !== 'mentions'), storedEdge))
     .map(l => edgeOf(l, 'out', l.to_slug));
-  const inCandidates = inEdges.map(l => edgeOf(l as typeof l & Partial<TemporalAnnotation>, 'in', l.from_slug));
+  const inCandidates = (await worldLinkContexts(engine, readerRemote, inEdges, l => ({ from: { sourceId, slug: l.from_slug }, to: { sourceId, slug: pageSlug }, linkType: l.link_type })))
+    .map(l => edgeOf(l as typeof l & Partial<TemporalAnnotation>, 'in', l.from_slug));
   const edges: EntityCardEdge[] = [
     ...[...outCandidates].sort((a, b) => rank(a) - rank(b)),
     ...[...inCandidates].sort((a, b) => rank(a) - rank(b)),
@@ -780,7 +818,7 @@ async function assembleCard(
     open_threads: openThreads,
     edges,
     backlink_count: backlinkCount,
-    active_fact_count: activeFactCount ?? facts.length,
+    active_fact_count: activeFactCount === null ? facts.length : Math.max(0, activeFactCount - endedFacts),
     ...(relationshipNote ? { relationship_note: relationshipNote } : {}),
     ...(facts.length ? { recent_facts: facts.slice(0, RECENT_FACTS_CAP).map(f => ({
       id: String(f.id), fact: f.fact, kind: f.kind, valid_from: f.valid_from ? toIso(f.valid_from as Date | string) : null,
@@ -830,7 +868,8 @@ async function nearMissSuggestions(
       create_safety: r.create_safety ?? 'unknown',
       source_id: r.source_id ?? sourceId,
     }));
-  } catch {
+  } catch (e) {
+    rethrowCapabilityRefusal(e);
     return [];
   }
 }

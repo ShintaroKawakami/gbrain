@@ -145,6 +145,8 @@ CHECKS=(
   "check:skills-manifest"
   # GBRA-225: skills.lock.history.json covers the lock and only grows.
   "check:skills-lock-history"
+  # G3: once skills/moved-skills.json names a destination, no unlisted skill folder.
+  "check:moved-skills"
   "check:no-pii-agent-voice"
   "check:synthetic-corpus-privacy"
   "check:operations-filter-bypass"
@@ -157,6 +159,7 @@ CHECKS=(
   "check:fixture-privacy"
   "check:source-scope-onboard"
   "check:getpage-scope"
+  "check:relative-dotdot"
   "check:origin-assignment"
   "check:no-double-retry"
   "check:batch-audit-site"
@@ -184,6 +187,9 @@ CHECKS=(
   # GBRA-130: per-item catches that test an error code against a list and
   # rethrow the rest only shrink; baseline scripts/item-allowlist-catches-baseline.tsv.
   "check:item-allowlist-catches"
+  # A catch that turns a failed read into an empty answer only falls; baseline
+  # scripts/silent-read-catches-baseline.tsv (rules: scripts/silent-read-rules.ts).
+  "check:silent-read-catches"
   # EO10 (refactor wave 1): engine-sql/ and schema-migrations/ never import
   # back up into the engine façades or migrate.ts (ESM TDZ cycles).
   "check:layering"
@@ -205,6 +211,11 @@ CHECKS=(
   # Goal (a) (refactor wave 1): engine SQL only shrinks; baseline
   # scripts/engine-sql-baseline.tsv.
   "check:engine-sql-ratchet"
+  # D6 (docs/designs/RUST_ENGINE.md): raw SQL outside the engines and two-way
+  # pglite/postgres branches only fall; baselines scripts/engine-raw-sql-baseline.tsv
+  # and scripts/engine-kind-branches-baseline.tsv.
+  "check:engine-raw-sql-ratchet"
+  "check:engine-kind-branches"
   # GBRA-248 W1: world reads in src/core (loadConfig, env, fs, module state,
   # spawn, process hooks) only fall; baseline scripts/core-world-reads-baseline.tsv.
   "check:core-world-reads"

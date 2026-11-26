@@ -198,7 +198,7 @@ const HELP = `Usage:
   gbrain transcripts status              # found vs imported gap table
   gbrain transcripts recover codex       # restore user turns lost to #5163 (preview; --apply)
   gbrain transcripts audit-secrets       # list imported pages that still carry a credential (read-only)
-  gbrain transcripts archive run|backfill|status|adopt-legacy|on|off   # day-sliced conversation archive (off unless turned on)
+  gbrain transcripts archive run|backfill|status|adopt-legacy|on|off   # day-sliced conversation archive (on by default on a personal brain, offered on a shared one)
   gbrain transcripts recent [options]
 
 ingest — import dead session logs and chat exports as conversation pages
@@ -572,7 +572,7 @@ async function runIngest(engine: BrainEngine, args: string[], dispatch: Pick<Cli
     }
     const firstImported = result.files.flatMap((f) => f.sessions).find((s) => !s.error && s.baseSlug);
     if (firstImported && !parsed.dryRun) {
-      console.log(`try it: gbrain query "${firstImported.baseSlug.split('/').pop()}"`);
+      console.log(`try it: gbrain get ${firstImported.baseSlug} --source-id ${sourceId}`);
     }
   }
 

@@ -29,6 +29,14 @@ zero LLM, free, always on). For every synced Gmail thread:
   keeps running. "Will do" counts as a reply.
 - a question mark inside a link (`https://docs.example.com/view?id=42`) is
   not a question, so an FYI that only shares a link opens nothing.
+- a forward is judged by the note above the forwarded message. "FYI, see
+  below." over someone else's question asks nothing, so it opens no loop (and
+  a "Thanks!" answers one sent to you); "Can you take this one?" above the
+  same forward is an ask. The note ends at Gmail's "Forwarded message" line
+  or Apple Mail's "Begin forwarded message:"; a forward in any other format
+  (a translated separator) is still judged by its whole body. A classic
+  Outlook forward is stored only up to its "Original Message" line, so it
+  is judged by its note too.
 - "unanswered" is measured from the oldest unanswered message since the
   last turn flip (the first one addressed to you, or your first question),
   so a nudge or follow-up never restarts the clock — a request that waited
@@ -374,6 +382,8 @@ an empty inbox. Any Google access path works to fix it: `gbrain google setup`
 (BYO OAuth) or `--access command|env` on `sources add` (an existing Google
 CLI or token-minting gateway; see
 [google-connect.md](google-connect.md#other-ways-to-reach-google-no-gbrain-oauth)).
+`--access gbrainio` reads Gmail through a gbrain.io terminal instead (see
+[google-connect.md](google-connect.md#reading-mail-through-gbrainio)).
 A remote caller (MCP) gets no digest, so when its answer is empty and its
 scope holds no google source it gets a `loops_no_google_in_scope` notice
 instead: the answer covered only the sources the call read (named, all inside

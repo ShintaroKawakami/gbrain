@@ -18,10 +18,14 @@ import type {
   PageReadPolicy,
   SearchOpts,
   HybridSearchMeta,
+  DegradedStageEntry,
 } from '../types.ts';
 import { affectsRecall } from '../types.ts';
 export { resolveDateBoundary, resolveSearchDateBounds } from './date-bounds.ts';
-import { hasReadPolicy, pageReadFilter } from './read-policy-sql.ts';
+import { hasReadPolicy } from './read-policy-sql.ts';
+import { rethrowCapabilityRefusal } from '../engine-capability-refusal.ts';
+import { isTimeoutError, pushDegraded } from './hybrid/degraded.ts';
+import { isMissingSchemaObject, warnOncePerProcess } from '../utils.ts';
 import { embedQuery } from '../embedding.ts';
 import { loadEmbeddingQueryPrefix } from './query-prefix.ts';
 import { deferUntilResponse, registerBackgroundWorkDrainer } from '../background-work.ts';
@@ -46,7 +50,7 @@ import { enforceTokenBudget } from './token-budget.ts';
 import {
   semanticResultCacheAvailable,
 } from './query-cache.ts';
-import { resolveHybridRequest } from './hybrid/request.ts';
+import { normalizePaging, resolveHybridRequest } from './hybrid/request.ts';
 import { prepareSemanticCache, resolveCacheSearchMode, semanticCacheSkipped, serveSemanticCacheHit } from './hybrid/cache-stages.ts';
 import { buildPostFusionOpts, joinVectorSide, resolveEarlyModality, runLexicalAndRelational, startVectorSide } from './hybrid/arms.ts';
 import { searchVectorFallback, searchWithoutEmbeddings } from './hybrid/keyword-only.ts';
@@ -544,6 +548,8 @@ export async function runPostFusionStages(
   engine: import('../engine.ts').BrainEngine,
   results: SearchResult[],
   opts: PostFusionOpts,
+  /** The response's degraded list: a failed supersession check records `supersede_check_failed` here. */
+  degraded?: DegradedStageEntry[],
 ): Promise<void> {
   if (results.length === 0) return;
   const policy = hasReadPolicy(opts) ? opts : undefined;
@@ -680,7 +686,8 @@ export async function runPostFusionStages(
   if (aliasCanonicals) {
     try {
       applyAliasResolvedBoost(results, await aliasCanonicals);
-    } catch {
+    } catch (err) {
+      rethrowCapabilityRefusal(err);
       // Non-fatal; preserves the per-stage contract.
     }
   }
@@ -691,11 +698,17 @@ export async function runPostFusionStages(
   // for --explain, the contradiction probe, and agent renderers. The page-level
   // analogue of the superseded_by/expired_at awareness recall.ts applies to
   // facts. Fail-open per the per-stage contract: a brain with no `supersedes`
-  // edges (or a pre-links schema) finds 0 rows / throws and no-ops.
+  // edges finds 0 rows and no-ops. A read that FAILS (statement timeout, dropped
+  // connection) is not an empty answer: the outdated page would rank first with
+  // no flag, so the response says currency was not verified.
   try {
     stampSuperseded(results, await supersededBy);
-  } catch {
-    // Non-fatal; preserves the per-stage contract.
+  } catch (err) {
+    rethrowCapabilityRefusal(err);
+    const reason = isTimeoutError(err) ? 'timeout' : 'provider_error';
+    if (degraded) pushDegraded(degraded, 'supersede_check_failed', reason);
+    // The failure class only: an error's message or code can carry a connection string or password.
+    warnOncePerProcess('search-supersede-check-failed', `[gbrain] supersession check failed (${reason}; fail-open, results may include outdated pages)`);
   }
 }
 
@@ -712,18 +725,21 @@ function startRead<T>(read: () => Promise<T>): Promise<T> {
 
 /**
  * Memoized per-engine gate for the supersession stage. Most brains carry zero
- * `supersedes` edges, so the downrank lookup would be a wasted roundtrip on
- * every search. One existence probe per engine per TTL answers "any edges at
- * all?"; false skips the stage entirely. A fresh edge minted inside the TTL
- * window is invisible for up to ~5 minutes — an acceptable delay for a
- * ranking hint (the downrank applies on the next probe refresh). Fail-open: a
- * probe error must never kill search — the stage runs and its own catch
- * no-ops on the same underlying failure (e.g. pre-links schema).
+ * `supersedes` edges, so one existence probe answers "any edges at all?" and a
+ * false skips the downrank lookup. Only a POSITIVE answer is memoized (for the
+ * TTL): once a brain has a `supersedes` edge the stage runs and its own lookup
+ * returns the truth even if every edge is later removed. A negative answer is
+ * never kept, because it is the one answer that can hide data: a link written
+ * after it (by this process or by another one sharing the database, which this
+ * process cannot see) must reach the very next search. A zero-edge brain pays
+ * one cheap indexed probe per search instead of the lookup it replaces.
+ * Fail-open: a probe error must never kill search — the stage runs and its own
+ * read reports the same failure.
  */
 const SUPERSEDE_PROBE_TTL_MS = 5 * 60 * 1000;
 let supersedeEdgeProbe = new WeakMap<
   import('../engine.ts').BrainEngine,
-  { at: number; exists: boolean }
+  { at: number }
 >();
 
 /** Test seam: drop memoized supersede-edge probes (WeakMap has no clear()). */
@@ -731,24 +747,21 @@ export function _resetSupersedeProbeForTests(): void {
   supersedeEdgeProbe = new WeakMap();
 }
 
-/**
- * The supersede-edge probe. `link_type` stays a literal so the planner matches the partial index
- * idx_links_supersedes_to (migration links_supersedes_index) by its predicate; a bind parameter can leave a generic plan that does not, and with no matching row the
- * probe would read the whole composite links index (test/e2e/supersedes-probe-index-postgres.test.ts).
- */
-export const SUPERSEDE_EDGE_PROBE_SQL = `SELECT 1 AS one FROM links WHERE link_type = 'supersedes' LIMIT 1`;
+/** The supersede-edge probe statement (engine-sql/search-reads.ts); exported for the Postgres index test. */
+export { SUPERSEDE_EDGE_PROBE_SQL } from '../engine-sql/search-reads.ts';
 
 async function hasAnySupersedeEdges(
   engine: import('../engine.ts').BrainEngine,
 ): Promise<boolean> {
   const cached = supersedeEdgeProbe.get(engine);
-  if (cached && Date.now() - cached.at < SUPERSEDE_PROBE_TTL_MS) return cached.exists;
+  if (cached && Date.now() - cached.at < SUPERSEDE_PROBE_TTL_MS) return true;
   try {
-    const rows = await engine.executeRaw<{ one: number }>(SUPERSEDE_EDGE_PROBE_SQL);
-    const exists = rows.length > 0;
-    supersedeEdgeProbe.set(engine, { at: Date.now(), exists });
+    const exists = await engine.hasSupersedeEdges();
+    if (exists) supersedeEdgeProbe.set(engine, { at: Date.now() });
+    else supersedeEdgeProbe.delete(engine);
     return exists;
-  } catch {
+  } catch (err) {
+    rethrowCapabilityRefusal(err);
     // Fail-open; not cached so a transient error doesn't pin the gate open.
     return true;
   }
@@ -772,9 +785,9 @@ async function hasAnySupersedeEdges(
  * is WITHIN-SOURCE only (matches relational-recall's contract): a cross-source
  * `supersedes` edge neither downranks nor leaks the superseding slug across
  * the source boundary, and a soft-deleted superseder no longer counts.
- * Fail-soft: a brain with no `supersedes` edges (or a pre-links schema)
- * returns 0 rows / throws and the stage no-ops (matches
- * applyAliasResolvedBoost's pre-v104 guard).
+ * A brain with no `supersedes` edges (or one not migrated to the links table)
+ * finds nothing and the stage no-ops; a read that fails rejects, and the
+ * post-fusion stage turns that into the `supersede_check_failed` degraded stage.
  */
 export const SUPERSEDE_PENALTY = 0.5;
 
@@ -786,7 +799,7 @@ export async function applySupersedeDownrank(
   stampSuperseded(results, await readSupersededBy(results, engine, policy));
 }
 
-/** Superseded page id → the superseding page's slug, for the results' pages; empty when the stage no-ops. */
+/** Superseded page id → the superseding page's slug, for the results' pages; empty when the stage no-ops. Throws when the read fails. */
 async function readSupersededBy(
   results: SearchResult[],
   engine: import('../engine.ts').BrainEngine,
@@ -798,33 +811,16 @@ async function readSupersededBy(
   );
   if (pageIds.length === 0) return supersededBy;
   if (!(await hasAnySupersedeEdges(engine))) return supersededBy;
-  const params: unknown[] = [pageIds];
-  const fromFilter = pageReadFilter('pf', policy, params, !!policy);
-  const toFilter = pageReadFilter('pt', policy, params, !!policy);
-  const originFilter = policy ? `(l.origin_page_id IS NULL OR EXISTS (SELECT 1 FROM pages origin WHERE origin.id = l.origin_page_id AND ${pageReadFilter('origin', policy, params, true)}))` : 'TRUE';
-  let rows: Array<{ to_page_id: number; by_slug: string }> = [];
   try {
-    rows = await engine.executeRaw<{ to_page_id: number; by_slug: string }>(
-      `SELECT DISTINCT l.to_page_id, pf.slug AS by_slug
-         FROM links l
-         JOIN pages pf ON pf.id = l.from_page_id
-         JOIN pages pt ON pt.id = l.to_page_id
-        WHERE l.link_type = 'supersedes'
-          AND pf.deleted_at IS NULL
-          AND pf.source_id = pt.source_id
-          AND l.to_page_id = ANY($1::bigint[])
-          AND ${fromFilter} AND ${toFilter} AND ${originFilter}`,
-      params,
-    );
-  } catch {
-    // Pre-links schema or SQL miss; no-op.
-    return supersededBy;
+    return await engine.supersedingPageSlugs(pageIds, policy);
+  } catch (err) {
+    rethrowCapabilityRefusal(err);
+    // A brain not migrated to the links table has no edges, so an empty map is the
+    // true answer. Every other failure is NOT an answer: it propagates to the stage,
+    // which records supersede_check_failed.
+    if (isMissingSchemaObject(err, 'table', 'links')) return supersededBy;
+    throw err;
   }
-  for (const row of rows) {
-    const id = Number(row.to_page_id);
-    if (!supersededBy.has(id)) supersededBy.set(id, row.by_slug);
-  }
-  return supersededBy;
 }
 
 function stampSuperseded(results: SearchResult[], supersededBy: Map<number, string>): void {
@@ -1088,6 +1084,7 @@ export async function hybridSearch(
   query: string,
   opts?: HybridSearchOpts,
 ): Promise<SearchResult[]> {
+  opts = normalizePaging(opts);
   if (opts?.types?.length === 0) return [];
   if (needsEngineScope(engine)) return withEngineScope(engine, () => hybridSearch(engine, query, opts));
   const timer = opts?._timings ?? UNTIMED;
@@ -1214,6 +1211,7 @@ export async function hybridSearchCached(
   query: string,
   opts?: HybridSearchOpts,
 ): Promise<SearchResult[]> {
+  opts = normalizePaging(opts);
   if (opts?.types?.length === 0) return [];
   if (needsEngineScope(engine)) return withEngineScope(engine, () => hybridSearchCached(engine, query, opts));
   const timer = opts?._timings ?? UNTIMED;
