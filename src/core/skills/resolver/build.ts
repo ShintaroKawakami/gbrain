@@ -26,6 +26,7 @@ import { applyRouting, JSON_INPUT_CAP_BYTES, mergeSkillFolders, readBundledSourc
 import { TOKENIZER_ID } from './tokenize.ts';
 import { BLOCK_TOKEN_CAP, BLOCK_TOKENIZER, HARNESSES } from './block.ts';
 import { readResolverSettings } from './config.ts';
+import { PICKER_DESCRIPTION_CHARS, PICKER_PROMPT_VERSION } from './router.ts';
 
 export const RECEIPT_SCHEMA_VERSION = 1;
 export const T_SHARE_ON = 0.25;
@@ -92,11 +93,13 @@ function gbrainCommit(): string | null {
 }
 
 const sha = (s: string | Uint8Array) => createHash('sha256').update(s).digest('hex');
+/** A skill's description as the model picker reads it (picker.json): whitespace collapsed, at most PICKER_DESCRIPTION_CHARS. */
+const pickerDescription = (d: string) => d.split(/\s+/).filter(Boolean).join(' ').slice(0, PICKER_DESCRIPTION_CHARS);
 const bodyHash = (s: SkillRecord) => sha(s.body);
 
 /** sha256 over every effective input that affects ranking, eligibility or loading. */
 export function catalogHash(skills: readonly SkillRecord[], skipped: readonly SkippedSkill[], routingRows: number, scope: string): string {
-  const rows = skills.map(s => [s.id, s.name, s.description, s.whenToUse ?? '', s.triggers, s.routing, bodyHash(s), s.path ?? '', s.namespace ?? '']);
+  const rows = skills.map(s => [s.id, s.name, s.description, s.whenToUse ?? '', s.triggers, s.routing, bodyHash(s), s.path ?? '', s.namespace ?? '', ...(s.deprecated ? [{ deprecated: s.replacedBy ?? true }] : [])]);
   const skips = skipped.map(k => [k.reason, k.id ?? '', k.path ?? '', k.kept ?? '']).sort((a, b) => (JSON.stringify(a) < JSON.stringify(b) ? -1 : 1));
   return sha(JSON.stringify({ v: 1, skills: rows, skipped: skips, routing_rows: routingRows, scope }));
 }
@@ -105,6 +108,13 @@ export function catalogHash(skills: readonly SkillRecord[], skipped: readonly Sk
 export function chooseVariant(skills: readonly SkillRecord[], previous: Variant | undefined): { variant: Variant; share: number } {
   const share = skills.length ? skills.filter(s => s.triggers.length || s.routing.length).length / skills.length : 0;
   return { variant: share >= T_SHARE_ON || (previous === 'T' && share >= T_SHARE_KEEP) ? 'T' : 'D', share: Math.round(share * 1e4) / 1e4 };
+}
+
+/** The --routing table a receipt's rebuild argv names, so a rebuild keeps it (#9332). */
+export function routingFromArgv(argv: readonly string[] | null | undefined): { routing?: string } {
+  const at = argv?.indexOf('--routing') ?? -1;
+  const routing = at >= 0 ? argv![at + 1] : undefined;
+  return routing ? { routing } : {};
 }
 
 /** The argv that rebuilds a catalog from what the receipt recorded (null for a stdin source: the adapter owns it). */
@@ -220,6 +230,7 @@ export async function buildSkillIndex(input: BuildInput, opts: { home?: string; 
       if (p.source.kind === 'json') writeFileDurable(join(dir, 'source.json'), p.source.snapshot!);
       if (p.source.fingerprint) writeFileDurable(join(dir, 'fingerprint.json'), JSON.stringify({ fingerprint: p.source.fingerprint, routing: p.routing?.stat ?? null }));
       writeFileDurable(join(dir, 'index.bin'), bytes);
+      writeFileDurable(join(dir, 'picker.json'), `${JSON.stringify({ v: 1, catalog_hash: p.catalog_hash, prompt_version: PICKER_PROMPT_VERSION, skills: p.records.map(s => [s.id, pickerDescription(s.description)]) })}\n`);
       receipt.build.ms = Math.round(performance.now() - started);
       writeFileDurable(join(dir, 'receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`);
     } catch (e) {

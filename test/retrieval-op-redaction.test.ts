@@ -70,7 +70,7 @@ beforeAll(async () => {
     timeline: `- ${TODAY}: ${planted('timeline')}`, frontmatter: { summary: planted('summary') },
   }, { sourceId: SRC });
   await engine.putPage('notes/n1', {
-    type: 'note', title: planted('note'), compiled_truth: `${planted('note body')}\nGITHUB_TOKEN=${rand(31)}7`,
+    type: 'note', title: planted('note'), compiled_truth: `${planted('note body')}\n${planted('link')}\nGITHUB_TOKEN=${rand(31)}7`,
     timeline: `- ${TODAY}: ${planted('note timeline')}`, frontmatter: {},
   }, { sourceId: SRC });
   await engine.putPage('misc/orphan', { type: 'note', title: planted('orphan'), compiled_truth: planted('orphan body'), frontmatter: {} }, { sourceId: SRC });
@@ -177,6 +177,7 @@ const SWEEP: Record<string, Row> = {
   find_contradictions: { args: {}, content: false },
   find_experts: { args: { topic: 'PLANTMARK', limit: 10 } },
   find_trajectory: { args: { entity_slug: 'people/alice-example' } },
+  learned: { args: { since: '2000-01-01' }, content: false },
   code_callers: { skip: 'code-index fixture pipeline; code-intel suites own it' },
   code_callees: { skip: 'code-index fixture pipeline; code-intel suites own it' },
   code_def: { skip: 'code-index fixture pipeline; code-intel suites own it' },

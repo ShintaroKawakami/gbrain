@@ -120,8 +120,18 @@ Next — choose the connection method supported by the intended client
                    then gbrain bootstrap harness --yes --port 3131 --token <value>; or grant a scoped client with
                    gbrain mcp grant … --url http://127.0.0.1:3131/mcp --admin-token-file ~/.gbrain/serve/admin-token
                    and gbrain connect http://127.0.0.1:3131/mcp --harness <id> --credentials-file … --install
+  Cursor           cursor://anysphere.cursor-deeplink/mcp/install?name=gbrain&config=eyJ1cmwiOiJodHRwczovL3lvdXItbWFjaGluZS55b3VyLXRhaWxuZXQudHMubmV0L21jcCJ9
+                   Opens Cursor's MCP install prompt with this URL filled in; the Cursor machine must be on your tailnet.
   Check            gbrain mcp expose --status
 ```
+
+The `Cursor` line is a one-click link: it opens Cursor's install prompt with
+this MCP URL filled in. With `--funnel`, a `Claude` line comes first, which
+opens claude.ai's add-connector form the same way. Tailnet-only publishes get
+no Claude line, because claude.ai connects from Anthropic's servers. You still
+confirm and sign in inside the client. `--status` repeats the links and
+`--json` returns them as `install_links`. See [one-click client
+links](../mcp/README.md#one-click-client-links).
 
 The `Engine` and `Local agents` lines depend on the engine the receipt
 recorded: a Postgres brain prints `Local agents     gbrain bootstrap harness
@@ -430,7 +440,9 @@ PGLite is single-writer. While the service runs, host-side commands that open
 the database (`gbrain doctor`, `gbrain import`, `gbrain auth create`, a second
 `gbrain serve`) fail fast with `live_serve` — they do not wait. `gbrain sync`
 and `gbrain sweep --once` are the exceptions: they delegate into the live
-serve automatically. Administer the brain through the running server instead
+serve automatically, and so do page and fact writes (`gbrain put`,
+`gbrain remember`) and everyday reads such as `gbrain find`, `search` and
+`query` ([ENGINES.md](../ENGINES.md)). Administer the brain through the running server instead
 (`gbrain mcp admin … --admin-token-file`, `gbrain mcp grant … --admin-token-file`,
 or an authenticated owner dashboard), or move to
 Postgres for concurrent local use ([ENGINES.md](../ENGINES.md)). The success

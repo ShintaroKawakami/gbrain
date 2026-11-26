@@ -22,7 +22,10 @@ readback can supersede a recorded push failure without erasing that history.
 An offline, unavailable, mismatched or not-yet-probed remote is **unknown**, not
 green. Git evidence covers committed files only: DB-only pages, facts,
 configuration and credentials need a separate backup and restore drill. Managed
-Postgres placement alone is not proof of a remote database backup.
+Postgres placement alone is not proof of a remote database backup. For a source
+that is not a Git repository, doctor's fix is the engine's [full
+backup](../guides/memory-boundaries.md#full-backup): `gbrain backup create` on
+PGLite, a `pg_dump` of the brain's database on Postgres, never a Markdown export.
 
 **Not covered by Git evidence:** the DB file itself (`~/.gbrain` is
 deliberately gitignored — only Git-backed content rebuilds via `gbrain sync`);
@@ -99,7 +102,7 @@ Exit codes: 0 ok / 1 warn / 2 usage error. Two forced-0 paths: the global
 cached warn — automation reading exit codes sees the off switch as all-clear,
 never a stale failure. `status` answers from the cache when it's ok,
 recomputes when stale, but may reuse a recent warning. Missing or locked-engine
-evidence never becomes an enabled CLI all-clear. Failed refreshes leave the
+evidence never becomes an enabled CLI all-clear. A read that fails is never an all-clear either: an unreadable install receipt shows as an unknown `bootstrap_workspace` row (`receipt_unreadable`, keeps the verdict in warn), an unreadable `gbrain.yml` (any read error except a missing file, including a source inside the bootstrap workspace) as an unknown `db_only` row (`storage_config_unreadable`, also keeps the verdict in warn), a receipt behind a directory that cannot be searched counts as unreadable rather than missing, and an unreadable page+fact count marks the verdict degraded ("the database was unreadable during the check"). A missing receipt or `gbrain.yml` is simply empty. A refresh that fails falls back to the cached verdict marked degraded, without its cached page+fact count. Failed refreshes leave the
 durable cache untouched and return a degraded non-green view. The `--json`
 payload includes `configured_repos`, per-asset `configured_remote` and
 `verification`, `remote_check_at`, and a bounded `recovery_scope`.

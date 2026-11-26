@@ -240,6 +240,9 @@ export async function setupContractBrain(engine: BrainEngine): Promise<ContractB
     // Facts extraction is on only for the facts-lane cases, so no other case's
     // publications queue facts-absorb work into a later case.
     await engine.setConfig('facts.extraction_enabled', 'false');
+    // The conversation archive reads the machine's own agent sessions (~/.codex, ~/.claude); on a
+    // developer machine it imported them as pages outside the case source and failed atom_dispatch.
+    await engine.setConfig('transcripts.archive.enabled', 'off');
     await engine.setConfig('models.chat', CHAT_MODEL);
     const embedding = { model: await engine.getConfig('embedding_model') ?? 'openai:text-embedding-3-large',
       dimensions: Number(await engine.getConfig('embedding_dimensions') ?? 1536) };
@@ -1104,7 +1107,7 @@ async function runCase(brain: ContractBrain, id: ContractCase): Promise<void> {
 export async function exerciseConnectorJobContract(brain: ContractBrain, id: ContractCase): Promise<void> {
   await withEnv({ ...brain.env, GBRAIN_SCHEMA_PACK: ATOM_CASES.has(id) ? 'gbrain-base-v2' : undefined }, async () => {
     const listed = EXPECTED_FAILURES[id];
-    const expected = listed && (!listed.engines || listed.engines.includes(brain.engine.kind)) ? listed : undefined;
+    const expected = listed && (!listed.engines || (listed.engines as readonly string[]).includes(brain.engine.kind)) ? listed : undefined;
     const error = await runCase(brain, id).then(() => null, (e: unknown) => e instanceof Error ? e : new Error(String(e)));
     if (error) debug(`${id} failure`, `${error.message}\n${(error as Error & { output?: string }).output ?? ''}`);
     if (!expected) { if (error) throw error; return; }

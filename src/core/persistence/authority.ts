@@ -100,13 +100,14 @@ export async function submissionAuthority(ctx: OperationContext, operation: stri
  * #5984: one local-writer read per transaction; a FOR SHARE read also answers a plain one. #6712 PR 4b: the read the
  * registration check just made answers the authorization that follows it (`withRegisteredLocalWriter`, once).
  */
+export const LOCAL_WRITER_SQL = 'SELECT lane,revoked_at,grant_ceiling FROM persistence_local_writers WHERE id=$1::uuid';
 function localWriterRow(engine: SqlEngine, id: string, lock: boolean): Promise<Array<{ lane: string; revoked_at: unknown; grant_ceiling: LocalGrant }>> {
   const registered = lock ? undefined : takeRegisteredWriterRow(id);
   if (registered) return Promise.resolve([registered]);
   const key = `local-writer:${id}`;
   return transactionMemo(engine, lock ? [`${key}:share`] : [key, `${key}:share`],
     () => engine.executeRaw<{ lane: string; revoked_at: unknown; grant_ceiling: LocalGrant }>(
-      `SELECT lane,revoked_at,grant_ceiling FROM persistence_local_writers WHERE id=$1::uuid${lock ? ' FOR SHARE' : ''}`, [id]));
+      `${LOCAL_WRITER_SQL}${lock ? ' FOR SHARE' : ''}`, [id]));
 }
 /** #5984: one membership read per source per transaction; a FOR SHARE read also answers a plain one. */
 function sourceMembership(engine: SqlEngine, sourceId: string, lock: boolean) {
@@ -272,18 +273,24 @@ async function authorizeStoredTakeHolders(engine: SqlEngine, row: WriteRequest):
 /**
  * #6007: one access check answers identical read-only statements once (the
  * current and the stored authority read the same writer row and visibility).
- * The memo lives for that single check and holds no locking reads.
+ * The memo lives for that single check and holds no locking reads. The typed
+ * brain-identity and unlocked writer-row reads are memoized the same way.
  */
 function onceReads(engine: BrainEngine): BrainEngine {
-  const reads = new Map<string, Promise<unknown[]>>();
+  const reads = new Map<string, Promise<unknown>>();
+  const memo = <T>(id: string, run: () => Promise<T>): Promise<T> => {
+    let read = reads.get(id) as Promise<T> | undefined;
+    if (!read) { read = run(); reads.set(id, read); read.catch(() => reads.delete(id)); }
+    return read;
+  };
   return new Proxy(engine, { get(target, key) {
     if (key === 'executeRaw') return (sql: string, params?: unknown[], opts?: { signal?: AbortSignal }) => {
       if (/\bFOR (?:SHARE|UPDATE)\b/i.test(sql)) return target.executeRaw(sql, params, opts);
-      const id = JSON.stringify([sql, params ?? null]);
-      let read = reads.get(id);
-      if (!read) { read = target.executeRaw(sql, params, opts); reads.set(id, read); read.catch(() => reads.delete(id)); }
-      return read;
+      return memo(JSON.stringify([sql, params ?? null]), () => target.executeRaw(sql, params, opts));
     };
+    if (key === 'readPersistenceBrainId') return () => memo('typed:brain', () => target.readPersistenceBrainId());
+    if (key === 'readLocalWriterRow') return (id: string, opts?: { lock?: boolean }) => opts?.lock ? target.readLocalWriterRow(id, opts)
+      : memo(JSON.stringify(['typed:writer', id]), () => target.readLocalWriterRow(id));
     const value = Reflect.get(target, key, target);
     return typeof value === 'function' ? value.bind(target) : value;
   } });

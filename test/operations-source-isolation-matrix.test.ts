@@ -110,6 +110,7 @@ const MATRIX: Row[] = [
   { name: 'volunteer_context', mode: 'skip', reason: 'session/reflex machinery; volunteer-context suites own scoping' },
   { name: 'context_pack', mode: 'skip', reason: 'verbs conformance owns it; budget-packed composite of scoped reads' },
   { name: 'delta', mode: 'skip', reason: 'session-cursor verb; conformance suite owns it — page-delta arm is session-coupled (probe: fresh writes not listed)' },
+  { name: 'learned', mode: 'skip', reason: 'ledger rows exist only after the learning_derive phase runs; test/learning-ledger.test.ts owns its source and remote scoping' },
   { name: 'find_trajectory', mode: 'skip', reason: 'typed-claim/event rows come from the extraction pipeline; eval-trajectory + facts suites own it (probe: hand-seeded claim rows do not surface)' },
   { name: 'ontology_conflicts', mode: 'skip', reason: 'conflict rows need the ontology merge pipeline cross-observation shape; D7 ontology-merge parity suite owns conflicts' },
   { name: 'get_skill', mode: 'skip', reason: 'skills catalog + brain-resident packs; skill-catalog confinement suites own it' },
@@ -125,6 +126,7 @@ const MATRIX: Row[] = [
   { name: 'storage_find', mode: 'skip', reason: 'reads only the storage source, which is not federated: a remote caller reads cards only when its grant names storage; test/storage-manifest.test.ts pins the bound, unbound and granted cases' },
   { name: 'storage_get', mode: 'skip', reason: 'reads only the storage source, which is not federated: a remote caller reads cards only when its grant names storage; test/storage-manifest.test.ts pins the bound, unbound and granted cases' },
   { name: 'storage_list', mode: 'skip', reason: 'reads only the storage source, which is not federated: a remote caller reads cards only when its grant names storage; test/storage-manifest.test.ts pins the bound, unbound and granted cases' },
+  { name: 'reveal_secret', mode: 'skip', reason: 'returns one secret store entry, never page data; a remote caller needs reveal_secret named in its grant and a readable page holding the marker, which test/secret-store.test.ts pins' },
   { name: 'list_skills', mode: 'skip', reason: 'bundled skills catalog from the install tree; skills suites own it (throws outside an installed skills dir)' },
 
   // Deliberately brain-wide (config / registry / identity — not source data).

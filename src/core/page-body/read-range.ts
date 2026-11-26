@@ -98,6 +98,8 @@ export interface SegmentedBody {
   layout?: ProjectedLayout;
   /** Set when the read follows an authorization: confirmBodyPin checks it again before the text is returned. */
   pin?: BodyPin;
+  /** GST-2891: a read for a caller whose fact reads are world-only: its fence overlays omit the rows held from it. */
+  hideHeld?: boolean;
 }
 
 /** Where every row of the read projection sits (`projectedLayout`). */
@@ -191,7 +193,7 @@ function manifestRows(engine: BrainEngine, pageId: number, generation: number | 
  * up to LIVE_READ_ATTEMPTS times (GBRA-287).
  */
 export async function openSegmentedBody(engine: BrainEngine, opts: { pageId: number; generation?: number; ledger?: BodyLedger; pin?: BodyPin;
-  expect?: { slug: string; sourceId: string } }, attempt = 1): Promise<SegmentedBody> {
+  expect?: { slug: string; sourceId: string }; hideHeld?: boolean }, attempt = 1): Promise<SegmentedBody> {
   const requested = opts.pin?.generation ?? opts.generation ?? null;
   const [[page], read, expected] = await Promise.all([
     engine.executeRaw<Record<string, unknown>>(`SELECT id, source_id, slug, body_storage, body_generation, body_bytes, body_lines, truth_bytes,
@@ -223,7 +225,7 @@ export async function openSegmentedBody(engine: BrainEngine, opts: { pageId: num
   return {
     pageId: opts.pageId, sourceId, slug, generation, bodyBytes: Number(page.body_bytes ?? 0), bodyLines: Number(page.body_lines ?? 0), truthBytes: Number(page.truth_bytes ?? 0),
     flags: (toJson(page.body_flags) ?? {}) as JsonObject, ledger, stale: Number(page.segmenter_version) !== SEGMENTER_VERSION, ...(opts.pin ? { pin: opts.pin } : {}),
-    rows: bodyRows,
+    ...(opts.hideHeld ? { hideHeld: true } : {}), rows: bodyRows,
   };
 }
 
@@ -271,7 +273,7 @@ function overlaidText(engine: BrainEngine, body: SegmentedBody, seg: LoadedSegme
 /** The fence overlay for a segment: the page's (layout), plus the rows of fence blocks outside its facts slots. */
 async function segmentOverlay(engine: BrainEngine, body: SegmentedBody, seg: LoadedSegment, text: string, base: FenceChunkOverlay | undefined) {
   if (seg.row.hasFacts || !text.includes('gbrain:facts:begin')) return base;
-  const extra = await loadFenceChunkOverlay(engine, { sourceId: body.sourceId, slug: body.slug, compiled_truth: fenceBlockText(text) });
+  const extra = await loadFenceChunkOverlay(engine, { sourceId: body.sourceId, slug: body.slug, compiled_truth: fenceBlockText(text) }, { hideHeld: body.hideHeld });
   if (!extra) return base;
   if (!base) return extra;
   return { omit: new Set([...base.omit, ...extra.omit]), demote: new Map([...base.demote, ...extra.demote]),
@@ -317,7 +319,7 @@ export async function projectedLayout(engine: BrainEngine, body: SegmentedBody):
     blocks.push(fenceBlockText(text));
     summaries.set(seg.row.seq, summarize(await projectLoaded(engine, body, seg, undefined)));
   }
-  const overlay = blocks.length ? await loadFenceChunkOverlay(engine, { sourceId: body.sourceId, slug: body.slug, compiled_truth: blocks.join('\n') }) : undefined;
+  const overlay = blocks.length ? await loadFenceChunkOverlay(engine, { sourceId: body.sourceId, slug: body.slug, compiled_truth: blocks.join('\n') }, { hideHeld: body.hideHeld }) : undefined;
   if (overlay) for await (const seg of loadSegments(engine, body, factsRows)) summaries.set(seg.row.seq, summarize(await projectLoaded(engine, body, seg, overlay)));
 
   const n = body.rows.length;
@@ -626,9 +628,8 @@ export async function projectedOutline(engine: BrainEngine, body: SegmentedBody,
     if (index + v.row.outlineCount > from && index < from + limit) needed.push(v);
     index += v.row.outlineCount;
   }
-  const meta = needed.length ? new Map((await engine.executeRaw<Record<string, unknown>>(`SELECT occurrence_id, facts_slots, outline FROM page_body_manifest
-    WHERE page_id=$1 AND occurrence_id=ANY($2::bigint[]) AND staging_id IS NULL AND gen_from<=$3 AND (gen_to IS NULL OR gen_to>$3)`,
-  [body.pageId, needed.map(v => v.row.occurrenceId), body.generation])).map(m => [Number(m.occurrence_id), m])) : new Map();
+  const meta = needed.length ? new Map((await engine.readBodyManifestOutline(body.pageId, needed.map(v => v.row.occurrenceId), body.generation))
+    .map(m => [Number(m.occurrence_id), m])) : new Map();
   index = 0;
   let next = 0;
   for (const v of visible) {

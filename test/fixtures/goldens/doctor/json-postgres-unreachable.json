@@ -801,7 +801,7 @@
             },
             "why": "Read-only: lists every gbrain process on this host with the restart each one needs and the steps the upgrade cannot take."
           },
-          "message": "gbrain upgrade refuses on this host: serve pid 17125 (build not recorded) runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: move the install at /Users/shintaro/mcp-servers/gbrain-mcp (v0.60.641.0) to the release being installed: for a git clone, `git -C /Users/shintaro/mcp-servers/gbrain-mcp fetch --tags origin && git -C /Users/shintaro/mcp-servers/gbrain-mcp checkout vpending && bun install --cwd /Users/shintaro/mcp-servers/gbrain-mcp`; otherwise start this process from the upgraded install instead; then run the upgrade again. worker pid 81831 (build not recorded) runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: move the install at /Users/shintaro/mcp-servers/gbrain-mcp (v0.60.641.0) to the release being installed: for a git clone, `git -C /Users/shintaro/mcp-servers/gbrain-mcp fetch --tags origin && git -C /Users/shintaro/mcp-servers/gbrain-mcp checkout vpending && bun install --cwd /Users/shintaro/mcp-servers/gbrain-mcp`; otherwise start this process from the upgraded install instead; then run the upgrade again. (mode=notify).",
+          "message": "gbrain upgrade refuses on this host: serve pid 16140 (build not recorded) runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: move the install at /Users/shintaro/mcp-servers/gbrain-mcp (v0.60.734.0) to the release being installed: for a git clone, `git -C /Users/shintaro/mcp-servers/gbrain-mcp fetch --tags origin && git -C /Users/shintaro/mcp-servers/gbrain-mcp checkout vpending && bun install --cwd /Users/shintaro/mcp-servers/gbrain-mcp`; otherwise start this process from the upgraded install instead; then run the upgrade again. worker pid 40090 (build not recorded) runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: move the install at /Users/shintaro/mcp-servers/gbrain-mcp (v0.60.734.0) to the release being installed: for a git clone, `git -C /Users/shintaro/mcp-servers/gbrain-mcp fetch --tags origin && git -C /Users/shintaro/mcp-servers/gbrain-mcp checkout vpending && bun install --cwd /Users/shintaro/mcp-servers/gbrain-mcp`; otherwise start this process from the upgraded install instead; then run the upgrade again. (mode=notify).",
           "name": "self_upgrade_health",
           "status": "warn"
         },
@@ -917,6 +917,15 @@
         },
         {
           "category": "ops",
+          "elapsed_ms": "<volatile>",
+          "message": "Not applicable: Rust engine shadow mode is off for this brain.",
+          "name": "rust_engine_addon",
+          "readiness_state": "not_applicable",
+          "severity": "info",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
           "details": {
             "fix_hint": "Connection refused: nothing accepted the connection at the configured host and port. Check that the database server is running and that the URL names the right host and port. Run: gbrain db-repair",
             "reason": "conn_refused",
@@ -1026,7 +1035,7 @@
             },
             "why": "Read-only: lists every gbrain process on this host with the restart each one needs and the steps the upgrade cannot take."
           },
-          "fix": "gbrain upgrade refuses on this host: serve pid 17125 (build not recorded) runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: move the install at /Users/shintaro/mcp-servers/gbrain-mcp (v0.60.641.0) to the release being installed: for a git clone, `git -C /Users/shintaro/mcp-servers/gbrain-mcp fetch --tags origin && git -C /Users/shintaro/mcp-servers/gbrain-mcp checkout vpending && bun install --cwd /Users/shintaro/mcp-servers/gbrain-mcp`; otherwise start this process from the upgraded install instead; then run the upgrade again. worker pid 81831 (build not recorded) runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: move the install at /Users/shintaro/mcp-servers/gbrain-mcp (v0.60.641.0) to the release being installed: for a git clone, `git -C /Users/shintaro/mcp-servers/gbrain-mcp fetch --tags origin && git -C /Users/shintaro/mcp-servers/gbrain-mcp checkout vpending && bun install --cwd /Users/shintaro/mcp-servers/gbrain-mcp`; otherwise start this process from the upgraded install instead; then run the upgrade again. (mode=notify).",
+          "fix": "gbrain upgrade refuses on this host: serve pid 16140 (build not recorded) runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: move the install at /Users/shintaro/mcp-servers/gbrain-mcp (v0.60.734.0) to the release being installed: for a git clone, `git -C /Users/shintaro/mcp-servers/gbrain-mcp fetch --tags origin && git -C /Users/shintaro/mcp-servers/gbrain-mcp checkout vpending && bun install --cwd /Users/shintaro/mcp-servers/gbrain-mcp`; otherwise start this process from the upgraded install instead; then run the upgrade again. worker pid 40090 (build not recorded) runs from another gbrain install, which this upgrade does not change, so a restart brings it back on the old build: move the install at /Users/shintaro/mcp-servers/gbrain-mcp (v0.60.734.0) to the release being installed: for a git clone, `git -C /Users/shintaro/mcp-servers/gbrain-mcp fetch --tags origin && git -C /Users/shintaro/mcp-servers/gbrain-mcp checkout vpending && bun install --cwd /Users/shintaro/mcp-servers/gbrain-mcp`; otherwise start this process from the upgraded install instead; then run the upgrade again. (mode=notify).",
           "name": "self_upgrade_health",
           "status": "warn",
           "tier": "symptom"

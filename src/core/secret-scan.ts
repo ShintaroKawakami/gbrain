@@ -82,6 +82,8 @@ export interface ScanOpts {
   allowlist?: string[];
   /** Workspace root: allowlist path-globs match paths relative to this. */
   workspaceRoot?: string;
+  /** scanFiles: each finding a `path:<glob> pattern:<rule>` entry allowed, with that entry and its file. */
+  onAllowed?: (hit: AllowedHit & { file: string }) => void;
   /** Opt-in generic high-entropy assignment heuristic. Default false. */
   highEntropy?: boolean;
   /**
@@ -104,7 +106,7 @@ export interface ScanOpts {
 export {
   SCAN_ALLOW_FILENAME, ALLOWLIST_FINGERPRINT_MIN_HEX, loadWorkspaceAllowlist, globToRegExp, matchesGlob, valueAllowlisted, pathAllowlisted,
 } from './secret-scan-allowlist.ts';
-import { valueAllowlisted, pathAllowlisted } from './secret-scan-allowlist.ts';
+import { valueAllowlisted, pathAllowlisted, withoutRuleAllowed, type AllowedHit } from './secret-scan-allowlist.ts';
 import { PUSH_SCAN_MAX_FILE_BYTES } from './page-size-policy.ts';
 import {
   ASSIGNMENT_QUOTED_SOURCE, ASSIGNMENT_UNQUOTED_SOURCE, HIGH_ENTROPY_MIN_BITS_PER_CHAR, HIGH_ENTROPY_REQUIRES_DIGIT_RE,
@@ -230,11 +232,12 @@ const BASIC_BARE = 'basic\\s{1,16})([A-Za-z0-9+/=]{16,2048})(?![A-Za-z0-9+/=])';
  */
 const URL_PASSWORD_PLACEHOLDER_RE = /^(?:<[^<>]*>|\$\{[^{}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\*+|[xX]+)$/;
 
-/** `url_credentials` validate: the password segment is not a placeholder. */
+/** `url_credentials` validate: the password is not a placeholder; one holding a raw `@` always counts as real. */
 function urlPasswordIsReal(value: string): boolean {
   const schemeEnd = value.indexOf('://') + 3;
   const colon = value.indexOf(':', schemeEnd);
-  return !URL_PASSWORD_PLACEHOLDER_RE.test(value.slice(colon + 1, -1));
+  const password = value.slice(colon + 1, -1);
+  return password.includes('@') || !URL_PASSWORD_PLACEHOLDER_RE.test(password);
 }
 
 /**
@@ -373,11 +376,14 @@ const CORE_PATTERNS: ReadonlyArray<CorePattern> = [
   // per scheme occurrence is a constant; the precheck skips the regex on
   // lines with no `@` at all. A password over 256 chars is the accepted miss
   // (a JWT that long is still claimed by `jwt` above).
+  // Drivers split the userinfo at the LAST `@` of the authority, so a password may
+  // carry up to 8 more raw-`@` pieces; a piece cannot cross `/`, `?` or `#`, so
+  // an `@` in the path or query never extends the match.
   {
     name: 'db_url_credentials',
     source:
       '(?:postgres(?:ql)?|mysql|mongodb(?:\\+srv)?|redis|rediss|amqp|mssql):\\/\\/' +
-      '[^\\s:/@"\']{0,128}:[^\\s@"\']{1,256}@',
+      '[^\\s:/@"\']{0,128}:[^\\s@"\']{1,256}(?:@[^\\s@"\'/?#]{0,256}){0,8}@',
     precheck: (line) => line.includes('@'),
   },
   // http(s) userinfo carrying a password: a sibling of db_url_credentials,
@@ -390,10 +396,11 @@ const CORE_PATTERNS: ReadonlyArray<CorePattern> = [
   // starts with `@` (after a `host:port` authority) as a credential. A
   // password carrying a literal `/`, `?` or `#` is the accepted miss. A user
   // with no password never fires. Placeholder passwords are rejected by
-  // `validate` (URL_PASSWORD_PLACEHOLDER_RE).
+  // `validate` (URL_PASSWORD_PLACEHOLDER_RE). A raw `@` inside the password runs
+  // to the last `@` before the path, where URL parsers split the userinfo.
   {
     name: 'url_credentials',
-    source: 'https?:\\/\\/[^\\s:/@"\']{0,128}:[^\\s@"\'/?#]{1,256}@',
+    source: 'https?:\\/\\/[^\\s:/@"\']{0,128}:[^\\s@"\'/?#]{1,256}(?:@[^\\s@"\'/?#]{0,256}){0,8}@',
     flags: 'gi',
     precheck: (line) => line.includes('@'),
     validate: urlPasswordIsReal,
@@ -1186,7 +1193,7 @@ export function scanFiles(paths: string[], opts: ScanOpts = {}): SecretFinding[]
     } catch {
       continue;
     }
-    for (const f of scanText(text, opts)) {
+    for (const f of withoutRuleAllowed(scanText(text, opts), rel, allowlist, (hit) => opts.onAllowed?.({ ...hit, file: p }))) {
       out.push({ ...f, file: p });
     }
   }

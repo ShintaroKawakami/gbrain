@@ -3,6 +3,8 @@ import { readPolicyOpts } from './context.ts';
 import { attributeVersions, canReadWriteAttribution } from './attribution.ts';
 import { GET_VERSIONS_DEFAULT_LIMIT, GET_VERSIONS_REMOTE_MAX_LIMIT, pagingLimit, reportVersionPage } from './read-paging.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
+import { heldRowsForCaller, worldFenceRows } from '../eligibility/fence-overlay.ts';
+import { ALL_SOURCES } from '../source-id.ts';
 import { fenceTranscriptText, quotesStored } from '../search/transcript-quote.ts';
 import { historyQuarantine } from './get-page-projection.ts';
 /**
@@ -22,6 +24,7 @@ import { VERSION } from '../../version.ts';
 import { resolveActiveEmbeddingColumnFromEngine } from '../search/embedding-column.ts';
 import { memoizedHealth } from '../health-memo.ts';
 import { remoteReadPolicySql } from '../persistence/page-visibility.ts';
+import { worldOnlyFacts } from '../search/private-visibility.ts';
 import { LARGE_PAGES_CAPABILITY } from './get-page-body.ts';
 import { GUEST_MARKER_CAPABILITY } from '../guests/marker.ts';
 import { isSegmentedPage, pageBodyBytes } from '../page-body/page-shape.ts';
@@ -259,8 +262,7 @@ const get_versions: Operation = {
     const versions = canReadWriteAttribution(ctx) ? await attributeVersions(ctx.engine, plain) : plain;
     // Wave B: a segmented version's body is never returned whole; body_ref names its size (no read serves an older segmented body yet, #7800).
     const out = [];
-    const snapshotTiers = ctx.remote === false || versions.length === 0 ? new Map<number, unknown>() : new Map((await ctx.engine.executeRaw<{ id: number | string; trust_tier: string | null }>(
-      'SELECT id, trust_tier FROM page_versions WHERE id = ANY($1::bigint[])', [versions.map(v => Number(v.id))])).map(r => [Number(r.id), r.trust_tier] as const));
+    const snapshotTiers = ctx.remote === false || versions.length === 0 ? new Map<number, unknown>() : new Map((await ctx.engine.listVersionTrustTiers(versions.map(v => Number(v.id)))).map(r => [r.id, r.trust_tier] as const));
     const reason = await remoteReasons(ctx, String(p.slug), versions);
     const lives = ctx.remote === false || versions.length === 0 ? [] : await ctx.engine.executeRaw<{ id: number | string; slug: string; source_id: string; frontmatter: Record<string, unknown> }>(
       'SELECT id, slug, source_id, frontmatter FROM pages WHERE id = ANY($1::bigint[])', [[...new Set(versions.map(v => Number(v.page_id)))]]);
@@ -282,7 +284,12 @@ const get_versions: Operation = {
       // #8042: a third-party page's version reaches an untrusted reader quoted, as get_page's current body does;
       // GST-687: so does one whose snapshot tier is below the owner's (a version with no snapshot reads as unknown).
       const quote = quotesStored(v.type, snapshotTiers.get(Number(v.id)));
-      const body = (text: string) => { const clean = sanitizeRemoteBody(text); return quote && clean ? fenceTranscriptText(clean, String(p.slug)) : clean; };
+      const live = lives.find(l => Number(l.id) === Number(v.page_id));
+      const sourceId = live?.source_id ?? (ctx.sourceId === ALL_SOURCES ? undefined : ctx.sourceId);
+      const omitRows = sourceId !== undefined
+        ? await heldRowsForCaller(ctx.engine, ctx.remote, { sourceId, slug: live?.slug ?? String(p.slug), compiled_truth: v.compiled_truth, timeline: v.timeline })
+        : worldOnlyFacts(ctx.remote) ? new Set([...worldFenceRows(v.compiled_truth), ...worldFenceRows(v.timeline)].map(row => row.rowNum)) : undefined;
+      const body = (text: string) => { const clean = sanitizeRemoteBody(text, { omitRows }); return quote && clean ? fenceTranscriptText(clean, String(p.slug)) : clean; };
       out.push({ ...v, compiled_truth: body(v.compiled_truth), ...reason(v),
         ...(typeof v.timeline === 'string' ? { timeline: body(v.timeline) } : {}), ...(quote ? { quoted: 'transcript' } : {}) });
     }
@@ -301,11 +308,7 @@ async function remoteReasons(ctx: OperationContext, slug: string, versions: Read
   Promise<(v: { id: number; replaced_because?: string | null }) => { replaced_because?: string }> {
   const ids = versions.filter(v => typeof v.replaced_because === 'string').map(v => Number(v.id));
   if (ctx.remote === false || ids.length === 0) return () => ({});
-  const writers = new Map((await ctx.engine.executeRaw<{ id: number | string; type: string | null; tier: string | null }>(
-    `SELECT pv.id, COALESCE(nx.type, p.type) AS type, CASE WHEN nx.id IS NULL THEN p.trust_tier ELSE nx.trust_tier END AS tier
-       FROM page_versions pv JOIN pages p ON p.id = pv.page_id
-       LEFT JOIN LATERAL (SELECT n.id, n.type, n.trust_tier FROM page_versions n WHERE n.page_id = pv.page_id AND n.id > pv.id ORDER BY n.id LIMIT 1) nx ON true
-      WHERE pv.id = ANY($1::bigint[])`, [ids])).map(r => [Number(r.id), r] as const));
+  const writers = new Map((await ctx.engine.listVersionReasonWriters(ids)).map(r => [r.id, r] as const));
   return v => {
     if (typeof v.replaced_because !== 'string') return {};
     const clean = sanitizeRemoteBody(v.replaced_because);
@@ -322,7 +325,7 @@ async function remoteVersionSize<V extends { page_id: number; body_storage?: str
   Promise<V | Omit<V, 'body_bytes'> & { total_bytes: number }> {
   if (ctx.remote === false || v.body_storage !== 'segmented') return v;
   const { body_bytes: _stored, ...rest } = v;
-  const body = await openSegmentedBody(ctx.engine, { pageId: v.page_id, generation: v.body_generation });
+  const body = await openSegmentedBody(ctx.engine, { pageId: v.page_id, generation: v.body_generation, hideHeld: worldOnlyFacts(ctx.remote) });
   return { ...rest, total_bytes: (await segmentedReadDocument(ctx.engine, body)).total };
 }
 

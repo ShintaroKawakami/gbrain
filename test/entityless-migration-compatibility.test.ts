@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { LATEST_VERSION, MIGRATIONS, runMigrations } from '../src/core/migrate.ts';
-import { v319 } from '../src/core/schema-migrations/v319-take-proposal-evidence.ts';
+import { v336 } from '../src/core/schema-migrations/v336-take-proposal-evidence.ts';
 import {
   JTT_PREVIOUS_STAMP, JTT_REWIND_MARKER, JTT_TAKE_PROPOSAL_EVIDENCE_VERSION, rewindJttTakeProposalCollision,
 } from '../src/core/jtt-take-proposal-collision.ts';
@@ -48,7 +48,7 @@ for (const backend of testBackends()) describe(`entityless migration compatibili
   });
 
   test('JTT evidence migration is the newest and sits on top of upstream (v184 receipts kept)', async () => {
-    expect(JTT).toBe(319);
+    expect(JTT).toBe(336);
     expect(LATEST_VERSION).toBe(JTT);
     expect(MIGRATIONS.find(migration => migration.version === JTT)?.name).toBe('take_proposal_evidence');
     expect(MIGRATIONS.filter(migration => migration.name === 'take_proposal_evidence')).toHaveLength(1);
@@ -84,7 +84,7 @@ for (const backend of testBackends()) describe(`entityless migration compatibili
     await engine.executeRaw("UPDATE take_proposals SET status='evidence_pending' WHERE prompt_version='entityless-fact-review-v1'");
 
     expect(await runMigrations(engine)).toEqual({ applied: 0, current: JTT });
-    await engine.runMigration(JTT, v319.sql);
+    await engine.runMigration(JTT, v336.sql);
     const [evidence] = await engine.executeRaw<{ status: string; evidence: unknown }>(`SELECT status,evidence FROM take_proposals
       WHERE prompt_version='entityless-fact-review-v1'`);
     expect(evidence?.status).toBe('evidence_pending');

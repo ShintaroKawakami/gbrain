@@ -43,7 +43,10 @@ import {
   connectionGateEntry,
 } from './checks/db-connection.ts';
 import { ipcSocketPathEntry } from './checks/local-ipc.ts';
+import { rustEngineAddonEntry } from './checks/rust-engine-addon.ts';
 import { functionSearchPathEntry } from './checks/function-search-path.ts';
+import { guardLedgerChecksEntry } from './checks/guard-ledger-checks.ts';
+import { ownerOnlyMarksTriggersEntry } from './checks/owner-only-marks-triggers.ts';
 import { postgresTlsEntry } from './checks/postgres-tls.ts';
 import { databaseEncodingEntry } from './checks/database-encoding.ts';
 import { schemaFunctionBodiesEntry } from './checks/schema-function-bodies.ts';
@@ -99,6 +102,7 @@ import { factsPagesEntry } from './checks/facts-pages.ts';
 import { embedBackfillStalledEntry } from './checks/embed-backfill-stalled.ts';
 import { contentDriftSweepEntry } from './checks/content-drift-sweep.ts';
 import { connectorAccountMismatchEntry } from './checks/connector-account-mismatch.ts';
+import { ownerIdentityEntry } from './checks/owner-identity.ts';
 import { legacyJobAuthorityEntry } from './checks/legacy-job-authority.ts';
 import { legacyTokenGrantsEntry } from './checks/legacy-token-grants.ts';
 import { unscopedMultiUserTokenEntry } from './checks/unscoped-multi-user-token.ts';
@@ -114,19 +118,21 @@ import { gitWriterEntry } from './checks/git-writer.ts';
 import { foreignWritersEntry } from './checks/foreign-writers.ts';
 import { retrievalFeedbackEntry } from './checks/retrieval-feedback.ts';
 import { transcriptSecretExposureEntry } from './checks/transcript-secrets.ts';
+import { secretStoreEntry } from './checks/secret-store.ts';
 import { autoChronicleEntry } from './checks/auto-chronicle.ts';
 import { factsDrainEntry } from './checks/facts-drain.ts';
 import { wakeshiftEntry } from './checks/wakeshift.ts';
 import { wakeshiftOpenclawEntry } from './checks/wakeshift-openclaw.ts';
 import { factTakeVectorsEntry } from './checks/vector-coverage.ts';
 import { decideHealthEntry } from './checks/decide.ts';
+import { learningNoteEntry } from './checks/learning-note.ts';
 import { memoryProposalsEntry } from './checks/memory-proposals.ts';
 import { supersessionCalibrationEntry } from './checks/supersession-calibration.ts';
 import { factAdmissionFloorsEntry } from './checks/fact-admission-floors.ts';
 import { unlinkedFactsEntry } from './checks/unlinked-facts.ts';
 import { edgeValidityEntry } from './checks/edge-validity.ts';
 import { coreMemoryEntry } from './checks/core-memory.ts';
-import { personTitleDuplicatesEntry } from './checks/entity-duplicates.ts';
+import { entityDuplicatesEntry, personTitleDuplicatesEntry } from './checks/entity-duplicates.ts';
 import { plannerStatsEntry } from './checks/planner-stats.ts';
 import { revisionBackfillEntry } from './checks/revision-backfill.ts';
 import { beliefLedgerEntry } from './checks/belief-ledger.ts';
@@ -135,6 +141,8 @@ import { provenanceStampDriftEntry } from './checks/provenance-stamp-drift.ts';
 import { trustScanEntry } from './checks/trust-scan.ts';
 import { trustSourcesUnclaimedEntry } from './checks/trust-sources-unclaimed.ts';
 import { trustReleaseUnpreviewedEntry } from './checks/trust-release-unpreviewed.ts';
+import { writeGateHoldAmbiguousEntry } from './checks/write-gate-hold-ambiguous.ts';
+import { writeGateHoldsStrandedEntry } from './checks/write-gate-holds-stranded.ts';
 import { harnessWiringDoctorEntry } from './checks/harness-wiring.ts';
 import { agentContractEntry } from './checks/agent-contract.ts';
 import { chatFallbackChainEntry } from './checks/chat-fallback.ts';
@@ -161,11 +169,14 @@ import { sharedAgentAccessEntry } from './checks/shared-agent-access.ts';
 import { ownerReadsRestrictedEntry } from './checks/owner-reads-restricted.ts';
 import { accessLineageEntry } from './checks/access-lineage.ts';
 import { accessLabelledOnlyEntry } from './checks/access-labelled-only.ts';
+import { accessPagesReadByNobodyEntry } from './checks/access-pages-read-by-nobody.ts';
+import { accessReachEntry } from './checks/access-reach.ts';
 import { attestReadAccessEntry } from './checks/attest-read-access.ts';
 import { guestSourceEntry } from './checks/guest-source.ts';
 import { originTwinsEntry } from './checks/origin-twins.ts';
 import { slugPathMismatchEntry } from './checks/slug-path-mismatch.ts';
 import { renameIdentityDowngradesEntry } from './checks/rename-identity-downgrades.ts';
+import { legacySlugSpellingsEntry } from './checks/legacy-slug-spellings.ts';
 import { unindexedFilesEntry } from './checks/unindexed-files.ts';
 import { syncLandingGapsEntry } from './checks/landing-gaps.ts';
 import { derivedOriginParkedEntry, purgeParkedPagesEntry } from './checks/purge-parks.ts';
@@ -223,6 +234,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   harnessWiringDoctorEntry,
   agentContractEntry,
   pgliteDataDirEntry,
+  rustEngineAddonEntry,
   ipcSocketPathEntry,
   projectionResidentEntry,
   offlineConnectionEntry,
@@ -263,11 +275,15 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   ownerReadsRestrictedEntry,
   accessLineageEntry,
   accessLabelledOnlyEntry,
+  accessPagesReadByNobodyEntry,
+  accessReachEntry,
   attestReadAccessEntry,
   guestSourceEntry,
   rlsEntry,
   postgresTlsEntry,
   functionSearchPathEntry,
+  guardLedgerChecksEntry,
+  ownerOnlyMarksTriggersEntry,
   databaseEncodingEntry,
   schemaVersionEntry,
   schemaFunctionBodiesEntry,
@@ -324,6 +340,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   gitWriterEntry,
   foreignWritersEntry,
   decideHealthEntry,
+  learningNoteEntry,
   memoryProposalsEntry,
   unlinkedFactsEntry,
   edgeValidityEntry,
@@ -342,6 +359,9 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   trustScanEntry,
   trustSourcesUnclaimedEntry,
   trustReleaseUnpreviewedEntry,
+  writeGateHoldAmbiguousEntry,
+  // A held write names a page by slug only; a rename or delete can leave it stranded (doctor/checks/write-gate-holds-stranded.ts).
+  writeGateHoldsStrandedEntry,
   coreMemoryEntry,
   persistenceConsumersEntry,
   // GBRA-133: this role's session connections across every process, against the pooler's limit (read-only).
@@ -355,6 +375,7 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   originTwinsEntry,
   slugPathMismatchEntry,
   renameIdentityDowngradesEntry,
+  legacySlugSpellingsEntry,
   purgeParkedPagesEntry,
   derivedOriginParkedEntry,
   purgeMirrorEntry,
@@ -368,6 +389,8 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   managedSyncConvergenceEntry,
   // #7160: title-prefixed person pages next to the unprefixed page (read-only, preview-first).
   personTitleDuplicatesEntry,
+  // plan autoplan-20261117192252 PR 1: likely duplicate person and company pages by key, name and slug shape (read-only).
+  entityDuplicatesEntry,
   // GST-1601: the one-sided local edits adopted in the last 24 h per source (informational, always ok).
   localEditAdoptionsEntry,
   // GBRA-221: live fence rows on imported pages whose body is outside-authored text (review only).
@@ -380,6 +403,10 @@ export const DOCTOR_CHECK_REGISTRY: readonly DoctorEntry[] = [
   storageManifestEntry,
   // GST-2731: facts pages (type: facts) with fact lines that carry no date (read-only; the fix asks the user for the dates).
   factsPagesEntry,
+  // GST-2988 PR 3: secret store entries, backups, keys and escrow, spool, held-back commits and side refs (read-only).
+  secretStoreEntry,
+  // GST-3216: who gbrain takes the owner to be; warns on shared identifiers and ambiguous owner pages (read-only).
+  ownerIdentityEntry,
   fenceIntegrityEntry,
   searchModeEntry,
 ];
@@ -539,7 +566,8 @@ export function runDoctorRegistry(ctx: DoctorContext, entries: readonly DoctorEn
             checks.push(...later.emits.filter((n) => !ctx.only || ctx.only.has(n)).map((n) => budgetUnknownCheck(n, ctx.connectError instanceof DoctorBudgetError ? ctx.connectError.elapsedMs : 0, ctx.deadline?.budgetMs ?? 0, 'overall')));
           }
         }
-        return ctx.only ? onlyResult(checks, ctx.only, true) : checks;
+        // An engine-free --only run stops at the database gate by design: only a failed or skipped connect stopped the database checks early.
+        return ctx.only ? onlyResult(checks, ctx.only, ctx.connectError !== undefined || ctx.connectionFailed === true || ctx.fastMode) : checks;
       }
       const pastDeadline = ctx.deadline?.deadlineAt != null && Date.now() >= ctx.deadline.deadlineAt;
       const produced = result.map((c) => {

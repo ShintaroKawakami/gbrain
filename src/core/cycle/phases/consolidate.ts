@@ -232,8 +232,8 @@ export async function runPhaseConsolidate(
     }
   }
 
-  // Pull every (source_id, entity_slug) bucket of unconsolidated facts.
-  // Uses the partial idx_facts_unconsolidated index.
+  // Pull every (source_id, entity_slug) bucket of unconsolidated facts whose entity is a live page (a take needs one, and
+  // GBRA-574: an unbacked name key has none, so its bucket is never read). Uses the partial idx_facts_unconsolidated index.
   let buckets: Array<{ source_id: string; entity_slug: string; count: number }>;
   try {
     buckets = await engine.executeRaw<{
@@ -246,6 +246,7 @@ export async function runPhaseConsolidate(
         AND (valid_until IS NULL OR valid_until > now())
         AND entity_slug IS NOT NULL
         AND entity_slug <> ''
+        AND EXISTS (SELECT 1 FROM pages bucket_page WHERE bucket_page.source_id = facts.source_id AND bucket_page.slug = facts.entity_slug AND bucket_page.deleted_at IS NULL)
         AND (attributed_to IS NULL OR attributed_to = 'user')
         AND ($2::boolean=false OR visibility='world')
         AND ($1::text IS NULL OR source_id=$1) AND NOT ${readersSourcedFactSql('facts')}
@@ -422,7 +423,7 @@ export async function runPhaseConsolidate(
         // Write gate on a new take: reject skips the cluster; hold records it for review and leaves the facts unconsolidated.
         const takeRow = { page_id: pageId, row_num: nextRowNum, claim: best.fact, kind: 'fact', holder: 'self', weight: clamp01(avgWeight),
           since_date: sinceISO, source: sources.slice(0, 200), active: true };
-        const gate = existing.length ? null : await gateNewTake(engine, derivation, takeRow, { sourceId: b.source_id, slug: b.entity_slug },
+        const gate = existing.length ? null : await gateNewTake(engine, derivation, takeRow, { sourceId: b.source_id, slug: b.entity_slug, pageId },
           gateConfig ??= (await loadImportSanityConfig(engine)).writeGate ?? DEFAULT_WRITE_GATE_CONFIG);
         if (gate && gate.action !== 'insert') { if (gate.action === 'hold') clustersGateHeld++; else clustersGateRejected++; continue; }
         const written = await derivedMaintenanceTransaction<{ created: boolean; takeId: number | null } | null>(engine, derivation, async tx => {
@@ -544,7 +545,7 @@ export async function runPhaseConsolidate(
  * inserts on `insert` (recording a flag receipt) and skips otherwise.
  */
 async function gateNewTake(engine: BrainEngine, derivation: { trust: WriteTrust; inputs: readonly TaintInput[] },
-  takeRow: { claim: string; source: string } & Record<string, unknown>, at: { sourceId: string; slug: string }, cfg: WriteGateConfig): Promise<GatedRowDecision> {
+  takeRow: { claim: string; source: string } & Record<string, unknown>, at: { sourceId: string; slug: string; pageId?: number }, cfg: WriteGateConfig): Promise<GatedRowDecision> {
   const gate = decideTakeWrite({ claim: takeRow.claim, source: takeRow.source }, { ...at, payload: takeRow,
     input: { tier: derivation.trust.tier, origin: derivation.trust.origin, requestId: null }, cfg });
   if (gate.action === 'hold') await derivedMaintenanceTransaction(engine, derivation, async tx => ({ result: await recordWriteGateHold(tx, gate.hold!), rows: [] }));

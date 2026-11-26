@@ -26,7 +26,7 @@
  */
 import type { OperationContext, ParamDef } from './contract.ts';
 import { opError } from './contract.ts';
-import { invalidParam, readFix } from './op-fix.ts';
+import { invalidParam, opTransport, paramUse, readFix } from './op-fix.ts';
 import { resultByteCap } from '../egress-budget.ts';
 import { FENCE, HEADING, HEADING_MAX_CHARS, clip } from '../page-window/window.ts';
 
@@ -54,12 +54,17 @@ const NL = 0x0a;
 
 export type SliceRequest = { kind: 'section'; heading: string } | { kind: 'grep'; term: string; context: number };
 
-const SECTION_EXAMPLE = { slug: 'notes/acme-example-log', section: 'Next steps' };
+const SECTION_EXAMPLE = { slug: 'notes/acme-example-log', section: 'Goals' };
 const GREP_EXAMPLE = { slug: 'notes/acme-example-log', grep: 'widget', context: 2 };
 
 /** The slice a get_page call asks for, or undefined; throws invalid_params on a malformed value or a conflicting param. */
 export function parseSliceRequest(ctx: Pick<OperationContext, 'remote' | 'transport'>, p: Record<string, unknown>): SliceRequest | undefined {
-  const bad = (param: string, message: string, example: unknown) => invalidParam(ctx, 'get_page', param, message, { example });
+  const bad = (param: string, message: string, example: { slug: string } & Record<string, string | number>) => invalidParam(ctx, 'get_page', param, message, {
+    def: GET_PAGE_SLICE_PARAMS[param],
+    call: opTransport(ctx) === 'cli'
+      ? `gbrain get ${example.slug} ${Object.entries(example).filter(([k]) => k !== 'slug').map(([k, v]) => paramUse(ctx, k, v)).join(' ')}`
+      : `get_page ${JSON.stringify(example)}`,
+  });
   if (p.section === undefined && p.grep === undefined) {
     if (p.context !== undefined) throw bad('context', 'get_page: context applies to grep; pass grep with it.', GREP_EXAMPLE);
     return undefined;
@@ -277,13 +282,25 @@ export async function readGrep(stream: AsyncIterable<Buffer>, term: string, cont
     }
   };
   let para: Paragraph | null = null;
+  let paraIsRow = false;
+  let inFence = false;
   for await (const l of documentLines(stream)) {
+    if (!l.continued && /^\s*(```|~~~)/.test(l.text)) inFence = !inFence;
     if (!l.continued && !l.text.trim()) {
       if (para) close(para);
       para = null;
       continue;
     }
-    if (!para) para = { line_start: l.line, line_end: l.line, text: '', match: false };
+    // A table has no blank lines, so each row is its own record instead of one paragraph (#9104).
+    const row = !l.continued && !inFence && l.text.trimStart().startsWith('|');
+    if (para && !l.continued && (row || paraIsRow)) {
+      close(para);
+      para = null;
+    }
+    if (!para) {
+      para = { line_start: l.line, line_end: l.line, text: '', match: false };
+      paraIsRow = row;
+    }
     const sep = para.text && !l.continued ? '\n' : '';
     if (para.text.length <= budget) para.text += sep + head(l.text, budget + 1 - para.text.length);
     para.line_end = l.line;

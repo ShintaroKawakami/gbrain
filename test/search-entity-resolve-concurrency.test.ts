@@ -31,6 +31,7 @@ function gatedEngine() {
   const engine = {
     kind: 'postgres',
     resolveAliases: (norms: string[]) => gate('aliases', new Map([[norms.find(n => n === 'acme example')!, [{ slug: 'companies/acme-example', source_id: 'default' }]]])),
+    resolveCaseSensitiveAliases: () => gate('case-sensitive aliases', []),
     executeRaw: (sql: string) => gate(sql.includes('page_aliases') ? 'case-sensitive aliases' : sql.includes('lower(title)') ? 'titles' : `other: ${sql.slice(0, 40)}`, []),
     getAllConfig: async () => { started.push('config (snapshot)'); return {}; },
     getConfig: async () => null,
@@ -72,12 +73,12 @@ describe('readMentionPolicy', () => {
     const statements: string[] = [];
     const engine = {
       kind: 'postgres',
-      executeRaw: async (sql: string) => { statements.push(sql); return Object.entries(config).map(([key, value]) => ({ key, value })); },
+      getConfigValues: async (keys: readonly string[]) => { statements.push(`getConfigValues(${keys.length})`); return Object.entries(config).map(([key, value]) => ({ key, value })); },
       getAllConfig: async () => { throw new Error('whole-table read not expected'); },
       getConfig: async () => { throw new Error('per-key read not expected'); },
     } as unknown as BrainEngine;
     const policy = await readMentionPolicy(engine);
-    expect(statements).toEqual(['SELECT key, value FROM config WHERE key = ANY($1::text[])']);
+    expect(statements).toEqual(['getConfigValues(8)']);
     expect(policy).toMatchObject({ enabled: true, typeAdds: ['product'], typeRemoves: ['person'], ignore: ['Acme'] });
   });
 

@@ -27,6 +27,7 @@ const load_image = () => import('./ops/image.ts') as Promise<Record<string, unkn
 const load_ingest_log = () => import('./ops/ingest-log.ts') as Promise<Record<string, unknown>>;
 const load_insights = () => import('./ops/insights.ts') as Promise<Record<string, unknown>>;
 const load_jobs = () => import('./ops/jobs.ts') as Promise<Record<string, unknown>>;
+const load_learned = () => import('./ops/learned.ts') as Promise<Record<string, unknown>>;
 const load_links = () => import('./ops/links.ts') as Promise<Record<string, unknown>>;
 const load_loops = () => import('./ops/loops.ts') as Promise<Record<string, unknown>>;
 const load_memory_settings = () => import('./ops/memory-settings.ts') as Promise<Record<string, unknown>>;
@@ -47,6 +48,7 @@ const load_salience = () => import('./ops/salience.ts') as Promise<Record<string
 const load_schema_packs = () => import('./ops/schema-packs.ts') as Promise<Record<string, unknown>>;
 const load_search_exact = () => import('./ops/search-exact.ts') as Promise<Record<string, unknown>>;
 const load_search = () => import('./ops/search.ts') as Promise<Record<string, unknown>>;
+const load_secrets = () => import('./ops/secrets.ts') as Promise<Record<string, unknown>>;
 const load_skillopt = () => import('./ops/skillopt.ts') as Promise<Record<string, unknown>>;
 const load_skills_catalog = () => import('./ops/skills-catalog.ts') as Promise<Record<string, unknown>>;
 const load_sources = () => import('./ops/sources.ts') as Promise<Record<string, unknown>>;
@@ -157,6 +159,7 @@ export const OPERATION_LOADERS: Record<string, readonly [() => Promise<Record<st
   "storage_list": [load_storage_manifest, "storageManifestOperations"],
   "storage_register": [load_storage_manifest, "storageManifestOperations"],
   "storage_update": [load_storage_manifest, "storageManifestOperations"],
+  "reveal_secret": [load_secrets, "secretsOperations"],
   "submit_job": [load_jobs, "jobsOperations"],
   "get_job": [load_jobs, "jobsOperations"],
   "wait_job": [load_jobs, "jobsOperations"],
@@ -267,4 +270,7 @@ export const OPERATION_LOADERS: Record<string, readonly [() => Promise<Record<st
   "questions_refresh": [load_questions, "questionsOperations"],
   "questions_unpin": [load_questions, "questionsOperations"],
   "mute_notice": [load_notices, "noticesOperations"],
+  "learned": [load_learned, "learnedOperations"],
+  "learned_keep": [load_learned, "learnedOperations"],
+  "learned_undo": [load_learned, "learnedOperations"],
 };

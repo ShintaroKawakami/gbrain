@@ -11,11 +11,13 @@ import { LATEST_VERSION } from '../migrate.ts';
 import type { ColumnTransform, Inventory, InventoryClass, InventoryEntry, LossKind } from './engine-graduation.types.ts';
 
 type EngineKind = 'pglite' | 'postgres';
+type InventoryEngines = InventoryEntry['engines'];
 
-const BOTH = { pglite: true, postgres: true } as const;
+// The Rust engine stores no relation yet, so every row says rust: false; a row that names its engines names all three.
+const BOTH: InventoryEngines = { pglite: true, postgres: true, rust: false };
 
 function entry(relation: string, cls: InventoryClass, lossKind: LossKind, reason: string,
-  extra: { kind?: 'table' | 'view'; engines?: { pglite: boolean; postgres: boolean }; transforms?: ColumnTransform[]; rowFilter?: string } = {}): InventoryEntry {
+  extra: { kind?: 'table' | 'view'; engines?: InventoryEngines; transforms?: ColumnTransform[]; rowFilter?: string } = {}): InventoryEntry {
   return {
     relation, kind: extra.kind ?? 'table', class: cls, engines: extra.engines ?? BOTH, lossKind,
     transforms: extra.transforms ?? [], ...(extra.rowFilter ? { rowFilter: extra.rowFilter } : {}), reason,
@@ -32,12 +34,14 @@ export const GRADUATION_INVENTORY: Inventory = {
     carry('access_group_members', 'security', 'Group membership behind readable_by group:<id> grants; without it carried pages would resolve readers differently.'),
     carry('access_groups', 'security', 'Access groups that readable_by names; carried so grants keep meaning the same people.'),
     carry('access_member_links', 'security', 'Links from attested outside identities (QM actors) to brain members; dropping them would unlink every attested person.'),
+    carry('access_handovers', 'security', 'Each member handover with the readers it moved; dropping them would lose the record undo restores and the commit ids of the rule writes.'),
     carry('access_member_sources', 'security', 'Personal sources bound to their members; dropping them would let every attested person read every member\'s personal source.'),
     carry('access_members', 'security', 'Brain members that readable_by member:<id> names, with each declared email; carried so per-page readers stay the same people.'),
     carry('access_pending_coverage', 'security', 'Prefixes that read as nobody while a narrowing stamps or a policy file is invalid; dropping them would reveal pages.'),
     carry('access_policy_migrations', 'operational', 'In-flight folder-policy store switches (git and database) and their receipts.'),
     carry('access_policy_revisions', 'security', 'Folder-policy revision history: desired rules, change class, proposer and approver.'),
     carry('access_policy_state', 'security', 'One row per source with a folder policy; the lock row access_rules and its history hang off.'),
+    carry('access_read_log', 'operational', 'Member and audience read audit (who read which page ids, kept a year); dropping it would lose the record of who read what.'),
     carry('access_rules', 'security', 'Applied folder rules that pages.folder_rule_ids names; on a repo-less source they are the record.'),
     carry('access_tokens', 'security', 'Legacy bearer tokens and their unified grant columns; token hashes keep authorizing on the target.'),
     carry('belief_commit_marks', 'user_data', 'Belief ledger post-commit observations; without them carried events would read as unproven (W2 visibility).'),
@@ -76,6 +80,7 @@ export const GRADUATION_INVENTORY: Inventory = {
     carry('dream_verdicts', 'operational', 'Paid dream triage verdict cache.'),
     carry('drift_decisions', 'user_data', 'Take drift decisions and when they were applied.'),
     carry('entity_identities', 'user_data', 'Established entity identities.'),
+    carry('entity_identity_reviews', 'user_data', "The owner's duplicate-people decisions: the record on a brain with no repository, else the projection of the committed decision files."),
     carry('eval_candidates', 'operational', 'Captured retrieval eval candidates.'),
     carry('eval_capture_failures', 'operational', 'Eval capture failure log.'),
     carry('eval_contradictions_cache', 'operational', 'Paid contradiction judge cache; rebuilding spends money.'),
@@ -95,6 +100,7 @@ export const GRADUATION_INVENTORY: Inventory = {
     carry('guest_sources', 'security', 'Which sources hold outside-guest notes, their writer list and tier ceiling; dropping it would let any writer add owner-tier pages there.'),
     carry('ingest_applied_captures', 'operational', 'Applied /ingest captures by job idempotency key, so a re-run or a replay of a capture after graduation still writes nothing.'),
     carry('ingest_log', 'operational', 'Ingestion log.'),
+    carry('learning_items', 'user_data', 'The learning ledger: what each night recorded and whether the owner was shown, kept, undid or answered it; that history cannot be rebuilt from the targets.'),
     carry('links', 'user_data', 'Page graph links.'),
     carry('link_edge_proposals', 'user_data', 'Relationship contradiction proposals with the user\'s accept/reject/undo decisions and the paid judge results behind them.'),
     carry('link_relationships', 'user_data', 'Temporal relationship state; recorded_at and retired_at keep when the brain first and last saw a relationship, which a rebuild cannot recover.'),
@@ -129,6 +135,7 @@ export const GRADUATION_INVENTORY: Inventory = {
     carry('op_checkpoint_paths', 'operational', 'Resumable operation checkpoints.'),
     carry('op_checkpoints', 'operational', 'Resumable operation checkpoints.'),
     carry('open_loops', 'user_data', 'Open loops and their status.'),
+    carry('owner_only_marks', 'security', 'Rows derived from a removed owner-only origin (GST-3032); dropping them would reopen those rows to other members.'),
     carry('page_aliases', 'user_data', 'Page aliases.'),
     carry('page_body_manifest', 'user_data', 'Segmented page bodies: which segment texts make each body generation, in order; without it a large page has no body.'),
     carry('page_body_staging_parts', 'operational', 'Raw parts of open upload sessions; without them a client resuming an upload starts over.'),
@@ -184,6 +191,8 @@ export const GRADUATION_INVENTORY: Inventory = {
     carry('retrieval_feedback', 'user_data', 'Ratings and citation signals with the weight change each applied.'),
     carry('retrieval_weights', 'user_data', 'Learned retrieval feedback weights per page and edge.'),
     carry('search_telemetry', 'operational', 'Search telemetry rollups.'),
+    carry('secret_store', 'user_data', 'Encrypted originals of redacted secrets; without them a marker can never be revealed or restored.'),
+    carry('secret_store_occurrence', 'user_data', 'Where each secret store entry was redacted; restore splices the original back at these places.'),
     carry('session_context_state', 'operational', 'Ambient recall session state.'),
     carry('shared_skill_delivery_batches', 'operational', 'Shared-skill delivery batches and acknowledgments.'),
     carry('shared_skill_heads', 'user_data', 'Shared-skill heads.'),
@@ -232,18 +241,21 @@ export const GRADUATION_INVENTORY: Inventory = {
     entry('code_traversal_cache', 'rebuild', 'operational', 'Code traversal cache; regenerated on the target.'),
     entry('page_view_digests', 'rebuild', 'operational', 'get_page view sizes and sha256 of segmented pages per revision; recomputed by the next read on the target.'),
 
-    entry('planner_stats_deltas', 'discard', 'operational', 'PGLite-only planner accounting.', { engines: { pglite: true, postgres: false } }),
-    entry('planner_stats_state', 'discard', 'operational', 'PGLite-only planner accounting.', { engines: { pglite: true, postgres: false } }),
+    entry('planner_stats_deltas', 'discard', 'operational', 'PGLite-only planner accounting.', { engines: { pglite: true, postgres: false, rust: false } }),
+    entry('planner_stats_state', 'discard', 'operational', 'PGLite-only planner accounting.', { engines: { pglite: true, postgres: false, rust: false } }),
     entry('gbrain_cycle_locks', 'discard', 'operational', 'TTL run locks; every row is an orphan under the kernel lock.'),
     entry('budget_reservations', 'discard', 'operational', 'Daily-ledger holds (src/core/budget/daily-ledger.ts) that expire within minutes; budget_ledger carries the day\'s totals, so a hold dropped mid-graduation stays counted as reserved until its UTC day ends (only tightening that day\'s cap).'),
     entry('subagent_rate_leases', 'discard', 'operational', 'Job-owned concurrency leases that expire.'),
+    entry('engine_writer_coverage_gaps', 'discard', 'operational', 'Swap eligibility gap rows (shadow mode only): when the source brain could not record a writer; the target starts its own window.'),
+    entry('engine_writer_observations', 'discard', 'operational', 'Swap eligibility writer observations (shadow mode only): which processes wrote the source brain; the target starts its own window.'),
+    entry('engine_writer_sessions', 'discard', 'operational', 'Swap eligibility writing connections (shadow mode only, recorded by the writer hooks on the source brain); the target starts its own window.'),
     entry('persistence_consumers', 'discard', 'operational', 'Per-process consumer heartbeat rows (#6317): each is renewed every 10 s by a live process on the source host and lapses in 90 s; the target\'s consumers write their own rows.'),
     entry('sync_notifier_leases', 'discard', 'operational', 'Host notifier lease (GBRA-133): renewed every heartbeat by a live resident on the source engine and lapses in two; the target\'s residents claim their own.'),
     entry('sync_notifier_sources', 'discard', 'operational', 'Per-source notifier runtime state and coverage (GBRA-133), written by the source engine\'s resident; the target\'s resident re-observes HEAD, and a classic source\'s syncer host is recorded again by its next sync on the target (until then it reads not monitored).'),
     entry('oauth_codes', 'discard', 'security', 'One-time authorization codes; an in-flight OAuth handshake restarts.'),
 
     entry('page_links', 'schema_owned', 'operational', 'View over links; each engine\'s schema defines it.', { kind: 'view' }),
-    entry('file_migration_ledger', 'schema_owned', 'operational', 'Postgres-only file storage migration ledger written by the target initSchema.', { engines: { pglite: false, postgres: true } }),
+    entry('file_migration_ledger', 'schema_owned', 'operational', 'Postgres-only file storage migration ledger written by the target initSchema.', { engines: { pglite: false, postgres: true, rust: false } }),
     entry('trust_policy_state', 'schema_owned', 'operational', 'Each engine\'s own trust policy generation counter (#5575 ENG-11), seeded by its migration; caches compare it per engine, so it is never copied or compared.'),
     entry('persistence_graduation', 'schema_owned', 'operational', 'Each engine\'s own graduation custody row (source: quiesced/cutover; target: copying..authoritative); never copied, digested or compared.'),
   ],

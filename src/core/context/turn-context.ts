@@ -31,6 +31,7 @@ import type { GBrainConfig } from '../config.ts';
 import { extractCandidatesFromWindow, type WindowTurn } from './entity-salience.ts';
 import {
   renderPointerLine,
+  GET_PAGE_REACH,
   resolveEntitiesToPointers,
   DEFAULT_MAX_POINTERS,
   type ReflexPointer,
@@ -153,6 +154,8 @@ export interface TurnContextResult {
   coreTrust?: { identity: string; unchanged: boolean };
   /** Context-pressure gate (pressure.ts), serve-sourced; an older serve omits it and no notice fires. */
   pressure?: import('./pressure.ts').PressureGate;
+  /** coreOnly requests: nightly learning's count line (learning/push.ts) when the note holds unseen items; an older serve omits it. */
+  learned?: import('./openclaw-core.ts').LearnedLine;
   /** Reflex pointers that survived suppression + budget. */
   pointers: ReflexPointer[];
   /**
@@ -513,7 +516,7 @@ function render(
   if (!pointers.length && !volunteered.length && !facts.length) return '';
   const lines: string[] = [TURN_CONTEXT_ENVELOPE];
   if (pointers.length) {
-    lines.push('', '## Brain pages mentioned this turn');
+    lines.push('', '## Brain pages mentioned this turn', GET_PAGE_REACH);
     for (const p of pointers) lines.push(renderPointerLine(p));
   }
   if (volunteered.length) {
@@ -636,7 +639,7 @@ async function assemblePack(
     for (const { name, sources: nameSources } of entities) {
       if (deadlineAt !== null && Date.now() >= deadlineAt) return;
       try {
-        const res = await buildEntityCard(engine, nameSources[0]!, name, { remote, eligibility: policy, omitQuarantined: opts.includeQuarantined !== true, sources: nameSources });
+        const res = await buildEntityCard(engine, nameSources[0]!, name, { remote, readerRemote: opts.untrusted === true, eligibility: policy, omitQuarantined: opts.includeQuarantined !== true, sources: nameSources });
         if (res.found && res.card && !acc.cards.some((c) => keyOf(c) === keyOf(res.card!))) {
           // The card's OWN source decides activation: a same-slug page in another source never gates or admits it.
           const ref = { source_id: res.card.entity.source_id, slug: res.card.entity.slug };
@@ -852,7 +855,7 @@ async function assembleDelta(
     for (const name of entities) {
       if (pastDeadline()) return;
       try {
-        const res = await buildEntityCard(engine, opts.sourceId, name, { remote, eligibility: { floor: policy.floor }, omitQuarantined: true });
+        const res = await buildEntityCard(engine, opts.sourceId, name, { remote, readerRemote: opts.untrusted === true, eligibility: { floor: policy.floor }, omitQuarantined: true });
         if (res.found && res.card) {
           for (const t of res.card.open_threads ?? []) {
             if (!since || (t.date && isAfter(t.date, since))) items.push(t);
@@ -935,8 +938,14 @@ const cardTitle = (c: EntityCard, untrusted: boolean): string => (untrusted && c
 /** #6723: a card from outside the pack's home source names its source, so a follow-up reads the right page. */
 const sourceNote = (c: EntityCard, home?: string): string =>
   home !== undefined && c.entity.source_id !== undefined && c.entity.source_id !== home ? ` (source ${c.entity.source_id})` : '';
+/** The exact entity and get_page calls for a card, naming its source when it is outside the pack's home. */
+const cardCalls = (c: EntityCard, home?: string): string => {
+  const source = sourceNote(c, home) ? `, source_id: ${JSON.stringify(c.entity.source_id)}` : '';
+  const slug = JSON.stringify(c.entity.slug);
+  return `use entity {name: ${slug}${source}} or get_page {slug: ${slug}${source}} before relying on details`;
+};
 export const renderCardLine = (c: EntityCard, home?: string, untrusted = false): string =>
-  `- **${cardTitle(c, untrusted)}** → \`${c.entity.slug}\`${sourceNote(c, home)}${c.summary ? ` — ${cardSummary(c, c.summary)}` : c.trust_tier ? ` — ${cardSummary(c, '')}` : ''}${c.relationship_note ? ` [${c.relationship_note}]` : ''} (use get_page/entity before relying on details)`;
+  `- **${cardTitle(c, untrusted)}** → \`${c.entity.slug}\`${sourceNote(c, home)}${c.summary ? ` — ${cardSummary(c, c.summary)}` : c.trust_tier ? ` — ${cardSummary(c, '')}` : ''}${c.relationship_note ? ` [${c.relationship_note}]` : ''} (${cardCalls(c, home)})`;
 export const renderThreadLine = (t: EntityOpenThread): string =>
   `- [${t.kind}] ${labeled(t, t.text)}${t.date ? ` (${t.date})` : ''}`;
 /** A quoted fact's fence closes on its own line (GST-687): its label rides the marker line and the slug and confidence follow the fence. */
